@@ -1,0 +1,8 @@
+{
+  "_comment": "DBCheck MCP Server 生产参数配置（非敏感，可随仓库分发）。环境变量 DBCHECK_MCP_* 可临时覆盖此处；dbc_config.json 的 mcp_server 节点为兜底。",
+  "subproc_pool_enabled": false,
+  "pool_min": 1,
+  "pool_max": 4,
+  "tool_timeout": 600,
+  "otel_enabled": false
+}

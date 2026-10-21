@@ -15,6 +15,7 @@ from modules.core.paths import PROJECT_ROOT
 import os, sys, platform, threading, datetime, json, uuid, time, re, random, sqlite3, secrets
 import signal
 import traceback
+import logging
 import io
 from pathlib import Path
 
@@ -52,6 +53,14 @@ from modules.core.brand import PRODUCT_NAME_EN, PRODUCT_NAME_ZH, PRODUCT_FULL_NA
 from flask_socketio import SocketIO, emit, join_room, leave_room
 import socket
 from i18n import t as _t
+
+# Oracle 连接测试纯函数（已抽离至独立模块）：测试连接子进程与主进程共用，
+# 避免子进程 import 整个 Flask 应用触发 Redis/调度器/保活线程等副作用。
+from modules.oracle_conn_test import (
+    _find_oracle_client_lib_dir,
+    _normalize_oracle_dsn,
+    _ct_oracle_pro,
+)
 
 
 # ── 启动 Banner（与 CLI 保持一致：仅图案 + 版权信息，不含菜单）──────
@@ -166,6 +175,7 @@ def _parse_report_filename(name: str):
         ('SQLServer巡检报告_', 'sqlserver'),
         ('TiDB巡检报告_', 'tidb'),
         ('IvorySQL巡检报告_', 'ivorysql'),
+        ('HaloDB巡检报告_', 'halodb'),
         ('YashanDB巡检报告_', 'yashandb'),
         ('GBase 8s巡检报告_', 'gbase'),
     ]
@@ -516,9 +526,10 @@ try:
     import modules.entrypoints.main_sqlserver as main_sqlserver
     import modules.entrypoints.main_tidb as main_tidb
     import modules.entrypoints.main_ivorysql as main_ivorysql
+    import modules.entrypoints.main_halodb as main_halodb
     import modules.entrypoints.main_kingbase as main_kingbase
 except ImportError:
-    main_mysql = main_pg = main_dm = main_oracle_full = main_sqlserver = main_tidb = main_ivorysql = None
+    main_mysql = main_pg = main_dm = main_oracle_full = main_sqlserver = main_tidb = main_ivorysql = main_halodb = None
 
 # 静态资源已收口到 assets/web/（阶段5：原 web_templates 下的 static/、icons/ 及各 png/ico/js 等）。
 # 因 static_url_path='/'，前端所有绝对引用（/static/...、/icons/...、/xxx.png 等）自动映射到 static_folder 根。
@@ -1027,6 +1038,25 @@ def _web_log_is_console_only(msg):
     return False
 
 
+# ── 中央日志中枢：把巡检 / 诊断等运行日志按分类写入 loghub ──
+def _hub_log(msg, category='inspection'):
+    """把一条运行日志写入 loghub（带 category 标签）。
+
+    智能分析 / AI 诊断类消息自动归到 ``diagnosis`` 分类，便于「运行日志」页按
+    巡检 / 定时巡检 / 智能诊断 / 监控 过滤查看。日志同时仍走原有 task['log'] 与
+    socketio 推送（保持巡检面板不变），此处只是额外汇聚到中枢。
+    """
+    if not msg:
+        return
+    _cat = category
+    if _cat == 'inspection' and ('智能分析' in msg or 'AI 诊断' in msg or msg.startswith('[诊断]')):
+        _cat = 'diagnosis'
+    try:
+        logging.getLogger('dbcheck.' + _cat).info(msg)
+    except Exception:
+        pass
+
+
 def run_inspection_task(task_id, db_info, inspector_name, template_id=None, chapter_ids=None):
     """
     通用数据库巡检任务函数
@@ -1035,6 +1065,12 @@ def run_inspection_task(task_id, db_info, inspector_name, template_id=None, chap
     """
     db_type = db_info.pop('_db_type', None)
     if not db_type:
+        # 兜底：无论是否走 socketio，都必须把任务状态置为 error，
+        # 否则前端 pollChatTaskStatus 会无限「正在巡检」。
+        _task = tasks.get(task_id)
+        if _task is not None:
+            _task['status'] = 'error'
+            _task['error_msg'] = '缺少数据库类型'
         socketio.emit('error', {'msg': '缺少数据库类型'}, room=task_id)
         return
 
@@ -1049,6 +1085,18 @@ def run_inspection_task(task_id, db_info, inspector_name, template_id=None, chap
         _db = db_info.get('database') or ''
         if _db in ('', 'postgres'):
             db_info['database'] = 'uxdb'
+
+    # HaloDB 数据库名修正：若未设置或为 postgres（从 PG 复制而来），则改为 halo
+    if db_type == 'halodb':
+        _db = db_info.get('database') or ''
+        if _db in ('', 'postgres'):
+            db_info['database'] = 'halo'
+
+    _insp_name = db_info.get('name') or db_info.get('ip') or '?'
+    _insp_host = f"{db_info.get('ip')}:{db_info.get('port')}"
+    print(f"[巡检] ===== 巡检任务开始：目标 {_insp_name} ({_insp_host}) db_type={db_type} =====\n"
+          f"[巡检] 说明：[Monitor] 开头的日志为本系统后台监控独立任务（周期性遍历全部已保存实例），"
+          f"并非本次巡检建立连接，请勿误判为串库。", flush=True)
 
     task_configs = {
         'mysql': dict(
@@ -1228,6 +1276,24 @@ def run_inspection_task(task_id, db_info, inspector_name, template_id=None, chap
             label_default='unknown',
             db_name_default='ivorysql',
         ),
+        'halodb': dict(
+            module_name='main_halodb',
+            connect_test=test_halodb_connection,
+            connect_test_args=lambda info: [info['ip'], info['port'], info['user'], info['password'], info.get('database', 'halo'), info.get('driver_version', '')],
+            getdata_args=lambda info: ([info['ip'], info['port'], info['user'], info['password']],
+                                       {'ssh_info': {}, 'template_id': template_id, 'database': info.get('database', 'halo'),
+                                        'driver_version': info.get('driver_version', '')}),
+            conn_attr='conn_db2',
+            smart_analyze='smart_analyze_pg',
+            filename_key='webui.halodb_report_filename',
+            history_db_type='halodb',
+            instance_prefix='halodb',
+            error_task_name='HaloDB',
+            log_start_key='webui.log_halodb_start',
+            err_module_key='webui.err_halodb_module',
+            label_default='unknown',
+            db_name_default='halo',
+        ),
         'kingbase': dict(
             module_name='main_kingbase',
             connect_test=test_kingbase_connection,
@@ -1333,6 +1399,8 @@ def run_inspection_task(task_id, db_info, inspector_name, template_id=None, chap
         msg = data.get('msg', '')
         if msg and task is not None:
             task.setdefault('log', []).append(msg)
+        if event == 'log':
+            _hub_log(msg, data.get('category', 'inspection'))
         emit(event, data, room=task_id)
 
     cfg = task_configs.get(db_type)
@@ -1363,6 +1431,7 @@ def run_inspection_task(task_id, db_info, inspector_name, template_id=None, chap
                 task['error_msg'] = err_msg
             _emit('error', {'msg': err_msg})
             _emit('done', {'msg': err_msg, 'task_id': task_id})
+            print(f"[巡检] ===== 巡检任务结束（失败：不支持类型 {db_type}）=====", flush=True)
             return
 
     _emit('log', {'msg': _t(cfg['log_start_key']).format(ts=_ts())})
@@ -1662,6 +1731,7 @@ def run_inspection_task(task_id, db_info, inspector_name, template_id=None, chap
         except Exception as e:
             _emit('log', {'msg': f"[警告] Pro 巡检记录保存失败: {e}"})
 
+        print(f"[巡检] ===== 巡检任务结束：{_insp_name} ({_insp_host}) db_type={db_type} =====", flush=True)
         _emit('done', {'msg': _t('webui.log_inspection_done').format(ver=ver), 'task_id': task_id,
                        'ai_advice': context.get('ai_advice', '')})
     except Exception as e:
@@ -1682,6 +1752,7 @@ def run_inspection_task(task_id, db_info, inspector_name, template_id=None, chap
         if task:
             task['status'] = 'error'
             task['error_msg'] = str(e)
+        print(f"[巡检] ===== 巡检任务结束（异常）：{_insp_name} ({_insp_host}) db_type={db_type} =====", flush=True)
 # ── 配置基线检查任务 ────────────────────────────────────────
 def run_config_task(task_id, db_info, output_format='txt'):
     """配置基线检查 Web UI 任务"""
@@ -1692,6 +1763,8 @@ def run_config_task(task_id, db_info, output_format='txt'):
         msg = data.get('msg', '')
         if msg and task is not None:
             task.setdefault('log', []).append(msg)
+        if event == 'log':
+            _hub_log(msg, data.get('category', 'inspection'))
         emit(event, data, room=task_id)
 
     _emit('log', {'msg': f"[{_ts()}] Starting Config Baseline check..."})
@@ -1719,14 +1792,14 @@ def run_config_task(task_id, db_info, output_format='txt'):
                 charset='utf8mb4'
             )
             db_label = 'OceanBase'
-        elif db_type in ('pg', 'ivorysql', 'kingbase'):
+        elif db_type in ('pg', 'ivorysql', 'halodb', 'kingbase'):
             import psycopg2
             conn = psycopg2.connect(
                 host=db_info['host'], port=int(db_info['port']),
                 user=db_info['user'], password=db_info['password'],
                 database=db_info.get('database', 'postgres')
             )
-            db_label = 'IvorySQL' if db_type == 'ivorysql' else 'PostgreSQL'
+            db_label = 'IvorySQL' if db_type == 'ivorysql' else ('HaloDB' if db_type == 'halodb' else 'PostgreSQL')
         else:
             raise ValueError(f"Unsupported db_type: {db_type}")
 
@@ -1781,6 +1854,8 @@ def run_index_task(task_id, db_info, output_format='txt'):
         msg = data.get('msg', '')
         if msg and task is not None:
             task.setdefault('log', []).append(msg)
+        if event == 'log':
+            _hub_log(msg, data.get('category', 'inspection'))
         emit(event, data, room=task_id)
 
     _emit('log', {'msg': f"[{_ts()}] Starting Index Health Analysis..."})
@@ -1808,14 +1883,14 @@ def run_index_task(task_id, db_info, output_format='txt'):
                 charset='utf8mb4'
             )
             db_label = 'OceanBase'
-        elif db_type in ('pg', 'ivorysql', 'kingbase'):
+        elif db_type in ('pg', 'ivorysql', 'halodb', 'kingbase'):
             import psycopg2
             conn = psycopg2.connect(
                 host=db_info['host'], port=int(db_info['port']),
                 user=db_info['user'], password=db_info['password'],
                 database=db_info.get('database', 'postgres')
             )
-            db_label = 'IvorySQL' if db_type == 'ivorysql' else 'PostgreSQL'
+            db_label = 'IvorySQL' if db_type == 'ivorysql' else ('HaloDB' if db_type == 'halodb' else 'PostgreSQL')
         else:
             raise ValueError(f"Unsupported db_type: {db_type}")
 
@@ -1890,7 +1965,7 @@ def test_oceanbase_connection(host, port, user, password, database=None, driver_
     return run_jdbc_test_subprocess('oceanbase', {
         'host': host, 'port': port, 'user': user, 'password': password,
         'database': database,
-    }, extra_kwargs={'driver_version': driver_version})
+    }, extra_kwargs={'driver_version': driver_version, 'database': database})
 
 def test_tidb_connection(host, port, user, password, database=None, driver_version=''):
     """测试 TiDB 连接（统一 JDBC 子进程优先，回退 pymysql）。"""
@@ -1934,71 +2009,19 @@ def test_ivorysql_connection(host, port, user, password, database='ivorysql', dr
         'database': database,
     }, extra_kwargs={'driver_version': driver_version})
 
-def _find_oracle_client_lib_dir(platform_key=None):
-    """查找 Oracle Client 的 lib 目录，支持根目录和 lib/ 子目录
 
-    搜索顺序：
-    1. drivers/oracle_client/<platform>/ 根目录
-    2. drivers/oracle_client/<platform>/lib/ 子目录
-    3. drivers/oracle_client/<platform>/ 下递归搜索标记文件
+def test_halodb_connection(host, port, user, password, database='halo', driver_version=''):
+    """测试 HaloDB（羲和）连接（统一 JDBC：兼容 PG 协议，复用 PostgreSQL 驱动）。
 
-    Returns:
-        str or None: 找到的 lib 目录路径，如果没找到返回 None
+    与 IvorySQL 同套路：独立子进程内建连（JVM 不进主进程，避免钉死
+    gevent hub）；JDBC 不可用时 jdbc_test_cli 内回退 psycopg2。
     """
-    import platform as _pl
-    if platform_key is None:
-        sys_name = _pl.system().lower()
-        arch = _pl.machine().lower()
-        if sys_name == 'windows':
-            platform_key = 'windows_x64'
-        elif sys_name == 'linux':
-            platform_key = 'linux_x64'
-        elif sys_name == 'darwin':
-            platform_key = 'darwin_arm64' if arch in ('arm64', 'aarch64') else 'darwin_x64'
-        else:
-            return None
+    return run_jdbc_test_subprocess('halodb', {
+        'host': host, 'port': port, 'user': user, 'password': password,
+        'database': database,
+    }, extra_kwargs={'driver_version': driver_version})
 
-    # 确定标记文件
-    if 'windows' in platform_key:
-        marker = 'oci.dll'
-    elif 'linux' in platform_key:
-        marker = 'libclntsh.so'
-    else:
-        marker = 'libclntsh.dylib'
-
-    # 基础目录
-    import sys
-    if getattr(sys, 'frozen', False):
-        base_dir = os.path.dirname(sys.executable)
-    else:
-        base_dir = BASE_DIR
-
-    client_dir = os.path.join(base_dir, 'drivers', 'oracle_client', platform_key)
-
-    if not os.path.isdir(client_dir):
-        return None
-
-    # 1. 先检查根目录
-    if os.path.isfile(os.path.join(client_dir, marker)):
-        return client_dir
-
-    # 2. 再检查 lib/ 子目录（Oracle 完整客户端常见结构）
-    lib_dir = os.path.join(client_dir, 'lib')
-    if os.path.isdir(lib_dir) and (
-        os.path.isfile(os.path.join(lib_dir, marker)) or
-        os.path.isfile(os.path.join(lib_dir, marker + '.11.1')) or
-        any(f.startswith(marker) for f in os.listdir(lib_dir) if marker in f)
-    ):
-        return lib_dir
-
-    # 3. 自动发现子目录（递归搜索，处理 instantclient_xx_x 子目录）
-    for root, dirs, files in os.walk(client_dir):
-        if marker in files:
-            return root
-
-    return None
-
-
+# (函数已迁移至 modules.oracle_conn_test：def _find_oracle_client_lib_dir)
 def test_oracle_connection(host, port, user, password, service_name='ORCL', sysdba=False, jdbc_url=None):
     try:
         import oracledb
@@ -2427,10 +2450,17 @@ def _ct_oceanbase(data, flavor):
                                             data['password'], data.get('database'),
                                             data.get('driver_version', '') or '')
         return {'ok': ok, 'msg': msg}
-    import pymysql
-    _db = data.get('database') or 'sys'
-    pymysql.connect(host=data['host'], port=data['port'], user=_ob_user,
-                    password=data['password'], database=_db, connect_timeout=10).close()
+    # pro flavor（数据源管理页面）：原生 pymysql 直连。复用 OceanBase 专属回退，
+    # 捕获 (2013, 'Lost connection ...') 等并给出针对 OB 的诊断（租户格式 / host
+    # 白名单 / 建议装官方 JDBC 驱动），而非抛一个裸的 pymysql 错误元组。
+    from modules.jdbc_test_cli import _oceanbase_native_fallback
+    # 测试连接只需验证可连，不强制指定库（避免 'sys' 在非 sys 租户下引发误判）；
+    # 仅当用户显式填了库名时才带上。首个查询 SELECT VERSION() 与库无关。
+    _db = data.get('database') or None
+    ok, msg = _oceanbase_native_fallback(data['host'], data['port'], _ob_user,
+                                        data['password'], _db, 'OceanBase 原生连接失败')
+    if not ok:
+        return {'ok': False, 'msg': msg}
     return _conn_ok('pro')
 
 
@@ -2462,6 +2492,19 @@ def _ct_ivorysql(data, flavor):
     return _conn_ok('pro')
 
 
+def _ct_halodb(data, flavor):
+    """HaloDB（羲和）连接测试：regular 走 JDBC 子进程（复用 PG 驱动）；pro 走 psycopg2 直连。"""
+    _db = data.get('database') or 'halo'
+    if flavor == 'regular':
+        ok, msg = test_halodb_connection(data['host'], data['port'], data['user'],
+                                         data['password'], _db, data.get('driver_version', '') or '')
+        return {'ok': ok, 'msg': msg}
+    import psycopg2
+    psycopg2.connect(host=data['host'], port=data['port'], user=data['user'],
+                     password=data['password'], dbname=_db, connect_timeout=10).close()
+    return _conn_ok('pro')
+
+
 def _ct_kingbase(data, flavor):
     """KingbaseES 连接测试：regular 走 KingbaseES JDBC 子进程（jdbc:kingbase8:// +
     com.kingbase8.jdbc.Driver，类型 'kingbase'）；pro 走 psycopg2 直连。
@@ -2481,169 +2524,8 @@ def _ct_kingbase(data, flavor):
     return _conn_ok('pro')
 
 
-def _normalize_oracle_dsn(dsn, host, port):
-    """规范化 Oracle TNS 描述符中的占位符。
-
-    用户常把 DSN 写成 ``(DESCRIPTION=(HOST=host)(PORT=1521)(CONNECT_DATA=...))``，
-    其中 ``HOST=host`` 是占位符，需要替换为表单中填写的真实地址。若 DSN 里
-    已经写了明确的非占位符地址，则保持不变。
-    """
-    import re as _re
-
-    if not (dsn and str(dsn).strip().upper().startswith('(DESCRIPTION')):
-        return dsn
-
-    def _replace_host(m):
-        val = m.group(1).strip().lower()
-        if val in ('host', 'localhost', '127.0.0.1', ''):
-            return f'(HOST={host})'
-        return m.group(0)
-
-    def _replace_port(m):
-        val = m.group(1).strip()
-        if val.lower() == 'port':
-            return f'(PORT={port})'
-        try:
-            int(val)
-        except (TypeError, ValueError):
-            return f'(PORT={port})'
-        return m.group(0)
-
-    dsn = _re.sub(r'\(HOST\s*=\s*([^)]*)\)', _replace_host, dsn, flags=_re.IGNORECASE)
-    dsn = _re.sub(r'\(PORT\s*=\s*([^)]*)\)', _replace_port, dsn, flags=_re.IGNORECASE)
-    return dsn
-
-
-def _ct_oracle_pro(data):
-    """复刻原 /api/pro/datasources/test-connection 中 oracle 分支（含 SSH / thick mode）。
-
-    修复点：
-    1. 用户填写 DSN 描述符且启用 SSH 时，必须把 DSN 里的 HOST/PORT 替换为 SSH 隧道
-       本地端口，否则 oracledb 仍按原 DSN 直连，导致"配了 SSH 仍超时"。
-    2. 未启用 SSH 时，DSN 里的占位符（如 HOST=host）也要替换为表单填写的真实地址，
-       否则会出现"填了主机地址却仍连 host"的误导性超时。
-    3. 隧道本地监听 127.0.0.1，DSN 用 127.0.0.1 避免 localhost 被解析到 IPv6。
-    4. 错误提示区分"未配 SSH"、"已配 SSH 但隧道后仍连不上"以及 DSN 占位符问题。
-    5. thick mode 失败等异常路径也确保关闭 SSH 隧道。
-    """
-    import oracledb
-    import re as _re
-
-    _jdbc = (data.get('jdbc_url') or '').strip()
-    _has_dsn = bool(_jdbc and _jdbc.lstrip().upper().startswith('(DESCRIPTION'))
-    if _has_dsn:
-        # 先把 DSN 里的占位符（HOST=host / PORT=port）换成表单真实地址
-        dsn = _normalize_oracle_dsn(_jdbc, data['host'], int(data['port']))
-        # 防御性检查：若还有明显占位符未替换，立即给出明确错误，避免连到不存在的 host
-        if _re.search(r'\(HOST\s*=\s*host\s*\)', dsn, flags=_re.IGNORECASE):
-            return {'ok': False, 'error': f'DSN 中 HOST 占位符未解析（当前 DSN: {dsn}），请检查连接串或清空 DSN 使用上方主机地址'}
-    else:
-        dsn = f"{data['host']}:{data['port']}/{data.get('service_name', '')}" if data.get('service_name') \
-            else f"{data['host']}:{data['port']}"
-
-    ssh_host = data.get('ssh_host', '')
-    _tunnel = None
-    try:
-        if ssh_host:
-            try:
-                from modules.ssh import SSHTunnel
-                _tunnel = SSHTunnel(
-                    ssh_host=ssh_host,
-                    ssh_port=int(data.get('ssh_port', 22)),
-                    ssh_user=data.get('ssh_user', 'root'),
-                    ssh_password=data.get('ssh_password', ''),
-                    remote_host=data['host'],
-                    remote_port=int(data['port']),
-                )
-                _tunnel.__enter__()
-                _local = _tunnel.local_port
-                if _has_dsn:
-                    # 把 DSN 中的 HOST/PORT 替换为隧道本地端点，确保流量走 SSH
-                    dsn = _re.sub(r'\(HOST\s*=\s*[^)]+\)', '(HOST=127.0.0.1)', dsn, flags=_re.IGNORECASE)
-                    dsn = _re.sub(r'\(PORT\s*=\s*\d+\)', f'(PORT={_local})', dsn, flags=_re.IGNORECASE)
-                else:
-                    dsn = f"127.0.0.1:{_local}/{data.get('service_name', '')}" if data.get('service_name') \
-                        else f"127.0.0.1:{_local}"
-            except Exception as te:
-                return {'ok': False, 'error': f'SSH 隧道建立失败: {te}'}
-
-        params = {"user": data['user'], "password": data['password'], "dsn": dsn,
-                  "tcp_connect_timeout": 15}
-        if data.get('sysdba'):
-            params["mode"] = oracledb.SYSDBA
-
-        def _try_connect():
-            try:
-                conn = oracledb.connect(**params)
-            except TypeError as te:
-                # 极个别 oracledb 旧版本不认 tcp_connect_timeout，去掉后重试（子进程超时仍兜底）
-                if 'tcp_connect_timeout' in str(te):
-                    params.pop('tcp_connect_timeout', None)
-                    conn = oracledb.connect(**params)
-                else:
-                    raise
-            conn.close()
-
-        try:
-            _try_connect()
-            return {'ok': True, 'message': '连接成功'}
-        except Exception as e:
-            err_msg = str(e)
-            if 'DPY-3010' in err_msg or 'DPY-3015' in err_msg:
-                _thick_ok = False
-                try:
-                    oracledb.init_oracle_client()
-                    _thick_ok = True
-                except Exception:
-                    pass
-                if not _thick_ok:
-                    _lib_dir = _find_oracle_client_lib_dir()
-                    if _lib_dir:
-                        try:
-                            oracledb.init_oracle_client(lib_dir=_lib_dir)
-                            _thick_ok = True
-                        except Exception:
-                            pass
-                if not _thick_ok:
-                    try:
-                        import json
-                        with open(os.path.join(BASE_DIR, 'dbc_config.json')) as f:
-                            _cfg = json.load(f)
-                        _lib_dir = _cfg.get('oracle_client_lib_dir', '')
-                        if _lib_dir and os.path.isdir(_lib_dir):
-                            oracledb.init_oracle_client(lib_dir=_lib_dir)
-                            _thick_ok = True
-                    except Exception:
-                        pass
-                if not _thick_ok:
-                    return {'ok': False, 'error': 'Oracle 11g 及以下版本需要 Oracle Instant Client。'
-                                                '请通过左侧导航"Oracle Client"设置页，点击"一键下载并安装"按钮自动下载安装。'}
-                try:
-                    _try_connect()
-                    return {'ok': True, 'message': '连接成功'}
-                except Exception as e2:
-                    return {'ok': False, 'error': f'Oracle 连接失败（thick mode）: {e2}'}
-            elif 'unexpected keyword argument' in err_msg.lower() or type(e).__name__ == 'TypeError':
-                # 驱动连接参数错误（如传入了 oracledb 不认识的 kwarg），不应误判为「连接超时」
-                return {'ok': False, 'error': f'Oracle 驱动连接参数错误: {type(e).__name__}: {err_msg[:300]}'}
-            elif 'timed out' in err_msg.lower() or 'timeout' in err_msg.lower():
-                # 把实际用于连接的 DSN/地址 + oracledb 原始异常暴露出来，方便排查：
-                # 真 TCP 超时（DPY-6001/ORA-12170）vs 握手/权限问题被误判为超时（如 SYSDBA+服务名）
-                _safe_dsn = _re.sub(r'(PASSWORD\s*=\s*)[^)]+', r'\1***', str(dsn),
-                                    flags=_re.IGNORECASE) if isinstance(dsn, str) else str(dsn)
-                _detail = f'（原始异常: {type(e).__name__}: {err_msg[:400]}）'
-                if ssh_host:
-                    return {'ok': False, 'error': f'连接超时，SSH 隧道已建立但无法访问 Oracle（实际 DSN: {_safe_dsn}）{_detail}，'
-                                                f'请检查数据库监听地址、Service Name/SID 及防火墙'}
-                return {'ok': False, 'error': f'连接超时，Oracle 可能无法直连（实际 DSN: {_safe_dsn}）{_detail}，'
-                                              f'请在数据源中配置 SSH，或确认上方主机地址/端口/服务名/SYSDBA 是否正确'}
-            else:
-                return {'ok': False, 'error': str(e)}
-    finally:
-        if _tunnel:
-            _tunnel.close()
-
-
+# (函数已迁移至 modules.oracle_conn_test：def _normalize_oracle_dsn)
+# (函数已迁移至 modules.oracle_conn_test：def _ct_oracle_pro)
 def _ct_oracle(data, flavor):
     """Oracle 连接测试 —— 走子进程隔离。
 
@@ -2861,12 +2743,14 @@ def _ct_mongodb(data, flavor):
 #   - 等待期间用 gevent.sleep 让出执行权 → 界面全程可用；
 #   - 超时直接杀子进程树，JVM 随之消失，主进程不受任何残留影响。
 JDBC_SUBPROCESS_DB_TYPES = ('hgdb', 'db2', 'sqlserver_jdbc', 'oracle_jdbc', 'oracle', 'ivorysql', 'pg', 'kingbase', 'yashandb', 'mysql', 'mariadb', 'tidb', 'oceanbase')
-JDBC_TEST_TIMEOUT = 30  # 秒；需覆盖 JVM 冷启动(3~10s) + JDBC 登录超时(10~15s)
+JDBC_TEST_TIMEOUT = 50  # 秒；需覆盖 JVM 冷启动(3~10s) + JDBC 登录超时(10~15s)；
+# Oracle 走 thin(16s 上限) → thick(12s 上限) 两段尝试（见 oracle_conn_test._THIN_TOTAL_S），
+# 加上杀软对新版未签名 exe 每次子进程 spawn 的实时扫描，30s 在部分用户环境不够。
 
 # 需要整条巡检任务隔离到子进程的数据库类型（均依赖进程内 JVM/JPype）。
-# 与 driver_registry.JDBC_PLUGIN_TO_CATALOG 对齐：6 个 JDBC 插件 + 核心内置 dm/gbase/ivorysql，
+# 与 driver_registry.JDBC_PLUGIN_TO_CATALOG 对齐：JDBC 插件 + 核心内置 dm/gbase/ivorysql，
 # 任何新增 JDBC 类型必须同步加入，否则主进程内启 JVM 会钉死 gevent hub。
-JVM_INSPECTION_DB_TYPES = ('hgdb', 'db2', 'sqlserver_jdbc', 'oracle_jdbc', 'dm', 'gbase', 'clickhouse', 'uxdb', 'ivorysql', 'pg', 'kingbase', 'yashandb', 'mysql', 'mariadb', 'tidb', 'oceanbase')
+JVM_INSPECTION_DB_TYPES = ('hgdb', 'db2', 'sqlserver_jdbc', 'oracle_jdbc', 'dm', 'gbase', 'clickhouse', 'uxdb', 'ivorysql', 'halodb', 'pg', 'kingbase', 'yashandb', 'mysql', 'mariadb', 'tidb', 'oceanbase', 'vastbase')
 JDBC_INSPECTION_TIMEOUT = 3600  # 巡检任务整体硬超时（秒）
 
 
@@ -2976,9 +2860,18 @@ def run_jdbc_test_subprocess(db_type, data, extra_kwargs=None, timeout=JDBC_TEST
             while proc.poll() is None:
                 if time.monotonic() >= deadline:
                     _kill_process_tree(proc)
+                    # 附带子进程日志尾段：里程碑打印（如 oracle thin/thick 阶段）
+                    # 能直接暴露卡在哪一步，而非只有一句笼统超时
+                    _tail = ''
+                    try:
+                        with open(_out_path, 'r', encoding='utf-8', errors='replace') as _f:
+                            _tail = (_f.read() or '')[-500:].strip()
+                    except OSError:
+                        pass
                     return False, (f'连接测试超时（已超过 {timeout} 秒）。'
                                    f'请检查主机地址、端口与网络连通性，'
-                                   f'并确认 JDBC 驱动 jar 与 Java 运行环境已就绪。')
+                                   f'并确认 JDBC 驱动 jar 与 Java 运行环境已就绪。'
+                                   + (f'\n\n子进程日志尾段：\n{_tail}' if _tail else ''))
                 _cooperative_sleep(0.05)
 
         # 子进程可能在写完结果后才退出，输出文件此时已完整
@@ -3274,6 +3167,21 @@ def _ct_uxdb(data, flavor):
     return _jdbc_conn_result(ok, msg, flavor, 'UXDB (JDBC)')
 
 
+def _ct_vastbase(data, flavor):
+    """Vastbase G100 (JDBC) 连接测试 —— 走子进程隔离（JPype 启 JVM 钉死 gevent hub）。
+
+    与 uxdb 同源：vastbase 是 JPype 插件型 db_type（无 _jdbc 后缀），若不注册
+    tester，_plugin_conn_fallback 的 *_jdbc 守卫拦不住它 → 在主进程（gevent
+    monkey-patch）内 startJVM，原生线程钉死 hub，前端表现为「测试连接中」永远
+    不返回。收口子进程隔离后即可正常返回。
+    """
+    _kwargs = dict(database=data.get('database', ''),
+                   jdbc_url=data.get('jdbc_url') or None,
+                   driver_version=data.get('driver_version') or None)
+    ok, msg = run_jdbc_test_subprocess('vastbase', data, _kwargs)
+    return _jdbc_conn_result(ok, msg, flavor, 'Vastbase (JDBC)')
+
+
 def _ct_db2(data, flavor):
     _kwargs = dict(database=data.get('database', ''),
                    jdbc_url=data.get('jdbc_url') or None,
@@ -3384,6 +3292,7 @@ register_connection_tester('mariadb', _ct_mariadb)
 register_connection_tester('oceanbase', _ct_oceanbase)
 register_connection_tester('pg', _ct_pg)
 register_connection_tester('ivorysql', _ct_ivorysql)
+register_connection_tester('halodb', _ct_halodb)
 register_connection_tester('kingbase', _ct_kingbase)
 register_connection_tester('oracle', _ct_oracle)
 register_connection_tester('dm', _ct_dm)
@@ -3403,6 +3312,8 @@ register_connection_tester('oracle_jdbc', _ct_oracle_jdbc)
 # clickhouse / uxdb 同为 JPype 插件，此前未注册 tester → 主进程起 JVM 卡死，收口子进程
 register_connection_tester('clickhouse', _ct_clickhouse)
 register_connection_tester('uxdb', _ct_uxdb)
+# vastbase 同为 JPype 插件型（无 _jdbc 后缀，fallback 守卫拦不住），必须注册子进程 tester
+register_connection_tester('vastbase', _ct_vastbase)
 
 
 def test_ssh_connection(host, port=22, username='root', password=None, key_file=None, key_password=None):
@@ -5315,15 +5226,15 @@ def api_start_config_baseline():
     try:
         data = request.json
         db_type = data.get('db_type', 'mysql')
-        if db_type not in ('mysql', 'pg', 'ivorysql', 'oceanbase'):
-            return jsonify({'ok': False, 'msg': 'Only MySQL, PostgreSQL and IvorySQL are supported'})
+        if db_type not in ('mysql', 'pg', 'ivorysql', 'halodb', 'oceanbase'):
+            return jsonify({'ok': False, 'msg': 'Only MySQL, PostgreSQL, IvorySQL, HaloDB are supported'})
 
         db_info = {
             'host': data.get('host', ''),
             'port': int(data.get('port', 0) or (3306 if db_type == 'mysql' else 2881 if db_type == 'oceanbase' else 5432)),
             'user': data.get('user', ''),
             'password': data.get('password', ''),
-            'database': data.get('database') or ('ivorysql' if db_type == 'ivorysql' else ('postgres' if db_type == 'pg' else '')),
+            'database': data.get('database') or ('ivorysql' if db_type == 'ivorysql' else ('halo' if db_type == 'halodb' else ('postgres' if db_type == 'pg' else ''))),
             'label': data.get('name', data.get('host', 'unknown')),
             'db_type': db_type,
         }
@@ -5419,6 +5330,8 @@ def _run_server_inspect_task(task_id, ssh_info):
         msg = data.get('msg', '')
         if msg and task is not None:
             task.setdefault('log', []).append(msg)
+        if event == 'log':
+            _hub_log(msg, data.get('category', 'inspection'))
         emit(event, data, room=task_id)
 
     try:
@@ -5665,15 +5578,15 @@ def api_start_index_health():
     try:
         data = request.json
         db_type = data.get('db_type', 'mysql')
-        if db_type not in ('mysql', 'pg', 'ivorysql', 'oceanbase'):
-            return jsonify({'ok': False, 'msg': 'Only MySQL, PostgreSQL and IvorySQL are supported'})
+        if db_type not in ('mysql', 'pg', 'ivorysql', 'halodb', 'oceanbase'):
+            return jsonify({'ok': False, 'msg': 'Only MySQL, PostgreSQL, IvorySQL, HaloDB are supported'})
 
         db_info = {
             'host': data.get('host', ''),
             'port': int(data.get('port', 0) or (3306 if db_type == 'mysql' else 2881 if db_type == 'oceanbase' else 5432)),
             'user': data.get('user', ''),
             'password': data.get('password', ''),
-            'database': data.get('database') or ('ivorysql' if db_type == 'ivorysql' else ('postgres' if db_type == 'pg' else '')),
+            'database': data.get('database') or ('ivorysql' if db_type == 'ivorysql' else ('halo' if db_type == 'halodb' else ('postgres' if db_type == 'pg' else ''))),
             'label': data.get('name', data.get('host', 'unknown')),
             'db_type': db_type,
         }
@@ -6061,21 +5974,24 @@ def monitor_screen_page():
     # 大屏页文案走 i18n：一次取齐注入模板（JS 内再经 tojson 使用）
     _keys = ['probe', 'subtitle', 'k_online', 'k_warn', 'k_crit', 'k_conn', 'k_qps', 'k_tps',
              'btn_fs', 'topo_title', 'qps_top', 'conn_util_top', 'conns_top', 'trend',
-             'tbs_top', 'repl_top', 'lock_top', 'slowq_top', 'health',
+             'tbs_top', 'tbs_used_top', 'tbs_cap_top', 'tbs_analyze_hint', 'repl_top', 'repl_no_data', 'lock_top', 'slowq_top', 'health',
              'trend_global', 'trend_by_inst', 'fresh_label', 'fresh_stale',
              'st_ok', 'st_warn', 'st_crit', 'st_down', 'st_pending', 'st_unsupported',
-             'node_status', 'node_conn', 'node_slowq', 'node_tbs', 'node_repl',
+             'node_status', 'node_conn', 'node_slowq', 'node_tbs', 'node_cap', 'node_repl',
              'no_data', 'loading', 'loading_hard', 'loading_banner',
              'fetch_error', 'guide_no_collector', 'guide_no_instance',
              'ticker_label', 'ticker_empty', 'running', 'stopped',
              'instances', 'fold_tip', 'total_n', 'n_hosts',
              'd_status', 'd_type', 'd_addr', 'd_conn', 'd_active', 'd_util', 'd_qps',
-             'd_slowq', 'd_locks', 'd_repl', 'd_tbs', 'd_cache',
+             'd_slowq', 'd_locks', 'd_repl', 'd_tbs', 'd_cap', 'd_cache',
              'hint_vss', 'hint_stat', 'ssh', 'err_title',
              'th_title', 'th_conn_util', 'th_tbs_free', 'th_repl_lag', 'th_locks',
              'th_warn', 'th_crit', 'th_save', 'th_reset', 'th_saved', 'th_btn', 'th_tip',
              'hist_btn', 'hist_tip', 'hist_live', 'hist_1h', 'hist_6h', 'hist_24h', 'hist_7d', 'hist_title',
-             'dt_overview', 'dt_conn', 'dt_slow', 'dt_tbs', 'dt_loading', 'dt_no_conn', 'dt_no_slow', 'dt_rows']
+             'dt_overview', 'dt_conn', 'dt_slow', 'dt_tbs', 'dt_loading', 'dt_no_conn', 'dt_no_slow', 'dt_rows',
+             'dt_conn_pending', 'dt_capacity', 'dt_conn_nosql', 'dt_slow_nosql',
+             'hist_ns', 'view_matrix', 'view_topo', 'f_all', 'crit_first', 'matrix_title',
+             'role_primary', 'role_standby', 'adg_link']
     S = {k: _t('webui.screen_' + k) for k in _keys}
     return render_template('monitor_screen.html', version=__version__, S=S)
 
@@ -6108,6 +6024,8 @@ def api_dashboard_instance(iid):
             'info': node,
             'conn_rows': snap[iid].get('conn_rows') or [],
             'slow_rows': snap[iid].get('slow_rows') or [],
+            'conn_err': snap[iid].get('conn_err') or '',
+            'conn_no_sessions': bool(snap[iid].get('conn_no_sessions')),
         })
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)[:300], 'iid': iid})
@@ -6969,6 +6887,70 @@ def api_pro_import_instances():
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
+@app.route('/api/pro/instances/export-json', methods=['GET'])
+def api_pro_export_instances_json():
+    """导出数据源为 JSON（升级/换机迁移）。
+
+    with_password=1 时导出明文密码——仅管理员可用；普通用户导出的文件
+    不含密码字段，导入后需重新录入。可见性过滤与 CSV 导出一致。
+    """
+    try:
+        import json
+        from modules.pro import get_instance_manager
+        from modules.access import principal_from_session, filter_visible
+        im = get_instance_manager()
+        user = principal_from_session()
+        visible = filter_visible(
+            user, im.get_all_instances(mask_password=True), 'instance')
+        ids = [i.get('id') for i in visible]
+        with_pwd = request.args.get('with_password') in ('1', 'true')
+        if with_pwd and not session.get('is_admin', False):
+            return jsonify({'ok': False, 'error': '含密码导出仅管理员可用'}), 403
+        payload = im.export_json(include_password=with_pwd, ids=ids)
+        fname = 'dbcheck-datasources-%s.json' % datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+        resp = Response(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            mimetype='application/json')
+        resp.headers['Content-Disposition'] = 'attachment; filename="%s"' % fname
+        return resp
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/pro/instances/import-json', methods=['POST'])
+def api_pro_import_instances_json():
+    """导入数据源 JSON（merge：同 id 覆盖更新，新数据源新增，密码重新加密）。"""
+    try:
+        import json
+        from modules.pro import get_instance_manager
+        from modules.access import principal_from_session, set_owner
+        data = request.get_json(silent=True) or {}
+        payload = data.get('payload')
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                return jsonify({'ok': False, 'error': 'JSON 解析失败，请确认选择的是导出文件'})
+        if not isinstance(payload, dict):
+            return jsonify({'ok': False, 'error': '请提供导出文件内容'})
+        im = get_instance_manager()
+        before = {i.get('id') for i in im.get_all_instances()}
+        result = im.import_json(payload)
+        try:
+            user = principal_from_session()
+            for iid in {i.get('id') for i in im.get_all_instances()} - before:
+                set_owner('instance', iid, user)
+        except Exception as _own_err:
+            print('[access] JSON 导入数据源归属登记失败: ' + str(_own_err))
+        return jsonify(result)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
 # ══════════════════════════════════════════════════════════════
 #  Pro 数据源管理 API
 # ══════════════════════════════════════════════════════════════
@@ -7463,10 +7445,10 @@ def api_ds_databases(ds_id):
             cur.execute("SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA ORDER BY SCHEMA_NAME")
             databases = [r[0] for r in cur.fetchall()]
             conn.close()
-        elif db_type in ('postgresql', 'ivorysql', 'kingbase', 'hgdb'):
+        elif db_type in ('postgresql', 'ivorysql', 'halodb', 'kingbase', 'hgdb'):
             import psycopg2
-            # kingbase 默认库名为 kingbase，HGDB 默认库名为 highgo，PG/IvorySQL 为 postgres
-            _pg_default_db = 'kingbase' if db_type == 'kingbase' else ('highgo' if db_type == 'hgdb' else ('ivorysql' if db_type == 'ivorysql' else 'postgres'))
+            # kingbase 默认库名为 kingbase，HGDB 默认库名为 highgo，HaloDB 默认业务库为 halo，PG/IvorySQL 为 postgres
+            _pg_default_db = 'kingbase' if db_type == 'kingbase' else ('highgo' if db_type == 'hgdb' else ('ivorysql' if db_type == 'ivorysql' else ('halo' if db_type == 'halodb' else 'postgres')))
             conn = psycopg2.connect(host=host, port=port, user=user, password=pwd,
                                     dbname=_pg_default_db, connect_timeout=timeout)
             cur = conn.cursor()
@@ -7714,7 +7696,7 @@ def api_ds_objects(ds_id):
                 elif row[1] == 'VIEW':
                     views.append(row[0])
             conn.close()
-        elif db_type in ('postgresql', 'ivorysql', 'kingbase', 'hgdb'):
+        elif db_type in ('postgresql', 'ivorysql', 'halodb', 'kingbase', 'hgdb'):
             import psycopg2
             conn = psycopg2.connect(host=host, port=port, user=user, password=pwd,
                                     dbname=database, connect_timeout=timeout)
@@ -8245,9 +8227,9 @@ def api_execute_sql():
             rows = cursor.fetchmany(200)
             has_more = len(rows) >= 200
 
-        elif db_type in ('postgresql', 'ivorysql', 'kingbase', 'hgdb'):
+        elif db_type in ('postgresql', 'ivorysql', 'halodb', 'kingbase', 'hgdb'):
             import psycopg2
-            db_name = database or ('highgo' if db_type == 'hgdb' else ('ivorysql' if db_type == 'ivorysql' else 'postgres'))
+            db_name = database or ('highgo' if db_type == 'hgdb' else ('ivorysql' if db_type == 'ivorysql' else ('halo' if db_type == 'halodb' else 'postgres')))
             conn = psycopg2.connect(
                 host=host, port=port, user=user, password=pwd,
                 dbname=db_name, connect_timeout=10
@@ -8967,7 +8949,7 @@ def api_inspection_execute_sql():
             cursor.close()
             conn.close()
 
-        elif db_type in ('postgresql', 'pg', 'ivorysql'):
+        elif db_type in ('postgresql', 'pg', 'ivorysql', 'halodb'):
             import psycopg2
             conn = psycopg2.connect(
                 host=db_info.get('host', ''),
@@ -9164,6 +9146,31 @@ def api_inspection_sql_logs():
 
         return jsonify({'ok': True, 'logs': logs})
 
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)})
+
+
+@app.route('/api/loghub')
+def api_loghub():
+    """获取带分类标签的运行日志（供「运行日志」页按分类过滤）。
+
+    查询参数：
+      - categories: 逗号分隔的分类 key，如 inspection,monitor；缺省=全部
+      - levels:     逗号分隔的级别（大写），如 INFO,ERROR；含 ALL/缺省=全部
+      - search:     关键字子串（不区分大小写）
+      - limit:      返回条数上限（默认 500）
+    """
+    try:
+        from modules.loghub import query_logs, get_categories
+        cats = request.args.get('categories')
+        levels = request.args.get('levels')
+        search = request.args.get('search')
+        limit = request.args.get('limit', 500, type=int)
+        category_list = [c for c in cats.split(',') if c] if cats else None
+        level_list = [l for l in levels.split(',') if l] if levels else None
+        logs = query_logs(categories=category_list, levels=level_list,
+                          limit=limit, search=search, reverse=True)
+        return jsonify({'ok': True, 'logs': logs, 'categories': get_categories()})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)})
 
@@ -9408,24 +9415,51 @@ def _format_conversation_history(session_id: str) -> str:
 
 def _classify_chat_intent(user_message: str) -> str:
     """
-    轻量级意图分类：判断用户问题是「巡检执行」还是「知识问答」
-    返回: 'inspect' | 'qa'
+    轻量级意图分类：判断用户问题是「智能诊断」/「启动工作流」/「巡检执行」还是「知识问答」
+    返回: 'diagnose' | 'workflow' | 'inspect' | 'qa'
     策略：先关键词匹配，再 fallback 到 LLM
     """
     msg = user_message.strip().lower()
 
-    # 巡检关键词
+    # 智能诊断关键词（优先于普通巡检，避免与普通巡检混淆）
+    diagnose_keywords = [
+        '诊断', 'diagnose', '根因分析', '深度诊断', '智能诊断',
+        '协同诊断', '多智能体', '多agent', '深度分析', '诊断中心',
+    ]
+    for kw in diagnose_keywords:
+        if kw in msg:
+            return 'diagnose'
+
+    # 工作流关键词
+    workflow_keywords = [
+        '工作流', 'workflow', '编排', '自动化流程', '自动化任务', '执行流程',
+    ]
+    for kw in workflow_keywords:
+        if kw in msg:
+            return 'workflow'
+
+    # 具体问题定向分析（如「巡检连接数」「分析一下锁等待」「看下内存使用」）：
+    # 主题词 + 意图词双命中即直接走智能诊断中心的定向分析（监控→巡检→只答所问），
+    # 而不是全量巡检任务或普通问答。detect_focus_topic 自带广谱词排除
+    # （全库/体检/全面…不会误入），确定性规则不依赖 LLM。
+    try:
+        from modules.intelligence.planner import detect_focus_topic
+        if detect_focus_topic(msg):
+            return 'diagnose'
+    except Exception:
+        pass
+
+    # 巡检关键词（已移除 诊断/diagnose，避免与智能诊断中心混淆）
     inspect_keywords = [
-        '巡检', '检查', '诊断', '全库', '完整', '报告',
-        'inspect', 'diagnose', 'check', 'scan', 'report',
+        '巡检', '检查', '全库', '完整', '报告',
+        'inspect', 'check', 'scan', 'report',
         '连接数', '锁等待', '慢查询',
         'connection', 'lock', 'slow query',
         '启动巡检', '开始巡检', '执行巡检',
         'mysql-', 'pg-', 'oracle-', 'tidb-', 'dm-', 'sqlserver-',
     ]
-    for kw in inspect_keywords:
-        if kw in msg:
-            return 'inspect'
+    if any(kw in msg for kw in inspect_keywords):
+        return 'inspect'
 
     # 问答关键词（数据库知识类 + 上下文查询）
     qa_keywords = [
@@ -9593,8 +9627,8 @@ def parse_intent(user_message: str) -> dict:
     system_prompt = """你是一个数据库巡检助手。用户会用自然语言描述巡检需求。
 请从用户输入中提取以下字段，以 JSON 格式输出：
 {
-  "db_type": "mysql|pg|oracle|dm|sqlserver|tidb|unknown",
-  "db_name": "数据源名称（如 MySQL-01）或空字符串",
+  "db_type": "mysql|mariadb|pg|postgresql|oracle|dm|sqlserver|tidb|kingbase|ivorysql|halodb|hgdb|highgo|yashandb|gbase|oceanbase|mongodb|db2|clickhouse|uxdb|unknown",
+  "db_name": "数据源名称（如 MySQL-01，注意保留 HgDB/HGDB/瀚高 等原生大小写与品牌名）或空字符串",
   "scope": "connection_count|lock_wait|slow_queries|all",
   "need_report": true或false
 }
@@ -9617,6 +9651,10 @@ def parse_intent(user_message: str) -> dict:
         db_type = data.get('db_type', 'unknown')
         if db_type == 'postgresql':
             db_type = 'pg'
+        elif db_type == 'highgo':
+            db_type = 'hgdb'
+        elif db_type in ('kingbasees', 'kingbase_es'):
+            db_type = 'kingbase'
         elif db_type == 'sqlserver':
             db_type = 'sqlserver'
 
@@ -9642,50 +9680,119 @@ def parse_intent(user_message: str) -> dict:
 
 
 def list_instances_by_type(db_type: str):
-    """列出指定 db_type 的所有数据源（名称列表）"""
+    """列出指定 db_type 的所有数据源（名称列表）。
+
+    类型判定走 driver_registry.normalize_db_type：``_jdbc`` 等连接实现后缀不改变
+    数据库种类（oracle_jdbc/oracle 视为同种），避免「按类型筛选却漏掉 JDBC 实例」。
+    """
     try:
         from modules.pro import get_instance_manager
+        from modules.driver_registry import normalize_db_type
         im = get_instance_manager()
         instances = im.get_all_instances(mask_password=False)
-        return [inst.get('name', '') for inst in instances if inst.get('db_type') == db_type]
+        nt = normalize_db_type(db_type or '').lower()
+        return [inst.get('name', '') for inst in instances
+                if inst.get('db_type') and normalize_db_type(inst.get('db_type')).lower() == nt]
     except Exception:
         return []
 
 
-def match_datasource(db_name: str):
-    """从 Pro InstanceManager 按名称匹配数据源，返回解密后的连接信息"""
+def match_datasource(db_name: str, db_type: str = None):
+    """从 Pro InstanceManager 按名称匹配数据源，返回解密后的连接信息。
+
+    匹配策略（防多数据源串库，对应 issue #59）：
+      1. 大小写不敏感「精确匹配」实例名 → 优先采用；
+      2. 否则收集所有「名称包含查询串」的实例；若传入 db_type，先用归一化类型
+         过滤（oracle_jdbc/oracle 视为同种），再判定候选唯一性；
+      3. 唯一候选 → 采用；出现 0 个或多于 1 个（歧义）→ 返回 None，
+         交由上游反问用户，绝不静默选错已保存的数据源。
+    """
     try:
         from modules.pro import get_instance_manager
+        from modules.driver_registry import normalize_db_type
         im = get_instance_manager()
         instances = im.get_all_instances(mask_password=False)
 
         if not db_name:
             return None
 
-        # 模糊匹配（忽略大小写）
         db_name_lower = db_name.lower()
-        matched_inst = None
+
+        # 1) 精确匹配（大小写不敏感）优先
         for inst in instances:
             if inst.get('name', '').lower() == db_name_lower:
-                matched_inst = inst
-                break
-            if db_name_lower in inst.get('name', '').lower():
-                matched_inst = inst
-                break
+                inst_id = inst.get('id')
+                if inst_id:
+                    decrypted = im.get_instance_decrypted(inst_id)
+                    if decrypted:
+                        return decrypted
+                return inst
 
-        if not matched_inst:
-            return None
+        # 2) 模糊（子串）匹配：先收集全部候选，再按唯一性 / 类型判定
+        candidates = [inst for inst in instances
+                      if db_name_lower and db_name_lower in inst.get('name', '').lower()]
+        if db_type:
+            nt = normalize_db_type(db_type).lower()
+            candidates = [c for c in candidates
+                          if normalize_db_type(c.get('db_type', '')).lower() == nt]
 
-        # 通过 ID 获取解密后的完整信息（包含解密后的密码）
-        inst_id = matched_inst.get('id')
-        if inst_id:
-            decrypted = im.get_instance_decrypted(inst_id)
-            if decrypted:
-                return decrypted
+        if len(candidates) == 1:
+            inst_id = candidates[0].get('id')
+            if inst_id:
+                decrypted = im.get_instance_decrypted(inst_id)
+                if decrypted:
+                    return decrypted
+            return candidates[0]
 
-        return matched_inst
+        # 0 个或多于 1 个 → 歧义，返回 None 让上游反问，不静默选错
+        return None
     except Exception:
         return None
+
+
+def _resolve_inspection_candidates(db_name: str, db_type: str):
+    """根据 AI 解析出的意图收集巡检候选数据源（防多数据源串库，对应 issue #59）。
+
+    返回候选实例摘要列表 ``[{'id','name','db_type','host','port'}, ...]``：
+
+      * 给了 ``db_name``：按名称子串匹配得到「相似」候选；若同时给了 ``db_type``
+        （非 ``unknown``），再按归一化类型收窄（oracle_jdbc/oracle 视为同种）；
+      * 没给 ``db_name`` 但给了 ``db_type``：取该类型全部实例；
+      * 两者都没给（模糊「巡检」）：返回全部已配置实例，让用户从全量里挑。
+
+    调用方据此：唯一 → 直接巡检；多个 → 全部列出让用户确认（绝不静默选错）；
+    空 → 提示无匹配。
+    """
+    try:
+        from modules.pro import get_instance_manager
+        from modules.driver_registry import normalize_db_type
+        im = get_instance_manager()
+        instances = im.get_all_instances(mask_password=False)
+    except Exception:
+        return []
+
+    def _summary(inst):
+        return {
+            'id': inst.get('id'),
+            'name': inst.get('name', ''),
+            'db_type': inst.get('db_type', ''),
+            'host': inst.get('host', ''),
+            'port': inst.get('port', ''),
+        }
+
+    nt = normalize_db_type(db_type or '').lower() if db_type and db_type != 'unknown' else ''
+    db_name_lower = (db_name or '').strip().lower()
+
+    if db_name_lower:
+        cands = [i for i in instances if db_name_lower in (i.get('name', '') or '').lower()]
+        if nt:
+            cands = [i for i in cands if normalize_db_type(i.get('db_type', '')).lower() == nt]
+        return [_summary(i) for i in cands]
+    elif nt:
+        cands = [i for i in instances if normalize_db_type(i.get('db_type', '')).lower() == nt]
+        return [_summary(i) for i in cands]
+    else:
+        return [_summary(i) for i in instances]
 
 
 def execute_simple_query(db_info: dict, db_type: str, scope: str) -> str:
@@ -9748,7 +9855,7 @@ def execute_simple_query(db_info: dict, db_type: str, scope: str) -> str:
             cur.close()
             conn.close()
 
-        elif db_type in ('pg', 'ivorysql', 'kingbase'):
+        elif db_type in ('pg', 'ivorysql', 'halodb', 'kingbase'):
             import psycopg2
             conn = psycopg2.connect(
                 host=db_info.get('host', ''),
@@ -9923,6 +10030,482 @@ def execute_simple_query(db_info: dict, db_type: str, scope: str) -> str:
     return '\n'.join(results)
 
 
+def _start_chat_inspection_task(task_id, db_type, db_info, inspector_name,
+                                template_id=None, chapter_ids=None):
+    """聊天巡检统一的任务分发（与 api_start_inspection 对齐）。
+
+    关键修复（聊天两条路径此前都缺失）：
+    1. 必须写入 db_info['_db_type']，否则 run_inspection_task 取到 None 会直接
+       emit error 后 return，而 tasks[task_id]['status'] 永远停留在 'running'，
+       前端 pollChatTaskStatus 无限「正在巡检」。
+    2. JVM 类数据库（HGDB/DB2/SQLServer-JDBC/Oracle-JDBC 等）必须隔离到子进程，
+       否则进程内 JVM 会钉死 gevent hub（界面/控制台无输出、卡死）。正式巡检入口
+       已统一走 _run_inspection_subprocess，聊天路径此前没接，HGDB 必然走到死锁分支。
+    3. 分发异常兜底：失败时把 status 置 error 并写 error_msg，保证轮询端能看到失败。
+    """
+    db_info['_db_type'] = db_type
+    try:
+        if db_type in JVM_INSPECTION_DB_TYPES:
+            t = threading.Thread(
+                target=_run_inspection_subprocess,
+                args=(task_id, db_type, db_info, inspector_name, template_id, chapter_ids))
+        else:
+            t = threading.Thread(
+                target=run_inspection_task,
+                args=(task_id, db_info, inspector_name, template_id, chapter_ids))
+        t.daemon = True
+        t.start()
+    except Exception as e:
+        import traceback, sys
+        traceback.print_exc(file=sys.stdout)
+        _task = tasks.get(task_id)
+        if _task is not None:
+            _task['status'] = 'error'
+            _task['error_msg'] = '巡检任务启动失败: %s' % e
+
+
+# 平台数据查询：数据源类型别名 → 实例存储的 db_type 集合（确定性匹配，不依赖 LLM）。
+# ASCII 别名用词边界正则匹配（避免 'dm' 误伤 'admin' 等），中文别名直接子串匹配。
+_PLATFORM_TYPE_ALIASES = [
+    # (显示名, [中文别名], [ASCII 别名], [db_type 集合])
+    ('达梦', ('达梦',), ('dm',), ('dm',)),
+    ('MySQL', (), ('mysql',), ('mysql',)),
+    ('MariaDB', (), ('mariadb',), ('mariadb',)),
+    ('PostgreSQL', ('pgsql',), ('postgresql', 'postgres', 'pgsql', 'pg'), ('pg',)),
+    ('Oracle', ('甲骨文',), ('oracle',), ('oracle', 'oracle_jdbc')),
+    ('SQL Server', (), ('sqlserver', 'sql server', 'mssql'), ('sqlserver', 'sqlserver_jdbc')),
+    ('MongoDB', ('芒果库',), ('mongodb', 'mongo'), ('mongodb',)),
+    ('Redis', (), ('redis',), ('redis',)),
+    ('HGDB', ('瀚高', '瀚高库'), ('hgdb', 'highgo'), ('hgdb',)),
+    ('Kingbase', ('人大金仓', '金仓'), ('kingbase', 'kingbasees'), ('kingbase',)),
+    ('IvorySQL', (), ('ivorysql',), ('ivorysql',)),
+    ('HaloDB', ('羲和', 'halo'), ('halodb',), ('halodb',)),
+    ('UXDB', (), ('uxdb',), ('uxdb',)),
+    ('GBase', ('南大通用',), ('gbase',), ('gbase',)),
+    ('DB2', (), ('db2',), ('db2',)),
+    ('ClickHouse', (), ('clickhouse',), ('clickhouse',)),
+    ('TiDB', (), ('tidb',), ('tidb',)),
+    ('OceanBase', (), ('oceanbase',), ('oceanbase',)),
+    ('YashanDB', ('崖山',), ('yashandb',), ('yashandb',)),
+]
+
+_ASCII_TYPE_PATTERNS = [
+    (label, canonical, re.compile(r'(?<![a-z0-9])' + re.escape(a) + r'(?![a-z0-9])'))
+    for label, _zh, ascii_aliases, types in _PLATFORM_TYPE_ALIASES
+    for a in ascii_aliases
+    for canonical in (tuple(t for t in types),)
+]
+
+
+def _detect_platform_type_filter(msg):
+    """从消息中确定性识别数据源类型词。返回 (显示名 or None, db_type 集合 or None)。
+
+    中文别名子串匹配 + ASCII 别名词边界匹配，两轮任一命中即返回；
+    未命中返回 (None, None)，调用方保持全量清单行为不变。
+    """
+    for label, zh_aliases, _a, types in _PLATFORM_TYPE_ALIASES:
+        for zh in zh_aliases:
+            if zh in msg:
+                return label, set(types)
+    for label, _t, pat in _ASCII_TYPE_PATTERNS:
+        if pat.search(msg):
+            # 回查显示名对应的完整 db_type 集合（同 label 可能多个 db_type 变体）
+            types = set()
+            for l2, _z, _a2, t2 in _PLATFORM_TYPE_ALIASES:
+                if l2 == label:
+                    types |= set(t2)
+            return label, types
+    return None, None
+
+
+def _try_platform_query(message):
+    """平台数据查询意图：用户想查询平台自身的数据（数据源/实例列表等）。
+
+    命中规则：同时包含「目标词（数据源/实例/连接/数据库等）」与「列举词（列出/查看/有哪些/所有/全部等）」。
+    命中后直接读取 InstanceManager，返回真实清单，而不是交给 LLM 凭训练知识瞎编（答非所问）。
+    若消息中还带有明确的数据库类型词（达梦/MySQL/HGDB…），只返回该类型的数据源
+    （如「列一下达梦数据源」→ 仅 DM 实例），不满足时提示现有类型分布。
+
+    未命中返回 None，caller 继续走 inspect/qa 分类。
+    """
+    msg = (message or '').strip().lower()
+    if not msg:
+        return None
+
+    type_label, type_filter = _detect_platform_type_filter(msg)
+
+    has_target = any(k in msg for k in ('数据源', '实例', 'database', '连接',
+                                        '数据库实例', 'datasource', 'instance', '连接配置'))
+    has_listing = any(k in msg for k in ('列出', '列一下', '列出所有', '查看', '显示',
+                                         '有哪些', '所有', '全部', '列举', '看看', 'list', 'show',
+                                         '一共有', '有几个', '数量'))
+    # 提到具体类型 + 列举词也算查询意图（如「列一下达梦」「有哪些 mysql」）
+    if type_filter:
+        has_target = True
+    if not (has_target and has_listing):
+        return None
+
+    try:
+        from modules.pro import get_instance_manager
+        im = get_instance_manager()
+        instances = im.get_all_instances(mask_password=True)
+    except Exception as e:
+        return '⚠️ 获取数据源列表失败：%s' % e
+
+    if type_filter:
+        instances = [i for i in instances if (i.get('db_type') or '').lower() in type_filter]
+        if not instances:
+            # 按类型统计现有分布，帮用户确认平台里到底有什么
+            dist = {}
+            for i in im.get_all_instances(mask_password=True):
+                dist[i.get('db_type', '-')] = dist.get(i.get('db_type', '-'), 0) + 1
+            dist_txt = '、'.join('%s(%d)' % (k, v) for k, v in sorted(dist.items()))
+            return ('平台当前没有 **%s** 类型的数据源。\n\n当前已配置的数据源类型：%s。'
+                    '如需添加，请到「数据源管理」新增。' % (type_label, dist_txt or '无'))
+
+    if not instances:
+        return '当前平台没有任何已配置的数据源。请先在「数据源管理」中添加数据库实例。'
+
+    head = ('平台当前共有 **%d** 个 **%s** 数据源：' % (len(instances), type_label)
+            if type_filter else '平台当前共有 **%d** 个已配置的数据源：' % len(instances))
+    lines = [head, '',
+             '| # | 名称 | 类型 | 地址 |', '| --- | --- | --- | --- |']
+    for i, inst in enumerate(instances, 1):
+        name = inst.get('name', '-')
+        db_type = inst.get('db_type', '-')
+        host = inst.get('host', '-')
+        port = inst.get('port', '-')
+        lines.append('| %d | %s | %s | %s:%s |' % (i, name, db_type, host, port))
+    return '\n'.join(lines)
+
+
+# ───────────────────────────────────────────────────────────
+# 智能诊断 / 工作流 意图助手（让 AI 聊天助手贯通诊断中心与工作流）
+# ───────────────────────────────────────────────────────────
+def _list_instance_names():
+    """返回平台所有已配置数据源名称列表。"""
+    try:
+        from modules.pro import get_instance_manager
+        im = get_instance_manager()
+        return [i.get('name', '') for i in im.get_all_instances(mask_password=True) if i.get('name')]
+    except Exception:
+        return []
+
+
+def _match_chat_instance(message, chat_context=None):
+    """从聊天消息（或上下文）提取并匹配平台数据源，返回解密后的实例 dict（含 id）；无则返回 None。
+
+    多数据源场景防串库（issue #59）：名称解析出现歧义时返回 None，交由上游反问，
+    绝不静默连接错误的已保存数据源。
+    """
+    intent = parse_intent(message) if isinstance(message, str) else {}
+    db_type = intent.get('db_type')
+    name = (intent.get('db_name') or '').strip()
+    if not name and chat_context:
+        name = (chat_context.get('datasource_name') or '').strip()
+    if not name:
+        low = message.lower()
+        # 消息里同时命中多个实例名 → 歧义，不臆测，交由上游反问
+        hits = [cand for cand in _list_instance_names() if cand and cand.lower() in low]
+        name = hits[0] if len(hits) == 1 else ''
+    if not name:
+        return None
+    return match_datasource(name, db_type=db_type)
+
+
+def _match_chat_workflow(message):
+    """从消息匹配工作流；返回 (wf_id, wf_name) 或 None。"""
+    try:
+        from modules.intelligence.workflow_store import list_workflows
+        wfs = list_workflows()
+    except Exception:
+        return None
+    if not wfs:
+        return None
+    low = message.lower()
+    # 精确名匹配
+    for wf in wfs:
+        n = (wf.get('name') or '').strip()
+        if n and n.lower() == low:
+            return wf.get('id'), n
+    # 子串匹配
+    for wf in wfs:
+        n = (wf.get('name') or '').strip()
+        if n and n.lower() in low:
+            return wf.get('id'), n
+    return None
+
+
+def _run_workflow_by_id(wf_id, instance_id, goal):
+    """复用工作流引擎执行已保存工作流（与 /api/intelligence/workflows/<id>/run 同源逻辑）。"""
+    from modules.intelligence.workflow_store import get_workflow
+    from modules.intelligence.workflow import Workflow, Step
+    wf = get_workflow(int(wf_id))
+    if not wf:
+        raise ValueError('workflow not found')
+    steps = [
+        Step(id=str(s.get('id')), kind=s.get('kind', 'specialist'),
+             ref=s.get('ref', '') or '', args=s.get('args') or {},
+             label=s.get('label') or str(s.get('id')))
+        for s in wf.get('steps', [])
+    ]
+    edges = [(str(e[0]), str(e[1])) for e in wf.get('edges', [])
+             if isinstance(e, (list, tuple)) and len(e) == 2]
+    engine = Workflow(steps, edges)
+    return engine.run(goal=goal, instance_id=str(instance_id), inputs={})
+
+
+def _format_diagnose_result(result):
+    """把 DiagnosticHub._finalize 的结果 dict 格式化为可读 Markdown 摘要。"""
+    if not isinstance(result, dict):
+        return '```\n%s\n```' % str(result)
+    goal = result.get('goal') or ''
+    meta = result.get('target_meta') or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    db_type = meta.get('db_type') or result.get('target') or ''
+    host = meta.get('host') or ''
+    seq = result.get('sequence') or []
+    specialists = result.get('specialists') or {}
+    findings = result.get('findings') or []
+    plan = result.get('plan') or {}
+    notes = result.get('notes') or []
+    review = result.get('review') or {}
+    iteration = result.get('iteration')
+
+    lines = ['## 🔍 智能诊断结果']
+    if goal:
+        lines.append('**目标**：%s' % goal)
+    if db_type or host:
+        lines.append('**对象**：%s @ %s' % (db_type, host))
+    if iteration:
+        lines.append('**迭代轮次**：%s' % iteration)
+    if seq:
+        names = [specialists.get(s, s) for s in seq]
+        lines.append('**协同专家**：' + '、'.join(str(n) for n in names))
+    focus = result.get('focus')
+    if isinstance(focus, dict) and focus:
+        side_n = focus.get('side_count') or 0
+        lines.append('**模式**：定向分析（%s），只回答所问%s' % (
+            focus.get('topic_label') or '定向',
+            ('，另有 %d 条与该问题无关的发现未展示' % side_n) if side_n else ''))
+    if findings:
+        lines.append('')
+        lines.append('### 发现（%d）' % len(findings))
+        for i, f in enumerate(findings, 1):
+            if not isinstance(f, dict):
+                continue
+            title = f.get('title') or f.get('name') or ('发现 %d' % i)
+            sev = f.get('severity') or f.get('level') or ''
+            summary = f.get('summary') or f.get('detail') or ''
+            rec = f.get('recommendation') or f.get('suggestion') or f.get('action') or ''
+            lines.append('%d. **[%s] %s**' % (i, sev, title))
+            if summary:
+                lines.append('   - %s' % summary)
+            if rec:
+                lines.append('   - 建议：%s' % rec)
+    if isinstance(plan, dict):
+        steps = plan.get('steps') or plan.get('recommendations') or []
+        if steps:
+            lines.append('')
+            lines.append('### 处置方案')
+            for s in steps:
+                if isinstance(s, dict):
+                    lines.append('- %s' % (s.get('title') or s.get('text')
+                                          or s.get('content') or s))
+                else:
+                    lines.append('- %s' % s)
+    if isinstance(review, dict) and review:
+        lines.append('')
+        lines.append('### Reviewer 把关')
+        lines.append('- 结论：%s（置信度 %s）' % (review.get('approved'), review.get('confidence')))
+        if review.get('summary'):
+            lines.append('- %s' % review.get('summary'))
+    if notes:
+        lines.append('')
+        lines.append('### 备注')
+        for n in notes[:12]:
+            lines.append('- %s' % n)
+    return '\n'.join(lines)
+
+
+def _format_workflow_result(result, wf_name):
+    """把 Workflow.run 的结果 dict 格式化为可读 Markdown 摘要。"""
+    if not isinstance(result, dict):
+        return '```\n%s\n```' % str(result)
+    executed = result.get('steps_executed') or []
+    log = result.get('log') or []
+    cancelled = result.get('cancelled')
+    outputs = result.get('outputs') or {}
+    lines = ['## ⚙️ 工作流执行结果', '**工作流**：%s' % wf_name,
+             '**已执行节点**：%d 个' % len(executed)]
+    if log:
+        lines.append('')
+        lines.append('| 节点 | 状态 | 说明 |')
+        lines.append('| --- | --- | --- |')
+        for e in log:
+            if not isinstance(e, dict):
+                continue
+            sid = e.get('step', '')
+            status = e.get('status', '')
+            reason = e.get('reason') or e.get('error') or ''
+            lines.append('| %s | %s | %s |' % (sid, status, reason))
+    if cancelled:
+        lines.append('⚠️ 工作流被中途取消。')
+    if outputs:
+        lines.append('')
+        lines.append('### 节点产出')
+        for k, v in outputs.items():
+            val = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
+            if len(val) > 600:
+                val = val[:600] + '…'
+            lines.append('- **%s**: %s' % (k, val))
+    return '\n'.join(lines)
+
+
+def _stream_diagnose_response(message, chat_context):
+    """SSE：对指定数据源启动智能诊断（多专家协同），逐事件回灌聊天框。"""
+    inst = _match_chat_instance(message, chat_context)
+    if not inst:
+        names = _list_instance_names()
+        if names:
+            tip = ('⚠️ 未识别到要诊断的数据源。可用的有：' + '、'.join(names)
+                   + '。\n请指明，例如「诊断一下 MySQL-01」。')
+        else:
+            tip = '⚠️ 当前平台还没有已配置的数据源，请先在「数据源管理」添加实例。'
+        yield f"data: {json.dumps({'type': 'chunk', 'content': tip}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        return
+    instance_id = inst.get('id') or inst.get('name')
+    name = inst.get('name', '')
+    yield f"data: {json.dumps({'type': 'chunk', 'content': '🧭 已对 **%s** 启动智能诊断（多专家协同）...' % name}, ensure_ascii=False)}\n\n"
+    try:
+        from modules.intelligence.hub import get_hub
+        hub = get_hub()
+        for evt in hub.dispatch_stream(goal=message or '对目标数据源做一次协同诊断',
+                                       instance_id=str(instance_id)):
+            et = evt.get('type')
+            if et == 'coordinator':
+                seq = evt.get('sequence') or []
+                yield f"data: {json.dumps({'type': 'chunk', 'content': '📋 诊断规划：将依次协同 %d 个专家。' % len(seq)}, ensure_ascii=False)}\n\n"
+            elif et == 'progress' and evt.get('phase') == 'start':
+                yield f"data: {json.dumps({'type': 'chunk', 'content': '🔍 专家 **%s** 执行中（%d/%d，第 %d 轮）...' % (evt.get('name', evt.get('current')), evt.get('index', 0), evt.get('total', 0), evt.get('iteration', 1))}, ensure_ascii=False)}\n\n"
+            elif et == 'replan':
+                yield f"data: {json.dumps({'type': 'chunk', 'content': '🔄 基于本轮新发现重规划，追加专项专家...'}, ensure_ascii=False)}\n\n"
+            elif et == 'review':
+                rv = evt.get('result') or {}
+                yield f"data: {json.dumps({'type': 'chunk', 'content': '✅ Reviewer 把关：approved=%s，置信度 %s' % (rv.get('approved'), rv.get('confidence'))}, ensure_ascii=False)}\n\n"
+            elif et == 'result':
+                summary = _format_diagnose_result(evt.get('result'))
+                yield f"data: {json.dumps({'type': 'chunk', 'content': summary}, ensure_ascii=False)}\n\n"
+            elif et == 'error':
+                yield f"data: {json.dumps({'type': 'chunk', 'content': '⚠️ 诊断出错：%s' % evt.get('msg')}, ensure_ascii=False)}\n\n"
+    except Exception as e:
+        import traceback, sys
+        traceback.print_exc(file=sys.stdout)
+        yield f"data: {json.dumps({'type': 'chunk', 'content': '⚠️ 智能诊断失败：%s' % e}, ensure_ascii=False)}\n\n"
+    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+
+def _stream_workflow_response(message, chat_context):
+    """SSE：解析工作流 + 实例并启动执行，回灌进度与结果。"""
+    wf = _match_chat_workflow(message)
+    if not wf:
+        try:
+            from modules.intelligence.workflow_store import list_workflows
+            wfs = list_workflows()
+        except Exception:
+            wfs = []
+        if wfs:
+            names = '、'.join(w.get('name', '') for w in wfs if w.get('name'))
+            tip = ('⚠️ 未识别到要启动的工作流。可用的有：' + names
+                   + '。\n请指明，例如「启动工作流 每日巡检编排」。')
+        else:
+            tip = '⚠️ 当前还没有已保存的工作流，请先在「智能诊断中心 → 工作流编排」创建。'
+        yield f"data: {json.dumps({'type': 'chunk', 'content': tip}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        return
+    wf_id, wf_name = wf
+    inst = _match_chat_instance(message, chat_context)
+    if not inst:
+        names = _list_instance_names()
+        if names:
+            tip = ('⚠️ 启动工作流需要指定目标数据源。可用的有：' + '、'.join(names)
+                   + '。\n例如「在 MySQL-01 上启动工作流 %s」。' % wf_name)
+        else:
+            tip = '⚠️ 当前平台还没有已配置的数据源，无法启动工作流。'
+        yield f"data: {json.dumps({'type': 'chunk', 'content': tip}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        return
+    instance_id = inst.get('id') or inst.get('name')
+    yield f"data: {json.dumps({'type': 'chunk', 'content': '⚙️ 已启动工作流 **%s**（目标 **%s**）...' % (wf_name, inst.get('name', ''))}, ensure_ascii=False)}\n\n"
+    try:
+        result = _run_workflow_by_id(wf_id, instance_id, message or '执行工作流')
+        summary = _format_workflow_result(result, wf_name)
+        yield f"data: {json.dumps({'type': 'chunk', 'content': summary}, ensure_ascii=False)}\n\n"
+    except Exception as e:
+        import traceback, sys
+        traceback.print_exc(file=sys.stdout)
+        yield f"data: {json.dumps({'type': 'chunk', 'content': '⚠️ 工作流启动/执行失败：%s' % e}, ensure_ascii=False)}\n\n"
+    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+
+def _handle_diagnose_nonstream(message, chat_context):
+    """非流式（/api/chat fallback）：执行智能诊断并返回结果。"""
+    inst = _match_chat_instance(message, chat_context)
+    if not inst:
+        names = _list_instance_names()
+        if names:
+            return jsonify({'ok': True, 'type': 'qa',
+                            'message': '⚠️ 未识别到要诊断的数据源。可用的有：' + '、'.join(names)
+                                       + '。\n请指明，例如「诊断一下 MySQL-01」。'})
+        return jsonify({'ok': True, 'type': 'qa',
+                        'message': '⚠️ 当前平台还没有已配置的数据源，请先在「数据源管理」添加实例。'})
+    instance_id = inst.get('id') or inst.get('name')
+    try:
+        from modules.intelligence.hub import get_hub
+        hub = get_hub()
+        result = hub.dispatch(goal=message or '对目标数据源做一次协同诊断',
+                              instance_id=str(instance_id))
+        summary = _format_diagnose_result(result)
+    except Exception as e:
+        return jsonify({'ok': True, 'type': 'qa', 'message': '⚠️ 智能诊断失败：%s' % e})
+    return jsonify({'ok': True, 'type': 'qa', 'message': summary, 'intelligence_diagnose': True})
+
+
+def _handle_workflow_nonstream(message, chat_context):
+    """非流式（/api/chat fallback）：启动工作流并返回结果。"""
+    wf = _match_chat_workflow(message)
+    if not wf:
+        try:
+            from modules.intelligence.workflow_store import list_workflows
+            wfs = list_workflows()
+        except Exception:
+            wfs = []
+        if wfs:
+            names = '、'.join(w.get('name', '') for w in wfs if w.get('name'))
+            return jsonify({'ok': True, 'type': 'qa',
+                            'message': '⚠️ 未识别到要启动的工作流。可用的有：' + names + '。'})
+        return jsonify({'ok': True, 'type': 'qa',
+                        'message': '⚠️ 当前还没有已保存的工作流，请先在「智能诊断中心 → 工作流编排」创建。'})
+    wf_id, wf_name = wf
+    inst = _match_chat_instance(message, chat_context)
+    if not inst:
+        names = _list_instance_names()
+        if names:
+            return jsonify({'ok': True, 'type': 'qa',
+                            'message': '⚠️ 启动工作流需要指定目标数据源。可用的有：' + '、'.join(names) + '。'})
+        return jsonify({'ok': True, 'type': 'qa',
+                        'message': '⚠️ 当前平台还没有已配置的数据源，无法启动工作流。'})
+    instance_id = inst.get('id') or inst.get('name')
+    try:
+        result = _run_workflow_by_id(wf_id, instance_id, message or '执行工作流')
+        summary = _format_workflow_result(result, wf_name)
+    except Exception as e:
+        return jsonify({'ok': True, 'type': 'qa', 'message': '⚠️ 工作流启动/执行失败：%s' % e})
+    return jsonify({'ok': True, 'type': 'qa', 'message': summary, 'intelligence_workflow': True})
+
+
 def _stream_inspection_response(data, message, session_id, chat_context):
     """巡检意图：解析→匹配数据源→执行巡检，通过SSE返回结果"""
     import time
@@ -9936,27 +10519,55 @@ def _stream_inspection_response(data, message, session_id, chat_context):
 
     print(f'[AI Stream] 巡检意图: db_type={db_type}, db_name={db_name}, scope={scope}', flush=True)
 
-    # 2. 匹配数据源
+    # 2. 解析候选数据源并确认（AI 助手巡检：先列出候选让用户确认，防多数据源串库）
     ds = None
     matched_name = None
 
-    if db_name:
-        ds = match_datasource(db_name)
-        matched_name = db_name
+    # 2.0 候选按钮点选回传：显式 instance_id 优先，直接取实例，跳过名称模糊解析
+    # （防止 LLM 对「巡检 <名称>」解析漂移导致再次列出全部候选）
+    explicit_id = str(data.get('instance_id') or '').strip()
+    if explicit_id:
+        try:
+            from modules.pro import get_instance_manager as _gim
+            inst = _gim().get_instance_decrypted(explicit_id)
+        except Exception:
+            inst = None
+        if inst:
+            ds = inst
+            matched_name = ds.get('name') or ''
+            db_type = ds.get('db_type') or db_type
 
-    # 名称匹配失败，尝试按 db_type 筛选
-    if not ds and db_type != 'unknown' and db_type:
-        candidates = list_instances_by_type(db_type)
+    if not ds:
+        # 2.1 意图解析兜底：候选按钮回传的 db_name 优先于 LLM 解析结果
+        if not db_name:
+            db_name = str(data.get('db_name') or '').strip()
+        candidates = _resolve_inspection_candidates(db_name, db_type)
+
         if len(candidates) == 1:
-            ds = match_datasource(candidates[0])
-            matched_name = candidates[0]
+            try:
+                from modules.pro import get_instance_manager
+                _im = get_instance_manager()
+                inst = _im.get_instance_decrypted(candidates[0]['id']) or candidates[0]
+            except Exception:
+                inst = candidates[0]
+            if inst:
+                ds = inst
+                matched_name = ds.get('name') or db_name
+                # 以匹配到的实例真实类型为准，避免 LLM 误判类型导致逻辑错配/串库
+                db_type = ds.get('db_type') or db_type
         elif len(candidates) > 1:
-            names_str = '、'.join(candidates)
-            yield f"data: {json.dumps({'type': 'inspect_ask', 'message': f'找到 {len(candidates)} 个{db_type.upper()}数据源：{names_str}，请选择要巡检的实例。', 'candidates': candidates, 'db_type': db_type}, ensure_ascii=False)}\n\n"
+            # 多个候选：全部列出让用户确认，绝不静默选错（candidates 带 id，点选回传直接命中）
+            detail = '；'.join('%s（%s %s:%s）' % (c['name'], c['db_type'], c['host'], c['port'])
+                               for c in candidates)
+            yield (u"data: " + json.dumps({
+                'type': 'inspect_ask',
+                'message': u'🔍 匹配到 %d 个候选数据源，请确认要巡检哪一个：%s' % (len(candidates), detail),
+                'candidates': candidates,
+            }, ensure_ascii=False) + u"\n\n")
             return
 
     if not ds:
-        # 尝试从请求体获取连接参数
+        # 无候选：尝试从请求体获取手动连接参数
         ds = {
             'host': data.get('host', ''),
             'port': data.get('port', 3306),
@@ -9968,15 +10579,18 @@ def _stream_inspection_response(data, message, session_id, chat_context):
         }
 
     if not ds or not ds.get('host'):
-        if db_name and db_type != 'unknown' and db_type:
-            candidates = list_instances_by_type(db_type)
-            if candidates:
-                names_str = '、'.join(candidates)
-                yield f"data: {json.dumps({'type': 'inspect_ask', 'message': f'未找到「{db_name}」，可用的{db_type.upper()}数据源有：{names_str}。', 'candidates': candidates, 'db_type': db_type}, ensure_ascii=False)}\n\n"
-                return
+        # 仍未确定：列出全部已配置数据源供用户选择
+        all_insts = _resolve_inspection_candidates('', 'unknown')
+        if all_insts:
+            yield (u"data: " + json.dumps({
+                'type': 'inspect_ask',
+                'message': u'⚠️ 未匹配到巡检目标。已配置的数据源有：' + '、'.join(i['name'] for i in all_insts) + '。请指定要巡检的数据源名称。',
+                'candidates': all_insts,
+            }, ensure_ascii=False) + u"\n\n")
+            return
         _warn = {
             'type': 'error',
-            'message': '[WARN] 无法确定巡检目标。请指定数据源名称（如"巡检 MySQL-01 的连接数"）或在上下文中选择数据源。',
+            'message': '[WARN] 无法确定巡检目标。请指定数据源名称（如"巡检 MySQL-01"）或在上下文中选择数据源。',
         }
         yield f"data: {json.dumps(_warn, ensure_ascii=False)}\n\n"
         return
@@ -10019,24 +10633,8 @@ def _stream_inspection_response(data, message, session_id, chat_context):
         'started_at': datetime.datetime.now().isoformat(),
     }
 
-    task_func_map = {
-        'mysql': run_inspection_task,
-        'pg': run_inspection_task,
-        'oracle': run_inspection_task,
-        'dm': run_inspection_task,
-        'sqlserver': run_inspection_task,
-        'tidb': run_inspection_task,
-        'ivorysql': run_inspection_task,
-        'kingbase': run_inspection_task,
-        'yashandb': run_inspection_task,
-        'gbase': run_inspection_task,
-        'oceanbase': run_inspection_task,
-    }
-    task_func = task_func_map.get(db_type, run_inspection_task)
-
-    t = threading.Thread(target=task_func, args=(task_id, db_info, inspector_name))
-    t.daemon = True
-    t.start()
+    # 统一分发：补 _db_type + JVM 类型走子进程，避免「正在巡检」永远不结束
+    _start_chat_inspection_task(task_id, db_type, db_info, inspector_name)
 
     # 通过 SSE 告诉前端巡检已启动
     yield f"data: {json.dumps({'type': 'inspect_start', 'task_id': task_id, 'message': f'🔍 已启动 **{matched_name or db_name or db_type}** 的巡检任务...', 'db_name': matched_name or ds.get('name', ''), 'host': ds.get('host', ''), 'port': ds.get('port', ''), 'db_type': db_type}, ensure_ascii=False)}\n\n"
@@ -10064,9 +10662,32 @@ def api_chat_stream():
         if not message:
             return jsonify({'error': '消息不能为空'}), 400
 
+        # ═══ 平台数据查询意图（优先于问答/巡检分类）═══
+        # 例如「列一下所有数据源」应直接查平台返回清单，而非交给 LLM 泛答。
+        platform_reply = _try_platform_query(message)
+        if platform_reply is not None:
+            def _gen_pq():
+                yield f"data: {json.dumps({'type': 'qa', 'message': platform_reply}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            return Response(_gen_pq(), mimetype='text/event-stream')
+
         # ═══ 意图分类（自动判断问答 vs 巡检）═══
         chat_intent = _classify_chat_intent(message)
         print(f'[AI Stream] 意图分类: "{message[:40]}" → {chat_intent}', flush=True)
+
+        # ═══ 智能诊断意图：贯通诊断中心（多专家协同）═══
+        if chat_intent == 'diagnose':
+            return Response(
+                _stream_diagnose_response(message, chat_context),
+                mimetype='text/event-stream'
+            )
+
+        # ═══ 启动工作流意图：贯通工作流编排 ═══
+        if chat_intent == 'workflow':
+            return Response(
+                _stream_workflow_response(message, chat_context),
+                mimetype='text/event-stream'
+            )
 
         # ═══ 巡检模式：直接执行巡检 ═══
         if chat_intent == 'inspect':
@@ -10275,8 +10896,29 @@ def api_chat():
                 'cleared': True,
             })
 
-        # 0.5 分类意图：巡检执行 vs 知识问答
+        # 0.5 平台数据查询意图（优先于问答/巡检分类）
+        # 例如「列一下所有数据源」应直接查平台返回清单，而非交给 LLM 泛答。
+        platform_reply = _try_platform_query(message)
+        if platform_reply is not None:
+            return jsonify({
+                'ok': True,
+                'type': 'qa',
+                'message': platform_reply,
+                'rag_used': False,
+                'rag_disabled': False,
+                'platform_query': True,
+            })
+
+        # 0.6 分类意图：智能诊断 / 启动工作流 / 巡检执行 / 知识问答
         chat_intent = _classify_chat_intent(message)
+
+        # ─── 智能诊断模式（贯通诊断中心）───
+        if chat_intent == 'diagnose':
+            return _handle_diagnose_nonstream(message, chat_context)
+
+        # ─── 启动工作流模式（贯通工作流编排）───
+        if chat_intent == 'workflow':
+            return _handle_workflow_nonstream(message, chat_context)
 
         # ─── 知识问答模式 ───
         if chat_intent == 'qa':
@@ -10305,32 +10947,52 @@ def api_chat():
         scope = intent.get('scope', 'all')
         need_report = intent.get('need_report', scope == 'all')
 
-        # 2. 匹配数据源
+        # 2. 解析候选数据源并确认（AI 助手巡检：先列出候选让用户确认，防多数据源串库）
         ds = None
         matched_name = None  # 记录实际匹配到的数据源名称
 
-        if db_name:
-            ds = match_datasource(db_name)
-            matched_name = db_name
+        # 2.0 候选按钮点选回传：显式 instance_id 优先，直接取实例，跳过名称模糊解析
+        # （防止 LLM 对「巡检 <名称>」解析漂移导致再次列出全部候选）
+        explicit_id = str(data.get('instance_id') or '').strip()
+        if explicit_id:
+            try:
+                from modules.pro import get_instance_manager as _gim
+                inst = _gim().get_instance_decrypted(explicit_id)
+            except Exception:
+                inst = None
+            if inst:
+                ds = inst
+                matched_name = ds.get('name') or ''
+                db_type = ds.get('db_type') or db_type
 
-        # 如果名称匹配失败，尝试按 db_type 筛选
-        if not ds and db_type != 'unknown' and db_type:
-            candidates = list_instances_by_type(db_type)
+        if not ds:
+            # 2.1 意图解析兜底：候选按钮回传的 db_name 优先于 LLM 解析结果
+            if not db_name:
+                db_name = str(data.get('db_name') or '').strip()
+            candidates = _resolve_inspection_candidates(db_name, db_type)
+
             if len(candidates) == 1:
-                # 只有一个，直接选
-                ds = match_datasource(candidates[0])
-                matched_name = candidates[0]
+                try:
+                    from modules.pro import get_instance_manager
+                    _im = get_instance_manager()
+                    inst = _im.get_instance_decrypted(candidates[0]['id']) or candidates[0]
+                except Exception:
+                    inst = candidates[0]
+                if inst:
+                    ds = inst
+                    matched_name = ds.get('name') or db_name
+                    # 以匹配到的实例真实类型为准，避免 LLM 误判类型导致逻辑错配/串库
+                    db_type = ds.get('db_type') or db_type
             elif len(candidates) > 1:
-                # 多个候选，询问用户
-                names_str = '、'.join(candidates)
+                # 多个候选：全部列出让用户确认，绝不静默选错（candidates 带 id，点选回传直接命中）
+                detail = '；'.join('%s（%s %s:%s）' % (c['name'], c['db_type'], c['host'], c['port'])
+                                   for c in candidates)
                 return jsonify({
                     'ok': False,
                     'type': 'ask',
-                    'message': _t('webui.chat_ask_multiple').format(
-                        db_type=db_type.upper(), count=len(candidates), names=names_str),
+                    'message': u'🔍 匹配到 %d 个候选数据源，请确认要巡检哪一个：%s' % (len(candidates), detail),
                     'intent': intent,
                     'candidates': candidates,
-                    'db_type': db_type,
                 })
 
         if not ds:
@@ -10347,20 +11009,16 @@ def api_chat():
 
         # 如果既没有匹配到数据源，也没有提供连接信息，返回提示
         if not ds or not ds.get('host'):
-            # 如果 db_name 不为空但匹配失败，列出同类型数据源
-            if db_name and db_type != 'unknown' and db_type:
-                candidates = list_instances_by_type(db_type)
-                if candidates:
-                    names_str = '、'.join(candidates)
-                    return jsonify({
-                        'ok': False,
-                        'type': 'ask',
-                        'message': _t('webui.chat_ask_not_found').format(
-                            db_name=db_name, db_type=db_type.upper(), names=names_str),
-                        'intent': intent,
-                        'candidates': candidates,
-                        'db_type': db_type,
-                    })
+            # 仍未确定：列出全部已配置数据源供用户选择
+            all_insts = _resolve_inspection_candidates('', 'unknown')
+            if all_insts:
+                return jsonify({
+                    'ok': False,
+                    'type': 'ask',
+                    'message': u'⚠️ 未匹配到巡检目标。已配置的数据源有：' + '、'.join(i['name'] for i in all_insts) + '。请指定要巡检的数据源名称。',
+                    'intent': intent,
+                    'candidates': all_insts,
+                })
             return jsonify({
                 'ok': False,
                 'type': 'error',
@@ -10411,25 +11069,8 @@ def api_chat():
                 'started_at': datetime.datetime.now().isoformat(),
             }
 
-            # 启动巡检线程
-            db_info['_db_type'] = db_type
-            task_func_map = {
-                'mysql': run_inspection_task,
-                'pg': run_inspection_task,
-                'oracle': run_inspection_task,
-                'dm': run_inspection_task,
-                'sqlserver': run_inspection_task,
-                'tidb': run_inspection_task,
-                'ivorysql': run_inspection_task,
-                'kingbase': run_inspection_task,
-                'yashandb': run_inspection_task,
-                'gbase':   run_inspection_task,
-                'oceanbase': run_inspection_task,
-            }
-            task_func = task_func_map.get(db_type, run_inspection_task)
-            t = threading.Thread(target=task_func, args=(task_id, db_info, inspector_name))
-            t.daemon = True
-            t.start()
+            # 统一分发：补 _db_type + JVM 类型走子进程，避免「正在巡检」永远不结束
+            _start_chat_inspection_task(task_id, db_type, db_info, inspector_name)
 
             return jsonify({
                 'ok': True,
@@ -11019,7 +11660,7 @@ def api_home_stats():
             result['rule_builtin_count'] = len(engine.builtin_rules)
             result['rule_custom_count'] = len(engine.custom_rules)
             # 按 db_type 统计
-            db_types = ['mysql', 'mariadb', 'postgresql', 'pg', 'oracle', 'dm8', 'dm', 'sqlserver', 'tidb', 'ivorysql', 'yashandb', 'kingbase']
+            db_types = ['mysql', 'mariadb', 'postgresql', 'pg', 'oracle', 'dm8', 'dm', 'sqlserver', 'tidb', 'ivorysql', 'halodb', 'yashandb', 'kingbase']
             rule_by_db = {}
             for dt in db_types:
                 rules_for_db = engine.list_rules(db_type=dt)
@@ -11522,6 +12163,14 @@ def main():
 
     # ── 启动 Banner：必须是第一段控制台输出（早于下方插件加载日志）──
     _print_startup_banner()
+
+    # ── 中央日志中枢：汇聚各子系统带分类标签的日志，供「运行日志」页过滤 ──
+    # 必须在监控线程 / 巡检任务启动前安装，确保捕获全量日志；幂等。
+    try:
+        from modules.loghub import init_loghub
+        init_loghub()
+    except Exception as _e:
+        print(f"[startup] 初始化日志中枢失败（降级继续）: {_e}")
 
     _setup_driver_paths()
     # ── 初始化插件系统 ──

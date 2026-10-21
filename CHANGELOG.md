@@ -1,5 +1,214 @@
 # Changelog
 
+## v26.10.11.0 (2026-10-10)
+- **新增：大屏 Redis/MongoDB 明细自适应（用户反馈：NoSQL 无表空间概念）**
+  - Redis 原生采集新增 `CLIENT LIST` 逐客户端明细（conn_rows）与 `SLOWLOG GET` 慢日志明细（耗时微秒→毫秒），`native_collect.py` 三处返回补键；MongoDB 及兜底空状态显示中性文案（连接数汇总 N / 慢查询需开启 profiler），不再误报「不支持连接采集」。
+  - 前端 `monitor_screen.html` 新增 `isNoSQL()` 类型判定：抽屉「表空间」tab、节点卡片第 4 行、矩阵卡、主 TopN 面板标题在列表含 NoSQL 实例时自动改称「容量」，SQL 库仍叫表空间不变。
+- **修复：大屏「连接数据采集中」误显示「不支持连接采集」（用户反馈：Oracle 重启后窗口期误报）**
+  - 根因：引擎本轮尚未覆盖到该实例时（刚重启/新接入/首轮采集竞态）`status=pending`，前端 conn 分支把「未采到」与「真无连接模板」用同一兜底文案混淆。修复：`renderTab` 先判 `detail.info.status`，pending → 新文案「连接数据采集中，请稍候或刷新重试」（`dt_conn_pending` × 9 语言），仅 `status==='unsupported'` 才显示「不支持」；slow/tbs tab 同步加 pending 分支。
+- **修复：i18n 非中文语言大面积中文回退（7 语言历史欠账）**
+  - 根因：ja/ko/es/fr/de/ru 均为 `XX = dict(ZI)`（拷贝全部中文）+ 局部覆盖块，未覆盖的 key 实际显示中文；zh_tw 另缺 168 键。实测 ja/ko/es/fr/de/ru 各 280–330 键、zh_tw 578 键、en 102 键为中文回退。
+  - 修复：以 en 真实英文值回填 7 语言所有中文回退 key（zh_tw 471、ja 222、ko/es/fr/de/ru 各 171），统一在文件末尾追加 `update` 块不改既有内容；en 自身也缺的 ~100 键保留（无法凭空生成）。近期新增的「容量/连接/慢查询」8 键单独终校，确保目标语言翻译压过回填。
+- **修复：侧边栏菜单分组与菜单项硬编码中文（用户截图反馈）**
+  - 根因：`.nav-section` 7 个分组中 6 个（智能巡检/巡检报告/AI 与知识/变更安全/监控运维/数据源与配置）及 6 个菜单项（系统字典表/SQL审核/安全自治/智能基线/拓扑巡检/信创合规）的 `<span>` 纯硬编码中文、无 `data-i18n` 属性。
+  - 修复：`index.html` 12 处补 `data-i18n`（新键 `webui.nav_group_*` / `webui.nav_*`，信创合规复用已有 `menu.xinchuang`）；i18n 11 新键 × 9 语言（zh/en 直编 + 7 语言末尾追加块）；`/api/i18n` 全量导出自动下发无需注册。
+
+## v26.10.10.2 (2026-10-10)
+- **修复：监控大屏表空间剩余率误告警（Issue #61，Oracle/DM）**
+  - 根因：大屏 `screen_metrics.py` 的 `ORACLE_TBS_SQL`/`DM_TBS_SQL` 用「当前已分配字节」当分母、忽略 datafile 的 `AUTOEXTEND` 上限 `MAXBYTES` → 表空间还能扩展时剩余率被低估、误触发告警；列名取值又按精确小写 `r.get('name')`，而 oracledb/dmPython 返回**大写**列名（`NAME`/`TOTAL_MB`）→ 全取空（前端显示 name 空、0/0）。
+  - 修复：两 SQL 增加 `max_mb = SUM(CASE WHEN autoextensible='YES' THEN GREATEST(maxbytes,bytes) ELSE bytes END)`（最大可用容量）；新增 `_tbs_free_pct(total,max,free)` 优先按「最大可用容量」算剩余率（`MAXBYTES=0` 未知上限时安全退化回旧口径）；8 处表空间块（`r.get(...)`）全部换 `_find_key`（大小写无关），对 PG/MySQL 小写驱动行为不变。DB2 本就用最大容量口径无需改。
+  - 验证：`_tbs_free_pct` 5 用例（autoextend 大余量 100/1000/10→91.0%、无 autoextend 不变、MAXBYTES=0 回落、真满 1.0%、零 total 返回 None）全过；模拟 Oracle 大写行取列 name/剩余率正确。
+- **修复：Oracle/Oracle_jdbc 大屏「连接会话」明细为空（用户反馈）**
+  - 原 `ORACLE_CONNECTION_SQL` 除 `v$session` 外 `LEFT JOIN v$sql` 取 sql_text + 两条关联子查询；监控账号通常无 `V_$SQL` 的 SELECT 权限 → `ORA-00942` 整条查询失败 → `conn_rows` 空 → 大屏显示「可能不支持连接采集」。收敛为**纯 `v$session`** 查询（与已验证可用的 `lock_health` 同源），保留 username/state/duration_h/current_sql(降级 sql_id)/schemaname/machine/program；下游 `_collect_conn` 不依赖被删列。
+- **修复：多类型大屏「连接会话 / 慢查询」一律「不支持连接采集」（用户批量反馈）**
+  - 根因：`CONNECTION_TEMPLATES`/`SLOW_QUERY_TEMPLATES` 仅覆盖少数类型，所有 PG 线协议国产/衍生库（kingbase/highgo/opengauss/greenplum/halodb/vastbase）与 MySQL 线协议库（starrocks/doris）漏注册 → `_collect_conn` 恒返「不支持的类型」→ 前端误导文案；`_create_connection` 的 PG 分支也未含 highgo/halodb/opengauss/greenplum（hgdb 归一 highgo 后原 'hgdb' 分支成死代码），原生连接也建不起来。
+  - 修复：`CONNECTION_TEMPLATES`/`SLOW_QUERY_FALLBACK_TEMPLATES` 补 10 键（8 PG 系→`PG_*_SQL`、2 MySQL 系→`MYSQL_*_SQL`），`MAX_CONN_QUERY_SQL`/`MAX_CONNECTION_DEFAULTS` 同步；`engine.py` 原生分派补 starrocks/doris（mysql 分支）、highgo/halodb/opengauss/greenplum（PG 分支）、default_db 补 highgo/opengauss/greenplum。YashanDB 用自有驱动非 PG 视图，刻意不纳入（避免必失败查询）。
+- **修复：连接采集可见性 + 空状态 UX 误导**
+  - `jdbc_collect_cli.py` 返回的列名强制 `.lower()`，与 `engine.py` 原生路径一致，消除 JDBC 类型明细列名大写隐患。
+  - 大屏连接会话 tab 区分三态：① 类型真不支持（如 redis）→「可能不支持连接采集」；② 采集失败 → 透传**真实错误红字**（如 `ORA-00942`/JDBC 连接失败），不再一律误导为「不支持」；③ 已连接但无其它活跃会话（如仅监控自身连接，OB/PG processlist 排除自身后 0 行）→ 中性文案「已连接成功，当前无其它活跃会话」。改动：`screen_metrics.py`（记 `conn_err`/`conn_no_sessions`）、`app.py`（透传）、`monitor_screen.html`（分支渲染）、`i18n` zh/en 新增 `screen_dt_conn_empty`。
+- **修复：Vastbase 默认库映射（用户纠正血缘）**
+  - `engine.py` `_create_connection` 的 `default_db` 对 vastbase 原映射 `'vastbase'`，但 Vastbase（海量 G100）基于 openGauss 内核（openGauss 源自 PG 9.2 分支），两者均保留 PG 兼容层、默认库为 `postgres`；统一改为 `'postgres'`（与同分支 opengauss/greenplum 一致），消除用户未填 database 且实例无 vastbase 库时连失败隐患。
+
+## v26.10.10.1 (2026-10-10)
+- **新增：Vastbase G100 实时监控深采接入**——`metrics_collector` 三处补登记 vastbase（psycopg2 直连分支 / `_collect_postgres` 深采 / 计数器集），首页实时监控对海量实例由「端口可用性 + 连通性诊断」降级图自动切换为「吞吐（QPS/TPS）+ 连接数」深采图表，前端零改动（深采键自动识别）。实测：`pg_stat_database` 全通，`rate_xact_commit` 等差值速率与 `numbackends` 连接数正常产出；复制延迟因 9.2 内核无 `replay_lag` 列容错降级（与金仓等同内核一致）。
+
+## v26.10.10.0 (2026-10-09)
+- **新增：Vastbase G100（海量数据库）全链路接入**
+  - `vastbase_jdbc` 插件七件套（available+enabled 双份）：复用 openGauss JDBC 驱动（`org.opengauss.Driver`，内核同源协议兼容），8 章 20 查询模板（pg_catalog/pg_stat_* 实测适配：`pg_authid` permission denied → `pg_roles`、Vastbase 特有 GUC `password_encryption_type`、无 `pg_hba_file_rules`/`pg_stat_archiver` 视图已剔除）、8 条基线（`password_encryption_type == '0'` 判 md5 弱加密 HIGH）、官方 logo（vastdata.com.cn SVG 矢量渲染 128×128）。
+  - 驱动登记四处：`drivers/vastbase/6.0.5/opengauss-jdbc-6.0.5.jar` + `drivers_seed.json` + `driver_registry.py`（DB_TYPE_CATALOG `xinchuang: True` 国产 + JDBC_PLUGIN_TO_CATALOG）+ `jdbc_connector.py` profile；`templates/vastbase_wordtemplates_v1.0.docx` 官方 Word 报告模板。
+  - 前端接线：index.html 8 处（_JDBC_CATALOG/首页 logo 墙/dbLogos/模板编辑下拉/STATIC_DB_ICONS/PH_MAP/DB_GROUP_MAP/关于页芯片）+ monitor_screen 大屏图标 + i18n zh/en 各 2 处；规则引擎 `pro/rules/builtin/vastbase.yaml` 15 条（连接/内存/性能/备份/锁/维护/安全/系统资源，实测命中容器弱配置）。
+  - JVM 稳定性收口（与 HGDB/UXDB 同根因系列）：测试连接新增 `_ct_vastbase` 走 `run_jdbc_test_subprocess` 子进程隔离（vastbase 无 `_jdbc` 后缀，`_plugin_conn_fallback` 守卫拦不住）；`JVM_INSPECTION_DB_TYPES`（app.py + jdbc_inspection_cli.py，覆盖正式巡检/聊天巡检/定时巡检）与智能诊断 `INTEL_JVM_DB_TYPES`（inspection_runner.py + intel_inspection_cli.py）补 vastbase，根除「开始巡检卡死」（进程内 startJVM 钉死 gevent hub）。
+  - 慢查询分析：新增 `VastbaseSlowQueryAnalyzer`（openGauss 内核容器实测适配：无 `pg_stat_statements`、`dbe_perf.*` permission denied、`pg_stat_activity` 无 `wait_event`/`wait_event_type` 列 → `waiting`/`enqueue` 映射保持报告渲染同构）；索引健康注册 vastbase → `analyze_pg_indexes`（容器实测 `pg_stat_user_indexes` 等全通）；e2e 全链路验证（连接→20 查询→AI 诊断→报告生成，0 错误）。
+  - 官网兼容性芯片墙新增 Vastbase G100 芯片 + 数据库类型口径 22→23。
+- **修复：UXDB 慢查询分析静默跳过**
+  - `slow_query.py` 新增 `UxdbSlowQueryAnalyzer` 并注册 `uxdb`：UXDB 为 ux_catalog 改名系内核（插件实测 `ux_catalog.ux_stat_activity`/`ux_locks`，Oracle 风格 `sys.v$instance`，驱动 `com.uxsino.uxdb.Driver`），长查询快照 `ux_stat_activity` 主路 + 标准 `pg_stat_activity` 兜底，全链路单条容错；待有活跃实例后实测校准。
+- **增强：skill 慢查询副本工厂表 5→9 类型**
+  - `modules/skill/dbcheck/scripts/slow_query_analyzer.py` 补 `mariadb`/`hgdb`/`sqlserver_jdbc` 别名映射，移植 `VastbaseSlowQueryAnalyzer`/`UxdbSlowQueryAnalyzer`（docstring 同步）。
+- **里程碑：Docker 镜像下载量突破 300,000**
+
+## v26.10.9.1 (2026-10-08)
+- **新增：HaloDB（羲和数据库）全链路接入**
+  - 连接/巡检/监控/智能分析/基线/规则引擎全打通：复刻 PG 系（kingbase/ivorysql）套路，JDBC 复用 postgresql-42.7.13.jar（`jdbc:postgresql://`），psycopg2 直连回退；openHalo initdb 默认管理库为 `halo0root`，业务库默认 `halo`，库名自动修正（''/'postgres'→'halo'）。
+  - 覆盖清单（13 处）：新建 `modules/entrypoints/main_halodb.py`（HaloDBInspector，db_type='halodb'）；`init_db.py` 新增 `HALODB_DEFAULT_CHAPTERS` 20 章（含 `database_compat_mode` 兼容模式检查）并注册默认模板；`web/app.py` task_configs 加 `halodb`（smart_analyze 复用 `smart_analyze_pg`）+ 库名修正 + 报告文件名识别；`engine.py`/`findings.py`/`lock_health.py` 类型归一；`run.py`/`web/api.py` CLI 与外部 REST API 补齐；`dal.py` 内置基线种子 11 条 + `config_baseline.py` 默认清单 8 条（重启幂等自动补齐）；新建 `modules/pro/rules/builtin/halodb.yaml` 规则 12 条；`driver_registry.py` 注册 halodb（xinchuang: True，国产）；`i18n` zh/en 新增 `webui.halodb_*`；前端模板编辑器下拉加 HaloDB。
+  - 真连验证：openHalo 容器（127.0.0.1:15432）测试连接 + 全量巡检 PASS（20 章采集、docx 报告生成、智能分析输出 PG 系建议）；三步验证 compileall → import web_ui → discover_plugins()==11。
+- **修复：Oracle 11g 巡检 opatch_history ORA-00942 + 版本模板选择（用户反馈）**
+  - 根因三层：① `registry$history` 仅 SYS/SYSDBA 可查（未授权 DBA 角色），非 SYSDBA 连接必报 ORA-00942，属 Oracle 字典权限特性，与模板选择无关；② 完整巡检路径（`main_oracle_full`）自动取默认模板从不传版本号 → 11g 永远错拿 12c+ 默认模板（内含 5 处 `FETCH FIRST`，11g 必挂 ORA-00933）；③ `Oracle 11g 巡检模板` 播种 `is_default=0`，而 `get_default_template` 版本匹配要求 `is_default=1` → 11g 版本匹配形同虚设。
+  - 修复：`engine.py` 错误分类器新增 ORA-00942 识别（含 JDBC 中文报错「表或视图不存在」，原先漏分类落「查询失败」），提示明确指向 SYSDBA 权限；`main_oracle_full` 自动选模板传入 `db_version_major`，11g 及以下自动命中 `Oracle 11g 巡检模板`；`init_db.py` 11g 模板 `is_default` 0→1（与 12c+ 模板各占一个默认位，`update_template` 本按 11g/非11g 分组互斥），播种存在性检查按版本分组（原 `LIMIT 1` 无 `ORDER BY` 命中不确定），存量库默认标记缺失按名称兜底补齐（不重建、不撞 UNIQUE 约束）。
+  - 验证：分类器 4 用例（ORA-00942 中/英/权限/其他）全对；播种三场景（全新库 11g→11g 模板、19c→默认模板；存量 is_default=0 自动补齐；幂等重跑不重复播种）全过。
+  - 用户侧消除 opatch_history 警告（二选一）：数据源勾选 SYSDBA 连接；或 SYS 执行 `GRANT SELECT ON sys.registry$history TO <巡检账号>;`
+
+## v26.10.9.0 (2026-10-08)
+- **修复：SQL Server（含 sqlserver_jdbc 型）吞吐 QPS/TPS 全链路缺失（用户反馈，sa 账号仍无 QPS）**
+  - 根因三层：① 深采 `_connect`/`_collect_deep`/`COUNTER_KEYS` 均不认 `sqlserver_jdbc`（插件型实例整条深采链路断，详情页只剩 TCP 探测数据）；② `_collect_sqlserver` 原 SQL 带 `object_name LIKE '%SQL Statistics%'` 过滤，而 `Transactions/sec` 属 'Transactions' 对象 → TPS 计数器漏采，且吞吐计数未入速率白名单、无 `rate_*` 序列；③ `sys.dm_os_performance_counters` 的 counter_name **随服务器语言本地化**（中文实例返回「批请求/秒」「事务数/秒」），英文 IN 清单查 0 行 → 监控大屏 QPS 恒空（连接数正常、sa 权限正常，唯独 stat 空）。
+  - 修复：`_connect`+`_collect_deep` 元组加 `sqlserver_jdbc`（pyodbc 直连，与监控大屏同口径，绝不走 JVM）；`COUNTER_KEYS` 补 `sqlserver_jdbc` 键并纳入 `mssql_batch_requests`/`mssql_transactions`；`_collect_sqlserver` 去 object_name 过滤、计数器名英/中双语匹配（`N'批请求/秒'`/`N'事务数/秒'`）、TPS 按多库求和（Transactions/sec 每库一行）；监控大屏 `screen_metrics.py` 新增 `SQLSERVER_COUNTER_MAP`（英/中名 → 统一指标键），stat SQL 的 IN 清单由 map 派生永续同步，大屏 TPS 同改多库累加（原只取最后一行、数值偏低）。
+  - 验证：mock 5 项全过（大屏中文名解析 / COUNTER_KEYS 三键齐备 / 深采中文名解析 / `_collect_deep('sqlserver_jdbc')` 路由 / `rate_mssql_batch_requests`+`rate_mssql_transactions` 序列生成）；三步验证 compileall → import web_ui → discover_plugins()==11（含 sqlserver_jdbc）。
+- **修复：监控大屏「全库 QPS 趋势·按实例」实例不全 + 线条同色（用户反馈）**
+  - 根因：① `.slice(0, 8)` 只取最新 QPS 最高的 Top8，QPS 为 0/低的实例被裁掉；② 线色取 `statusColor(n.status)` 按实例状态着色，健康实例全为同一绿色。
+  - 修复：去掉 Top8 截断，展示全部有趋势数据的实例（展示序按最新 QPS 降序，图例 type:scroll 可翻页）；新增 16 色 `TREND_PALETTE` 每实例一色，按实例名序稳定分配（刷新/重排后同实例颜色不跳变）。
+
+## v26.10.8.3 (2026-10-08)
+- **改进：监控大屏 OceanBase 表空间「需 ANALYZE TABLE」常驻弱提示（用户反馈）**
+  - 背景：OceanBase MySQL 租户的 `information_schema.tables.data_length/index_length` 在对该库执行 `ANALYZE TABLE` 之前为 NULL/0（现有 `COALESCE` 只兜底成 0、**不保证数值准确**），用户反馈表空间显示数值不准确。MySQL/MariaDB/TiDB 由存储引擎自发维护、Oracle/DM 走 `dba_data_files`、PostgreSQL 走 `pg_database_size()`，均无需 ANALYZE——唯有 OB 有此问题。
+  - 修复：后端 `screen_metrics.assemble_overview` 新增 `tbs_analyze_hint` 标志（`any(normalize_db_type(db_type)=='oceanbase' for n in nodes)`，与现有 OB 查询路径同一归一化口径）；前端监控大屏表空间面板（`#tbs-list`）上方常驻一条淡蓝弱提示「OceanBase 表空间统计取自 information_schema，需对业务库执行 ANALYZE TABLE 后才准确，未执行时可能为 0 或估算值」，按 `tbs_analyze_hint` 显隐，不依赖表空间有无数据都显示。新增 zh/en 双语文案 + `.tbs-hint` 样式。
+
+## v26.10.8.2 (2026-10-08)
+- **修复：Oracle（含自定义端口）监控大屏误报宕机（用户反馈）**
+  - 根因：监控的 `oracle_jdbc` 采集走 JDBC 子进程通道（`MonitorEngine._jdbc_run_batch` → `jdbc_collect_cli.py` → `open_jdbc_connection`），该链路的 payload **只传 `database` 占位、漏传 `service_name`/`sid`/`use_sid`/`sysdba`**；`build_jdbc_url` 对 `oracle_jdbc` 的回落逻辑 `_svc = service_name or 'ORCLCDB' or _db` 在 `service_name` 缺失时落到硬编码默认 `ORCLCDB`，丢弃真实服务名 → `ORA-12514` 监听不认识该服务 → 连接失败 → 大屏判宕机。而**测试连接**走 `oracle_jdbc` 插件的 `test_connection`（显式传 `service_name`），故测试过、监控挂。该回归自 JDBC 子进程监控方案引入（`a0a5fef`，2026-09-15）起就存在。用户反馈的「自定义端口」实为**误判**——端口在 payload 中本就正确传入（`int(payload.get('port') or 0)`）。
+  - 修复：`_jdbc_run_batch` payload 补全 `service_name`/`sid`/`use_sid`/`sysdba`（`sysdba=true` 时透传 `internal_logon=sysdba`，避免 sys 用户 ORA-28009）；`jdbc_collect_cli.py` 透传上述字段；`build_jdbc_url` oracle_jdbc 回落改为 `service_name or _db or default`，防御性避免真实服务名被 `ORCLCDB` 覆盖。
+- **修复：根治监控日志混入巡检日志（issue #59 收尾）**
+  - 根因：巡检任务与监控后台线程同为进程内线程，共用同一 stdout；监控用 `print('[Monitor] ...')` 直接写控制台且无分类标签，污染共享控制台、且无按分类过滤的视图。
+  - 修复：新建中央日志中枢 `modules/loghub.py`（线程安全环形缓冲 3000 条 + 按 logger 名派生 category + `MonitorConsoleFilter` 将 `dbcheck.monitor` 剥离共享控制台 + 监控专属 `monitor.log`）；监控日志统一改走 `logging.getLogger('dbcheck.monitor')`；巡检/诊断经 `_emit` 闭包写入中枢；新增「运行日志」导航页（全部/巡检/定时巡检/智能诊断/监控/系统 五类过滤芯片 + 关键字搜索 + 自动刷新），由 `GET /api/loghub` 按 category/level/search 过滤供给。监控噪声自此彻底离开共享控制台，且巡检日志可按分类过滤。
+
+- **修复：OceanBase 监控大屏表空间 / QPS-TPS 缺失（用户反馈）**
+  - 根因：① 大屏 `screen_metrics.py` 对 oceanbase 直接套 MySQL 家族的 `SHOW GLOBAL STATUS`——OB 不提供 Queries/Com_commit/Com_rollback/Innodb_* 计数器，QPS/TPS 差值恒为空；② 表空间容量查 `information_schema.tables` 的 `data_length+index_length`，OB 未 ANALYZE 前这些列 NULL/0 → SUM 全 NULL 显示 0；③ 监控页深采 `metrics_collector._collect_oceanbase` 的 `COUNTER_KEYS['oceanbase']` 只认 `queries`（OB 不返回）→ 无 `rate_*` 序列 → 前端判「暂不支持深采」。
+  - 修复：大屏改用 OB 原生 `gv$sysstat`（聚合全 observer，失败退 `v$sysstat`）stat_id 口径（与 OCP 官方一致）：QPS=stat_id 40000/40002/40004/40006/40008、TPS=30005、缓存命中=50008/50009；表空间 SQL 加 COALESCE 防 SUM 全 NULL；深采补 `ob_qps`/`ob_tps`/`buffer_cache_hit_pct`，`queries` 缺失时用 `ob_qps` 兜底 → 吞吐图出序列。
+- **修复：OceanBase 新建数据源测试连接 2013（用户反馈）**
+  - 根因：`(2013, 'Lost connection...')` 是 pymysql 元组格式，必来自 pymysql 回退（JDBC 异常形态不同）——该环境 OB JDBC 驱动未装/不可用 → 回退 pymysql → 连上 OB 后首个查询被断。OB 连接握手 lazy，执行首查询才校验 `user@租户` 与 host 白名单（`'user'@'localhost'` 仅本机），不通过即断开。另有两短板：`run_jdbc_test_subprocess` payload **丢弃 database**；pro 端点 `_ct_oceanbase` 直接 `pymysql.connect().close()` 裸抛 2013 无诊断。
+  - 修复：`jdbc_test_cli._oceanbase_native_fallback` 捕获 2013/2006 翻译为 OB 专属诊断（user 须 `@租户` / `GRANT...@'%'` 远程授权 / 上传官方 JDBC 驱动）；诊断文案智能检测 user 是否已带 `@`，已带则不再把「未带租户」列主因；`test_oceanbase_connection` 透传 database 进 `extra_kwargs`（修漏传）；`_ct_oceanbase` pro 分支复用专属回退且不再强制 `sys` 库。
+
+## v26.10.8.0 (2026-10-08)
+- **修复：AI 助手巡检/诊断多数据源串库（issue #59 防护）**
+  - 根因：AI 助手聊天巡检经 `match_datasource` 模糊匹配已保存实例，多数据源时贪心取列表首个、可能连到其它实例；同时后台监控采集日志与巡检日志混流同一 stdout，造成「单源正常、多源串库」的错觉。
+  - 修复：AI 助手解析出要巡检的数据源后，先列出全部候选（名称+类型+地址+instance_id）让用户确认，唯一候选才直跑；候选按钮携带 instance_id 回传，后端显式按 id 直取实例、跳过名称模糊解析，杜绝二次反问与选错；`match_datasource` 改为精确优先 + 唯一子串才采用 + 歧义返回 None 交由上游反问。
+- **修复：Oracle 11g 监控 SQL 兼容（ORA-00933）**
+  - 根因：`monitor/queries.py` 对 12c+ 使用 `FETCH FIRST N ROWS ONLY`，Oracle 11g 不识别该语法。
+  - 修复：统一改写为 `SELECT * FROM (...) WHERE ROWNUM <= N`，Oracle 全版本兼容。
+- **改进：巡检/监控日志隔离**
+  - 巡检任务增加 `[巡检] ===== 开始/结束 =====` 包络行（含目标实例 host:port + db_type）；后台监控采集线程命名 `MonitorCollector` 并在开头打印独立任务标识与 `[Monitor]` 前缀，便于在共享 stdout 中区分两条任务。
+- **改进：AI 诊断失败不再向用户暴露内部错误**
+  - 新增 `_friendly_ai_failure` 把连接被拒绝/超时/鉴权/解析失败等底层异常翻译为面向用户的中文原因，过滤 `http://`、WinError、`<urlopen error>`、urllib 堆栈路径；原始异常仅 `logging.debug(exc_info=True)` 留存，不再写进巡检报告与前端面板的 AI 诊断结论。
+- **优化：AI 助手候选确认 UI**
+  - 候选数据源按钮重做为主题化胶囊芯片（accent 圆点 + 数据源名 + db_type 徽标，深浅主题自适应），替代原 Bootstrap outline 按钮。
+
+## v26.10.3.0 (2026-10-03)
+- **修复：Oracle JDBC 监控大屏误报宕机 (issue #58)**
+  - 根因：`instances` 表缺失 `jdbc_url` 列，测试连接虽能经表单直传完整 JDBC URL 通过，但监控采集在配置 rev 变化时从数据库重载会丢失该字段，回退用 host(IP)/service_name 重建连接串（如 `@//IP:1521/ORCLCDB`），对实际 SID/service 不符的 Oracle JDBC 数据源触发 `ORA-12514`，大屏误报实例宕机。
+  - 修复：为 `instances` 表新增 `jdbc_url` 列——ALTER 幂等迁移旧表、CREATE TABLE 补列、INSERT 写入完整 JDBC URL；监控采集在 `jdbc_url` 非空时原样透传，重载后保留用户配置，不再回退重建。
+  - 提示：升级后请对受影响 Oracle JDBC 数据源「编辑 → 保存」一次，将完整 JDBC URL 落库即可根治。
+
+## v26.10.2.0 (2026-10-02)
+- **P2 信创合规态势：库型维护合并 + 替换决策化**
+  - 信创合规页新增「库型维护」单一入口，合并原「分类管理」与「国测认证」两个维护界面；去掉逐库信创判定切换（判定固定为权威默认 / 自定义指定），列表仅保留国测 / 非国测切换按钮。
+  - **国外数据库待替换清单升级为「替换决策依据」**：为全部 14 种国外库编写结构化替代元数据（同源 / 兼容 / 适配关系 + 改动量 少 / 中 / 多 + 主要差异 + 推荐理由），列表支持行内展开决策卡与「同源优先 / 国测优先 / 改动少优先」排序；诊断中心国外库提示同步展示关系 / 改动量 / 国测维度。
+  - **自定义库型独立管理**：新增 `xinchuang_custom_types` 表，固化 Vastbase / TDSQL / He3DB / HaloDB / NetrixDB 五个国产 + 国测库型为初始数据；添加自定义库型时可指定国产 / 国外 / 国测，**国外库不可标记国测**（前端联动禁用 + 后端双兜底）；旧自定义记录平滑迁移并大小写归一。
+  - 修复库型维护删除接口 `sqlite3.Connection.rowcount` 误用导致的报错；`driver_registry` 库型归一化保留原始大小写（去 `_jdbc` 后缀 + `hgdb→highgo`），手工添加库名不再被强制小写。
+
+## v26.9.30.0 (2026-09-29)
+- **新增：数据源 JSON 全量导出 / 导入（升级迁移利器）**
+  - 数据源管理页新增「⤓ 导出 / ⤒ 导入」：全保真导出连接参数 + SSH 隧道 + 分组信息，弥补旧 CSV 导出不含密码、缺 SSH/MongoDB/TLS 扩展字段的短板，升级后一键恢复全部数据源。
+  - 导入采用 merge 模式：同 ID 覆盖更新、新数据源自动新增；密码按本机密钥**重新加密存储**，跨机导入无需关心导出方密钥；脏数据自动跳过并给出原因。
+  - 安全门控：含密码导出仅管理员可用（否则 403 自动降级为无密码导出）；导出范围限定当前身份可见集合，防越权。
+- **修复：sqlserver_jdbc 在 Java 8 环境连接失败（UnsupportedClassVersionError）**
+  - 根因：JVM 选择策略 JDK 8 优先（兼容 ojdbc6 等老驱动），而捆绑的 mssql-jdbc 13.4.0 仅含 jre11 变体（Java 11 字节码），Java 8 加载即抛 class file version 55.0 错误。
+  - 修复：捆绑官方 `mssql-jdbc-13.4.0.jre8.jar`（字节码兼容一切 Java 8+ 环境）；新增 JVM 感知的驱动配对引擎——按 jar 名解析所需 Java 版本、探测运行时 JVM 主版本，激活驱动不兼容时自动切换已登记或磁盘上的兼容变体；报错文案附带修复指引。
+  - 该机制对所有 `*_jdbc` 插件生效，同类「驱动与 JVM 代差」问题自此根治。
+
+## v26.9.29.0 (2026-09-29)
+- **新增「智能基线」页（跨实例 Fleet Intelligence）**
+  - **无监督基线学习**：对全部纳管实例按「小时」分 24 桶学习各指标一天内不同时段的正常波动区间（P50/P95 插值分位数），漂移检测用方向敏感的鲁棒 z 分数（≥2 警告 / ≥3 严重）；**容量预测**线性外推触顶日期，已越界立即报告（days_to=0 直接 critical）。
+  - **页面能力**：实例排行（基线覆盖率/漂移/容量风险统计）、一键学习全部、下钻抽屉（基线状态 / 漂移检测条 / 容量预测 / 联动处置）；旧 schema（星期×小时 168 桶含 dow 列）自动探测迁移重建。
+- **新增「拓扑巡检」页（DB Twin，大屏拓扑之上的智能叠加层）**
+  - **复合健康分 0-100**：漂移/容量/实时状态复合扣分，宕机一票否决（0/危急），无智能数据不凭空给分；节点色按健康档位、连线色区分（ADG 蓝 / RAC 灰 / 手动 teal）。
+  - **关系自动+手动**：自动识别 Oracle ADG 主→备与 RAC 姊妹线；支持手动声明跨库型依赖连线（主从/集群/容灾/应用依赖/自定义，自连/重复/未知语义拦截）；**24 小时历史回放**；节点下钻直接联动 ⚡触发自治闭环 / 跳转基线下钻。
+- **巡检组件化 + 工作流市场**
+  - 工作流新增 `inspect` 节点引用章节级巡检组件（`insp:<模板>:<章节>`），支持声明式 `when` 条件（min_severity / min_findings / source，纯数据无 eval）；组件市场提供 3 个内置 runbook（性能三查/容量体检/会话速查）+ JSON 导入导出（同名去重）。
+  - **组件面板紧凑化**：巡检组件单组收纳 + 库型徽章、大方块改单行（高度降约 70%）、分组可折叠带计数、搜索按库型命中自动展开。
+  - **混合库型防呆**：同一模板混用不同库型组件执行必失败——拖入/属性改 ref 时 toast 提醒，保存时模态确认（说明后果并建议 `match_title` 跨库方案，可强制保存）。
+- **安全自治闭环增强**
+  - **修复提案抽取只扫 plan.steps 导致 SQL 编辑框空挂**：改为递归遍历整个诊断 JSON 抓 ```sql``` 块 + 写类语句过滤；零提案落 `no_proposals` 终态不再空挂 pending_approval，「重开」加守卫——治好「SQL 编辑不了 / 没有重开按钮」。
+  - 基线下钻/拓扑下钻「触发自治闭环」按钮即时反馈（同步接口执行数十秒，点击立即禁用 + 进度提示，防连点）。
+- **修复监控大屏两类「实时监控有数据但大屏显示宕机」**
+  - **MySQL 5.7**：连接采集 SQL 使用 `COUNT(*) OVER (PARTITION BY ...)` 窗口函数（8.0+ 语法，5.7 报 1064 且无 fallback）→ 改派生表 JOIN，5.7 / 8.0 通用。
+  - **oracle_jdbc / uxdb_jdbc**：JDBC 专属数据源曾被归一成 oracle/pg 用 Python 原生驱动直连（忽略 jdbc_url）→ 新增 `JDBC_ONLY_TYPES` 路由强制走 JDBC 子进程批量通道，连接器 id 与模板键分离。
+- **UI 调整**
+  - 下钻抽屉改为直接覆盖 AI 助手（移除让位偏移）；**AI 助手默认隐藏**，右下角浮动按钮唤出，设置页开关改为「页面加载即展开」；菜单更名：舰队智能→**智能基线**、拓扑孪生→**拓扑巡检**（菜单 key 与数据不变）。
+
+## v26.9.25.0 (2026-09-24)
+- **监控大屏新增 Oracle RAC + ADG 拓扑展示**
+  - **采集增强**：Oracle 新增 3 个轻量身份查询（权限要求不高于现有 `v$sysstat`）——`v$database`（角色 PRIMARY/STANDBY、`db_unique_name`、open_mode）、`v$instance`（RAC 实例名/编号/主机）、`v$archive_dest`（**主库声明往哪些备库送归档**，主备配对全自动无需手工配置）；transport / apply lag 分开保留。
+  - **拓扑视图**：同一 `db_unique_name` 的实例围入**集群虚线框**（簇头标注集群名与主/备角色），同簇主机强制同列保证框体不乱；**主集群 → 备集群 ADG redo 传输线**自适应横/竖走向 + 流动粒子 + 中点延迟牌，备库 down/严重时传输线变红、警告变黄。
+  - **实例卡片**：拓扑卡片第 2 行右侧新增主库（绿）/ 备库（蓝）角色徽章；矩阵视图卡片新增 P/S 角色徽章（悬停显示角色 + 集群名），备库卡片始终显示复制延迟。
+  - **优雅降级**：低权限查不到 `v$database`、单机 Oracle、历史回放（无该字段）、非 Oracle 库型全部自然回落现有视图，零影响。
+- **修复 GitHub Release 发布说明固化问题**
+  - **根因**：`.github/release_append.md` 为 v26.9.20.0 时代生成的静态文件且从未随版本更新，CI 原样追加 → 每次 Release 的「主要更新」与 Docker 镜像 tag（硬编码 v26.9.20.0）都是旧内容。
+  - **修复**：新增 `scripts/gen_release_append.py`，CI 发版时**从 CHANGELOG.md 动态提取当前 tag 段落**生成「主要更新」，Docker 镜像 tag 按真实 tag 注入；段落缺失时回退提示链接 CHANGELOG，静态文件已删除。
+
+## v26.9.24.2 (2026-09-24)
+- **监控大屏新增「实例状态矩阵」默认视图，拓扑连线降级为可切换视图**
+  - **背景**：监控实例数量增长后（18+），原拓扑连线区卡片挤成窄竖列、上方大面积空白，信息密度低且无法一眼定位问题实例。
+  - **新矩阵视图**（默认）：实例卡片网格铺满中间区——状态顶条色 + 真实数据库 logo + QPS 大数字（按状态着色）+ 近段 QPS 迷你趋势线 + 连接/活跃/表空间或复制延迟 + 连接利用率底条 + 错误 ⚠ 角标；检测中状态呼吸闪烁。
+  - **异常置顶**：down/严重 → 警告 → 正常 → 检测中排序，同级按 QPS 降序；可一键关闭恢复纯 QPS 排序。**状态过滤芯片**（全部/严重/警告/正常）带实时计数，点「严重」只看问题实例。
+  - **拓扑完整保留**：标题行右侧「矩阵 / 拓扑」切换按钮两种视图下常驻，切回拓扑即恢复原连线图（缩放/拖拽/分页/机柜折叠交互不变）；点击矩阵卡片复用底部详情面板（概览/连接/慢查询/表空间页签）。矩阵模式下跳过拓扑每帧重绘，降低 CPU 占用。
+  - 中英文 i18n 同步；实时轮询与历史回放复用同一刷新管线，矩阵自动跟随。
+- **修复切换拓扑视图后图示跑到显示区域外且比例过小**
+  - **根因**：帧循环按画布内联 `style.display` 判断可见性，而画布初始由样式表隐藏（内联值为空）→ 页面加载起就持续用 0×0 隐藏画布执行视口拟合，算出错误缩放与偏移并被记住；切回拓扑时因实例数未变不触发重拟合。
+  - **修复**：帧循环改按视图模式门控；切到拓扑时强制按真实可见尺寸重新拟合；绘制前对零尺寸画布直接跳过，杜绝隐藏画布污染拟合参数。
+- **修复矩阵卡片右上角错误角标「!」显示不全**
+  - 根因：三角角标的右上削角半径把「!」所在角落削掉了。已将「!」移入三角实心区，并让角标被卡片圆角干净裁切。
+
+## v26.9.24.1 (2026-09-24)
+- **修复 PyInstaller 打包遗漏 `cryptography.hazmat.primitives.kdf`，oracledb thin 模式连接报 DPY-3016（Issue #57）**
+  - **现象**：Windows 冻结包（v26.9.20.1 起）连 Oracle 报 `DPY-3016: unsupported client library version` / 找不到 kdf 模块，源码直装正常。
+  - **根因**：3 个 PyInstaller spec（Windows/macOS/Linux）的 cryptography hiddenimports 为**手工罗列清单**，自 2026-06-04 后未随 cryptography 版本更新，遗漏 `cryptography.hazmat.primitives.kdf` 全部 8 个子模块（pbkdf2/scrypt/hkdf/x963kdf/kbkdf/concatkdf/argon2/kdf）；oracledb thin 模式运行时才动态导入 kdf，PyInstaller 静态分析扫不到 → 打包后缺模块即崩。
+  - **修复**（f2bc70f）：hiddenimports 改为 `collect_submodules('cryptography.hazmat')` 自动收集，另补 `cryptography.fernet` / `cryptography.utils` / `cryptography.__about__`；本地构建验证 PYZ 模块数 2652 → 2671，kdf 全部入包。
+  - **新增打包验证脚本** `scripts/verify_pyz_kdf.py`：解析冻结包 exe 内嵌 PYZ 目录，核验 kdf 等关键模块是否入包，可对任意发版包复跑。
+
+## v26.9.24.0 (2026-09-23)
+- **修复 AI 聊天助手「正在巡检…」永远不结束（HGDB / 国产库必现）**
+  - **现象**：在 AI 助手聊天框发「巡检 XXX 连接数」后，界面持续转圈「正在巡检」无结果返回；发「列一下所有数据源」答非所问（LLM 凭空编造）。
+  - **根因**：聊天两条链路（SSE 流式 `_stream_inspection_response`、非流式 `/api/chat`）启动巡检时**漏写 `db_info['_db_type']`**，而正式巡检入口 `_run_inspection_subprocess` 已正确写入；`run_inspection_task` 取到 None 直接 `return`，却**未把 `tasks[id]['status']` 置为 error**，前端轮询永远拿到 `running` 无限转圈；同时 JVM 类数据库（HGDB/DB2/SQLServer-JDBC 等）此前没接到子进程通道，会退化到进程内起 JVM 钉死 gevent hub。错误事件用 socketio 单播发到聊天未 join 的 room，用户也看不到。
+  - **修复**：新增统一分发函数 `_start_chat_inspection_task`（与正式巡检入口对齐）——补 `_db_type` + `JVM_INSPECTION_DB_TYPES` 命中走 `_run_inspection_subprocess` 子进程 + 分发异常兜底 `status='error'`；`run_inspection_task` 缺 `_db_type` 早返回处补 `status='error'` 双保险；删除两处内联 `task_func_map`。
+- **新增「平台数据查询」意图（答非所问 → 直接查平台）**
+  - 规则命中「列举词（列出/查看/有哪些/所有/数量…）+ 目标词（数据源/实例/连接…）」时，直接调用 `get_instance_manager().get_all_instances(mask_password=True)` 返回真实清单表格（名称/类型/地址），不再交给 LLM 泛答；SSE 与非流式两路均优先于问答分类接入。
+  - `parse_intent` 的 db_type 枚举补全 hgdb/kingbase/ivorysql/mariadb/mongodb/highgo 等，并补 `highgo→hgdb`、`kingbasees→kingbase` 归一化，降低 LLM 猜类型概率。
+- **AI 助手贯通智能诊断中心与工作流（P1）**
+  - 聊天意图分类扩展为 diagnose / workflow / inspect / qa 四类：「诊断 XX」「根因分析」「启动 XX 工作流」等可直接在聊天框触发智能诊断中心（`hub.dispatch / dispatch_stream` 逐事件流式播报协调员/进度/重规划/Reviewer 结论）或启动工作流任务；SSE 与非流式两路均接入。inspect 关键词移除「诊断」消歧，避免误判为普通巡检。
+  - 前端聊天流式渲染补 `type=qa` 分支（此前平台查询 SSE 响应被静默丢弃）。
+  - 聊天里「巡检某个具体问题」（如「巡检连接数」「分析一下锁等待」「看下内存使用」）自动识别为定向分析，**直通智能诊断中心**而非全量巡检任务；与诊断中心复用同一 `detect_focus_topic`（主题词+意图词双命中，广谱目标仍走普通巡检），确定性规则不依赖 LLM。
+- **智能诊断中心新增第 13 专家「定向分析专员」（focus_analyst）**
+  - 解决「让分析一个具体问题却甩出一堆无关结论」：主题+意图双命中进入定向模式（连接/锁/慢查询/内存/容量/复制/缓存/计算/IO 共 9 类主题），编排固定「运行监控 → 深度巡检 → 定向分析」并**抑制重规划**追加无关专家；确定性编排优先于 AI 编排。
+  - 三层分析降级：BIC-QA 已配置优先知识库分析 → 未配置走已配置 AI 模型从巡检结果分析 → 均不可用给原始相关数据，绝不编造。
+  - **定向数据精准抽取**：按 checkdb 巡检结果 context 键名正则只抽取对应主题数据段（如连接 → `sessions`/`hgdb_conn_summary`），不再把全库巡检数据一股脑喂给分析模型；键名覆盖全部库型（MySQL/PG/Oracle/DM 内置 + hgdb/uxdb/db2/sqlserver/redis/mongodb/clickhouse 插件，30 组矩阵回归）。
+  - 无关发现不丢弃：折叠进「其他发现」（前端默认收起可展开）；诊断结果与 AI 聊天入口同步生效。
+- **修复 HGDB 等 JPype 插件库型定向分析拿不到巡检数据**
+  - **根因**：插件路径巡检返回未透出 `context`，且 HGDB 走 JPype/JDBC 采集的行字典**键是 `java.lang.String` 包装对象**，子进程回传 `json.dumps` 序列化崩溃 → 兜底 `ok=False` → 定向分析拿空数据。
+  - **修复**：巡检内联与插件路径均透出 `context`（`_sanitize_for_json` 递归转换，dict 键强制转原生类型）；CLI 序列化兜底错误带上异常详情，便于定位。
+- **UI 打磨**
+  - 智能诊断中心专家卡片：长标题最多两行显示（不再截成一行看不全）；执行顺序角标移到左下角并改亮色橙渐变；定向分析专员卡片图标/主题色；定向分析结论横幅 + 「其他发现」折叠渲染。
+
+## v26.9.23.0 (2026-09-23)
+- **受限容器环境 OpenBLAS 多线程创建被拦截，导致容器启动即崩溃（Docker 部署修复）**
+  - **现象**：在国网云桌面、企业安全容器、定制 seccomp / LXC 嵌套虚拟化 / K8s 等受限容器里，用 Docker 部署 RaccoonX（DBCheck）启动即报 `OpenBLAS blas_thread_init: pthread_create failed for thread N of M: Operation not permitted`。
+  - **根因**：numpy 1.26 内置的 OpenBLAS 在 `import` 阶段按宿主机 CPU 数预建 BLAS 线程池，每建一个线程都要调 `clone()` 系统调用；受限容器底层直接拒绝 `clone()`，导入即崩。该拦截**与 `ulimit` / `--privileged` 无关**——日志里 `RLIMIT_NPROC` 明明是 `65535` 也照样崩，加 `--ulimit nproc=-1` 或 `--privileged` 均无效。
+  - **修复**：镜像层（`deploy/Dockerfile`）与启动入口（`web_ui.py`）在 numpy 导入前，默认将 `OPENBLAS_NUM_THREADS` / `OMP_NUM_THREADS` / `MKL_NUM_THREADS` / `NUMEXPR_NUM_THREADS` 设为 `1`，从根上让 OpenBLAS 不建线程池（单线程模式下完全不调 `clone()`）。本项目 numpy 仅用于 openpyxl / 报表等轻量数值场景，单线程几乎无性能损失；CPU 密集场景可用 `-e OPENBLAS_NUM_THREADS=4` 覆盖默认值。
+  - **影响范围**：仅影响容器 / 受限 Linux 部署；Windows 直装、普通 Linux 直装不受影响。旧镜像（v26.9.20.1 及之前）需重新拉取 `jackge12345/dbcheck:v26.9.23.0`。
+
+## v26.9.20.1 (2026-09-20)
+- 锁定 `JPype1<1.6` 兼容 Java 8（避免 CI 拉到 1.7.1 在 JDK8 机器 `startJVM` 崩溃导致测试连接子进程无结果）；拆分 Oracle 测试连接为独立模块，测试连接子进程不再 import 整个 Flask 应用。
+
+## v26.9.20.0 (2026-09-20)
+- RaccoonX（浣巡）品牌升级、SQL 审计 MVP2、智能诊断中心迭代、公告 banner 系统、打赏二维码上线。
+
 ## v26.9.15.0 (2026-09-15)
 - **告警邮件/Webhook 通知（重磅，678aa95）**：新增 `modules/monitor/alert_notify.py` 告警状态机，完全复用设置页既有邮件 SMTP / 企业微信/钉钉 Webhook 通知配置；**状态迁移才发送**（正常→告警、warn/crit 等级变化、告警→恢复），同一告警绝不重发；服务启动时已处于异常的实例**合并发送一封摘要邮件**（防重启刷屏且不漏报）；多实例同轮告警 SMTP 串行发送防并发拒信；通知主题一眼明确问题（`[DBCheck][宕机] 实例(地址) 错误摘要`）。修复采集快照缺 `id` 字段导致状态机空转的缺陷。
 - **通知密码加密根修（678aa95）**：根治「解密邮件密码失败」——`_save_config` 整节点替换曾把首次生成的加密密钥冲掉致密文永久解不开；现显式保留密钥、配置文件原子写（tmp+os.replace）、解密路径不再生成密钥、配置持续损坏时拒绝保存（防清空其他配置节点）、失败提示记忆化只打一次且可操作。

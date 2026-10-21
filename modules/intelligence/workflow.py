@@ -10,7 +10,17 @@
 * ``specialist`` —— 调 ``registry.get(ref).analyze(ctx)`` 追加发现（与重规划同一套能力）；
 * ``hub``        —— 调 ``DiagnosticHub.dispatch`` 组合一次完整重诊断；
 * ``skill``      —— 调 ``dispatch_skill`` 复用阶段 B 的 Skills/WriteGate；
+* ``inspect``    —— 调巡检组件层（章节级只读采集 + 智能分析规则，P1 组件化）；
 * ``func``       —— 任意可调用 ``callable(ctx, args)``，做数据搬运/条件注入。
+
+``when`` 条件支持两种形式：
+
+* Python 可调用 ``Callable[[SharedContext], bool]``（引擎内部使用）；
+* **声明式 dict**（前端/市场 runbook 安全使用，绝无 eval）::
+
+    {"min_severity": "warning"|"high"|"critical",  # 至少 1 条发现 ≥ 该级别
+     "min_findings": 3,                            # 发现总数下限
+     "source": "<step_id 或组件/专家 ref>"}         # 只统计该来源的发现
 
 本文件仅实现编排引擎；可视化（Workflow Builder UI）属阶段 D。复用不重复造轮子：
 专家能力、WriteGate、Reviewer 全部来自既有模块。
@@ -23,6 +33,39 @@ from collections import deque
 from typing import Any, Callable, Dict, List, Optional
 
 from .context import SharedContext, Finding
+
+# 严重级别序（声明式 when 用）
+_SEV_RANK = {"info": 0, "warning": 1, "high": 2, "critical": 3}
+
+
+def _eval_when(ctx: SharedContext, cond: Dict[str, Any]) -> bool:
+    """声明式 when 求值（无 eval，纯数据条件）。
+
+    支持 key（全部为「与」关系，全部满足才放行）：
+    - ``min_severity``: 至少 1 条发现严重度 ≥ 指定级别
+    - ``min_findings``: 发现总数 ≥ N
+    - ``source``:       只统计指定来源（step id / 专家 ref / 组件 id / "inspect_component"）
+    """
+    if not isinstance(cond, dict) or not cond:
+        return True
+    findings = ctx.findings or []
+    src = str(cond.get("source") or "").strip()
+    if src:
+        findings = [f for f in findings
+                    if getattr(f, "source", "") == src
+                    or src in (getattr(f, "tags", None) or [])]
+    min_sev = str(cond.get("min_severity") or "").lower()
+    if min_sev in _SEV_RANK:
+        floor = _SEV_RANK[min_sev]
+        findings = [f for f in findings
+                    if _SEV_RANK.get(getattr(f, "severity", "info"), 0) >= floor]
+    min_n = cond.get("min_findings")
+    if isinstance(min_n, int) and min_n > 0:
+        if len(findings) < min_n:
+            return False
+    elif (min_sev or src) and not findings:
+        return False
+    return True
 
 
 class Step:
@@ -38,11 +81,22 @@ class Step:
         label: str = "",
     ) -> None:
         self.id = id
-        self.kind = kind          # specialist | hub | skill | func
+        self.kind = kind          # specialist | hub | skill | inspect | func
         self.ref = ref
         self.args = args or {}
         self.when = when          # Optional[Callable[[SharedContext], bool]] 条件分支
         self.label = label or id
+
+    def _when_pred(self) -> Optional[Callable[[SharedContext], bool]]:
+        """解析声明式 when（args["when"] dict）为谓词；callable 直接返回。"""
+        w = self.when or self.args.get("when")
+        if w is None:
+            return None
+        if callable(w):
+            return w
+        if isinstance(w, dict):
+            return lambda ctx, _w=w: _eval_when(ctx, _w)
+        return None
 
 
 class Workflow:
@@ -105,7 +159,8 @@ class Workflow:
                     log.append({"step": pending, "status": "skipped", "reason": "任务已停止"})
                 break
             step = self.steps[sid]
-            if step.when is not None and not step.when(ctx):
+            pred = step._when_pred()
+            if pred is not None and not pred(ctx):
                 skipped.append(sid)
                 log.append({"step": sid, "status": "skipped", "reason": "when 条件不满足"})
                 continue
@@ -156,6 +211,34 @@ class Workflow:
             from .skills import dispatch_skill
 
             dispatch_skill(step.ref, step.args or {}, principal=None)
+        elif step.kind == "inspect":
+            from .inspect_components import run_component
+
+            res = run_component(
+                comp_id=step.ref or "",
+                instance_id=instance_id,
+                match_title=str((step.args or {}).get("match_title") or ""),
+            )
+            if not res.get("ok"):
+                raise ValueError(res.get("error") or "巡检组件执行失败")
+            for f in res.get("findings") or []:
+                ctx.add(Finding(
+                    source=f.get("source", "inspect_component"),
+                    category=f.get("category", "data"),
+                    severity=f.get("severity", "info"),
+                    title=f.get("title", ""),
+                    detail=f.get("detail", ""),
+                    suggestion=f.get("suggestion", ""),
+                    tags=f.get("tags", []),
+                ))
+            # 采集指标入 ctx.inputs，供下游节点/条件引用
+            inspect_state = ctx.inputs.setdefault("_inspect", {})
+            inspect_state[step.id] = {
+                "component": (res.get("component") or {}).get("id"),
+                "title": (res.get("component") or {}).get("title"),
+                "metrics": res.get("metrics") or {},
+                "severity_max": res.get("severity_max", 0),
+            }
         elif step.kind == "func":
             fn = step.args.get("callable")
             if callable(fn):

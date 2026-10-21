@@ -8,7 +8,7 @@
 >
 > 项目**原名 DBCheck**。
 
-[![Version](https://img.shields.io/badge/Version-v26.8.7.1-blue.svg)]()
+[![Version](https://img.shields.io/badge/Version-v26.10.11.0-blue.svg)]()
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](./LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)]()
 [![AI](https://img.shields.io/badge/AI-Ollama%20%7C%20OpenAI-orange.svg)]()
@@ -18,12 +18,11 @@
 [![GitHub Stars](https://img.shields.io/github/stars/fiyo/DBCheck?style=flat-square\&label=Stars)](https://github.com/fiyo/DBCheck/stargazers)
 [![GitHub Forks](https://img.shields.io/github/forks/fiyo/DBCheck?style=flat-square\&label=Forks)](https://github.com/fiyo/DBCheck/network/members)
 
-> 🐳 **25,000+ Docker 镜像拉取**
-> 🗄️ **21+ 数据库类型**
-> 🔍 **330+ 巡检规则**
-> 🤖 **AI 辅助诊断**
-> 🔌 **可扩展插件架构**
-> 📜 **Apache License 2.0**
+* 🗄️ **20+ 数据库类型**
+* 🔍 **800+ 巡检规则**
+* 🤖 **AI 辅助诊断**
+* 🔌 **可扩展插件架构**
+* 📜 **Apache License 2.0**
 
 如果 RaccoonX 对你有帮助，欢迎给仓库点一个 ⭐。
 
@@ -95,11 +94,11 @@ RaccoonX 前身是 **DBCheck**，在持续开发与社区反馈中不断演进�
 
 | 里程碑             |         现状 |
 | ------------------ | -------------: |
-| Docker 镜像拉取       |    **25,000+** |
-| GitHub Stars       |       **166+** |
-| GitHub Forks       |        **57+** |
-| 数据库类型             |        **21+** |
-| 巡检规则               |       **330+** |
+| Docker 镜像拉取       |    **29,000+** |
+| GitHub Stars       |       **170+** |
+| GitHub Forks       |        **60+** |
+| 数据库类型             |        **20+** |
+| 巡检规则               |       **800+** |
 | 界面语言               |          **9** |
 | 开源协议               | **Apache 2.0** |
 
@@ -112,7 +111,7 @@ Docker 拉取次数代表镜像拉取量，不应解读为独立用户数或安�
 **给它一个 Star。**
 
 ```text
-25,000+ Docker Pulls
+29,000+ Docker Pulls
         ↓
      持续构建
         ↓
@@ -126,7 +125,7 @@ Docker 拉取次数代表镜像拉取量，不应解读为独立用户数或安�
 | 功能                         | 说明                                                                 |
 | ---------------------------- | -------------------------------------------------------------------- |
 | 🗄️ 数据源管理                 | 统一管理数据库实例，支持分组、批量巡检、CSV 导入导出                     |
-| 📋 数据库巡检                 | 21+ 数据库类型、330+ 巡检规则，自动生成 Word 报告                     |
+| 📋 数据库巡检                 | 20+ 数据库类型、800+ 巡检规则，自动生成 Word 报告                     |
 | 🔌 插件系统                   | 独立的插件生命周期、插件数据、模板、基线与规则                        |
 | 🔍 慢查询分析                 | 执行计划、I/O 模式、锁等待与 AI 辅助分析                              |
 | 🔒 锁诊断                     | 阻塞链、死锁、长事务与处置建议                                        |
@@ -144,6 +143,13 @@ Docker 拉取次数代表镜像拉取量，不应解读为独立用户数或安�
 | 💿 DM8 离线存储检查           | 无需启动数据库即可分析 DM8 数据文件                                   |
 | 📝 SQL 编辑器                 | 交互式 SQL 编辑器，语法高亮与执行历史                                 |
 | 🖥️ 远程终端                  | 基于 SSH 的终端，多标签页与全屏模式                                   |
+| 📊 监控大屏                   | 实例状态矩阵与拓扑视图，连接/慢查询/容量按库型自适应下钻               |
+| 🧠 智能诊断中心               | 多专家协同诊断、迭代重规划与 Reviewer 结论把关                         |
+| 🧩 工作流编排                 | 可视化编排巡检动作（DAG），内置市场模板一键复用                         |
+| 🛡️ 信创合规评估               | 按库型信创属性评估合规率，输出待替换清单与替代映射                       |
+| 🌐 数字孪生                   | 实例拓扑快照、配置漂移检测、容量与健康分历史回放                         |
+| 📏 智能基线                   | 跨实例配置漂移检测与容量预测（Fleet 视角）                              |
+| ✍️ SQL 审核与写操作工单       | 写 SQL 审计状态机 + 审批放行（WriteGate），读自动/写审批/全审计           |
 | 💾 容灾备份                   | 数据库/文件的定时备份，含保留清理与健康跟踪                           |
 | 🌍 多语言界面                 | 简体中文、English、繁體中文、日本語、한국어、Español、Français、Deutsch、Русский |
 
@@ -151,16 +157,15 @@ Docker 拉取次数代表镜像拉取量，不应解读为独立用户数或安�
 
 # 🗄️ 支持的数据库
 
-RaccoonX 目前支持 **21+ 数据库与数据系统**。
+RaccoonX 目前支持 **20+ 数据库与数据系统**。
 
 | 数据库        | 驱动                    | 默认端口 | 说明                       |
 | ------------- | ----------------------- | -----------: | -------------------------- |
 | MySQL         | pymysql                 |         3306 | 5.6 / 5.7 / 8.0+           |
 | MariaDB       | pymysql                 |         3306 | 10.3+                      |
 | PostgreSQL    | psycopg2                |         5432 | 10+                        |
-| Oracle        | oracledb                |         1521 | 11g R2 / 12c / 19c / 21c+  |
-| Oracle (JDBC) | JPype1 + ojdbc          |         1521 | Oracle JDBC 连接           |
-| SQL Server    | pyodbc + ODBC Driver 17 |         1433 | 2012+                      |
+| Oracle        | oracledb / JPype1 + ojdbc |       1521 | 11g R2 / 12c / 19c / 21c+, 原生或 JDBC 连接 |
+| SQL Server    | pyodbc / JDBC           |         1433 | 2012+, 原生或 JDBC        |
 | 达梦 DM8      | dmpython                |         5236 | 国产数据库                 |
 | TiDB          | pymysql                 |         4000 | MySQL 协议                 |
 | IvorySQL      | psycopg2                |         5333 | PostgreSQL 兼容            |
@@ -169,12 +174,14 @@ RaccoonX 目前支持 **21+ 数据库与数据系统**。
 | 南大通用 GBase 8s | JDBC                |         9088 | JDK + JDBC                 |
 | 优炫 UXDB     | JDBC                    |        33060 | PostgreSQL 兼容            |
 | 瀚高 HGDB     | JDBC                    |         5866 | PostgreSQL 兼容            |
+| Vastbase G100 | JDBC                    |         5432 | 海量数据库，openGauss 内核 |
+| HaloDB        | JDBC                    |         5432 | 羲和数据，PG/Oracle 双兼容 |
+| 南大通用 GBase 8a | JDBC                |         5258 | 列存数据仓库               |
 | MongoDB       | pymongo                 |        27017 | 4.0+                       |
 | DB2 LUW       | JDBC                    |        50000 | 11.5+ / 12.x               |
 | OceanBase     | pymysql                 |         2881 | MySQL 租户                 |
 | TDSQL-C MySQL | pymysql                 |         3306 | MySQL 兼容                 |
-| Redis         | redis-py                |         6379 | 3.0+                       |
-| Redis 集群    | redis-py                |         6379 | 集群拓扑与槽位             |
+| Redis         | redis-py                |         6379 | 3.0+, 单机与集群           |
 | ClickHouse    | JDBC                    |         8123 | 21.8+                      |
 
 > **Oracle JDBC**
@@ -189,29 +196,25 @@ RaccoonX 目前支持 **21+ 数据库与数据系统**。
 
 Docker 是启动 RaccoonX 最简单的方式。
 
-### Docker Hub
-
+### Docker  Images
 ```bash
 docker pull jackge12345/dbcheck:latest
 
-docker run -d \
-  -p 5003:5003 \
+docker run -d -p 5003:5003 \
   -v dbcheck_data:/app/data \
-  -v dbcheck_reports:/app/reports \
-  --name dbcheck \
+  -v dbcheck_reports:/app/data/reports \
+  -e LD_LIBRARY_PATH=/opt/venv/lib/python3.12/site-packages/dmssl \
   jackge12345/dbcheck:latest
 ```
 
 ### GitHub Container Registry
-
 ```bash
 docker pull ghcr.io/fiyo/dbcheck:latest
 
-docker run -d \
-  -p 5003:5003 \
+docker run -d -p 5003:5003 \
   -v dbcheck_data:/app/data \
-  -v dbcheck_reports:/app/reports \
-  --name dbcheck \
+  -v dbcheck_reports:/app/data/reports \
+  -e LD_LIBRARY_PATH=/opt/venv/lib/python3.12/site-packages/dmssl \
   ghcr.io/fiyo/dbcheck:latest
 ```
 
@@ -1343,7 +1346,8 @@ RaccoonX 基于 **Apache License 2.0** 开源。
 | 2026-06-19 | 类延良        | No.000011 |
 | 2026-06-19 | 渺渺兮予怀    | No.000012 |
 | 2026-09-06 | leon          | No.000013 |
-
+| 2026-09-24 | James.Yao          | No.000014 |
+| 2026-10-10 | acdante-zhang          | No.000015 |
 ---
 
 # 📜 开源协议
@@ -1377,7 +1381,7 @@ RaccoonX 不是由一个大团队打造的。
 它靠代码、反馈、Issue、想法、测试、文档、贡献，以及每一位选择使用它的人成长。
 
 ```text
-25,000+ Docker Pulls
+29,000+ Docker Pulls
 
 一次拉取一小步，
 我们持续构建。

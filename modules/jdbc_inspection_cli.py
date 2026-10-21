@@ -57,8 +57,8 @@ RESULT_PREFIX = "__DBCHECK_INSP_EVENT__"
 DONE_PREFIX = "__DBCHECK_INSP_DONE__"
 
 # 本 CLI 需要隔离执行的 JVM 数据库类型
-# 全部走 JDBC 的巡检类型：6 个 JDBC 插件 + 核心内置 dm/gbase/ivorysql（与 driver_registry.JDBC_PLUGIN_TO_CATALOG 对齐）
-JVM_INSPECTION_DB_TYPES = ('hgdb', 'db2', 'sqlserver_jdbc', 'oracle_jdbc', 'dm', 'gbase', 'clickhouse', 'uxdb', 'ivorysql', 'pg', 'kingbase', 'yashandb', 'mysql', 'mariadb', 'tidb', 'oceanbase')
+# 全部走 JDBC 的巡检类型：JDBC 插件 + 核心内置 dm/gbase/ivorysql（与 driver_registry.JDBC_PLUGIN_TO_CATALOG 对齐）
+JVM_INSPECTION_DB_TYPES = ('hgdb', 'db2', 'sqlserver_jdbc', 'oracle_jdbc', 'dm', 'gbase', 'clickhouse', 'uxdb', 'ivorysql', 'halodb', 'pg', 'kingbase', 'yashandb', 'mysql', 'mariadb', 'tidb', 'oceanbase', 'vastbase')
 
 
 def _ensure_project_root_on_path():
@@ -98,16 +98,31 @@ def _tcp_preflight(host, port, timeout=8):
 
 
 def _emit_line(event, data):
-    """把 socketio 事件序列化成一行 stdout 输出。"""
+    """把 socketio 事件序列化成一行 stdout 输出。
+
+    编码安全：ensure_ascii=True 保证输出纯 ASCII（中文变 \\uXXXX，读侧
+    json.loads 自动还原），并用 buffer 直写绕开 TextIOWrapper——
+    PyInstaller 冻结版子进程不尊重 PYTHONIOENCODING，文本写会按
+    Windows ANSI(GBK) 落盘，主进程按 UTF-8 读即成乱码。
+    """
     try:
-        line = RESULT_PREFIX + json.dumps({'event': event, 'data': data}, ensure_ascii=False)
+        line = RESULT_PREFIX + json.dumps({'event': event, 'data': data}, ensure_ascii=True)
     except Exception:  # noqa: BLE001
         line = RESULT_PREFIX + json.dumps({'event': event, 'data': {}})
-    sys.stdout.write(line + '\n')
+    _write_stdout(line + '\n')
+
+
+def _write_stdout(text):
+    """按 UTF-8 直写 stdout buffer，失败退回文本写。"""
     try:
-        sys.stdout.flush()
-    except Exception:
-        pass
+        sys.stdout.buffer.write(text.encode('utf-8'))
+        sys.stdout.buffer.flush()
+    except Exception:  # noqa: BLE001
+        try:
+            sys.stdout.write(text)
+            sys.stdout.flush()
+        except Exception:
+            pass
 
 
 def _make_emitter(task_id):
@@ -185,10 +200,9 @@ def main(argv=None):
             _emit_line('error', {'msg': _preflight_err})
             _emit_line('done', {'msg': _preflight_err, 'task_id': task_id})
             try:
-                sys.stdout.write(DONE_PREFIX + json.dumps(
+                _write_stdout(DONE_PREFIX + json.dumps(
                     {'status': 'error', 'task_id': task_id, 'error_msg': _preflight_err},
-                    ensure_ascii=False) + '\n')
-                sys.stdout.flush()
+                    ensure_ascii=True) + '\n')
             except Exception:
                 pass
             return 0
@@ -250,8 +264,7 @@ def main(argv=None):
 
     # 输出最终结束行，主进程据此判定任务完成
     try:
-        sys.stdout.write(DONE_PREFIX + json.dumps(final_status, ensure_ascii=False) + '\n')
-        sys.stdout.flush()
+        _write_stdout(DONE_PREFIX + json.dumps(final_status, ensure_ascii=True) + '\n')
     except Exception:
         pass
     return 0

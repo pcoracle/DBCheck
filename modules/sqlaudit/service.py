@@ -311,6 +311,91 @@ def execute_task(task_id: int, mode: str = "dry_run", operator: str = "anonymous
             "executions": executions, "rollbacks": rollbacks, "summary": summary}
 
 
+def update_task_sql(task_id: int, sql_text: str, plan_enabled: bool = None) -> dict:
+    """编辑已提交（未执行 / 未审批定稿）任务的 SQL。
+
+    重拆语句 → 重新解析 + 规则匹配 + 可选执行计划分析 → 替换 ``sql_audit_items``，
+    并以新的聚合风险刷新任务级 ``risk_level`` / ``risk_score``。执行器按 items 逐条跑，
+    因此必须替换 items 才能使编辑后的 SQL 真正生效。
+
+    仅 ``analyzed`` / ``pending_approval`` 状态可编辑；``approved`` / ``rejected`` /
+    ``executed`` / ``blocked`` 等已定稿状态拒绝修改（需重新提交）。
+    """
+    models.init_db()
+    task = get_task(task_id)
+    if not task:
+        raise ValueError("任务不存在")
+    if task.get("status") in ("approved", "rejected", "executed", "blocked"):
+        raise ValueError("该任务状态(%s)已不可修改 SQL，请重新提交" % task.get("status"))
+
+    stmts = split_statements(sql_text)
+    if not stmts:
+        raise ValueError("未解析到有效 SQL 语句")
+
+    db_type = task["db_type"]
+    rules = models.get_enabled_rules(db_type)
+    items = []
+    for seq, stmt in enumerate(stmts, 1):
+        parsed = analyze_statement(stmt, db_type)
+        items.append({**parsed, "seq": seq, "plan_json": None})
+
+    _run_plan_analysis(
+        items, db_type, task.get("instance_id"),
+        plan_enabled if plan_enabled is not None else bool(task.get("plan_enabled")),
+    )
+
+    task_score = 0
+    task_level = "low"
+    for it in items:
+        hits = []
+        for r in rules:
+            if _applies(r, it, db_type):
+                hits.append({
+                    "rule_id": r["rule_id"],
+                    "name": r["name"],
+                    "category": r["category"],
+                    "severity": r["severity"],
+                    "message": r.get("description", ""),
+                    "suggestion": r.get("suggestion", ""),
+                })
+        score, level = score_hits(hits)
+        if SEVERITY_RANK.get(level, 0) > SEVERITY_RANK.get(task_level, 0):
+            task_level = level
+        if score > task_score:
+            task_score = score
+        it["risk_score"] = score
+        it["risk_level"] = level
+        it["rule_hits"] = hits
+
+    conn = models.get_conn()
+    cur = conn.cursor()
+    now = models._now()
+    cur.execute("DELETE FROM sql_audit_items WHERE task_id=?", (task_id,))
+    for it in items:
+        cur.execute(
+            "INSERT INTO sql_audit_items "
+            "(task_id, seq, sql_text, sql_type, op_type, tables_json, risk_level, "
+            " risk_score, rule_hits, plan_json, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                task_id, it["seq"], it["sql_text"], it["sql_type"], it["op_type"],
+                json.dumps(it["tables"], ensure_ascii=False),
+                it["risk_level"], it["risk_score"],
+                json.dumps(it["rule_hits"], ensure_ascii=False),
+                json.dumps(it.get("plan_json"), ensure_ascii=False),
+                now,
+            ),
+        )
+    cur.execute(
+        "UPDATE sql_audit_tasks SET sql_text=?, sql_count=?, risk_level=?, "
+        "risk_score=?, updated_at=? WHERE id=?",
+        (sql_text, len(stmts), task_level, task_score, now, task_id),
+    )
+    conn.commit()
+    conn.close()
+    return get_task(task_id)
+
+
 def bind_task_instance(task_id: int, instance_id: str) -> dict:
     """为已提交任务绑定/更正目标实例（执行前发现未指定时补充）。"""
     models.init_db()

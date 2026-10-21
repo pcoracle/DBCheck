@@ -1145,6 +1145,28 @@ select option { background: var(--surface2); }
 .log-box .log-line.err { color: #EF4444; }
 .log-box .log-line.info { color: #0A2A6E; }
 
+/* 运行日志页：分类过滤芯片 + 日志行 */
+.filter-chip {
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text-muted);
+  border-radius: 16px;
+  padding: 4px 14px;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: all .15s ease;
+}
+.filter-chip:hover { border-color: var(--accent); color: var(--text); }
+.filter-chip.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+#run-log-area { color: var(--text); }
+#run-log-area .log-line { white-space: pre-wrap; word-break: break-all; padding: 1px 0; border-bottom: 1px solid rgba(128,128,128,.06); }
+#run-log-area .log-line.err { color: #EF4444; }
+#run-log-area .log-line.warn { color: #F59E0B; }
+
 .progress-bar-wrap {
   background: var(--surface2);
   border-radius: 6px; height: 6px; overflow: hidden;
@@ -3005,16 +3027,18 @@ async function executeFixSql(taskId, sql) {
         .intel-cap:hover { transform: translateY(-2px); box-shadow: 0 8px 24px -8px rgba(0,0,0,.18); }
         /* 协调员角色视觉弱化，作为编排入口 */
         .intel-cap.is-coordinator { border-style: dashed; border-color: var(--accent2); }
-        /* 执行顺序角标（协调员下达后显示），放在右上角避免遮挡头像与标题 */
+        /* 执行顺序角标（协调员下达后显示），放左下角；亮色底更醒目 */
         .intel-cap .cap-order {
-            position: absolute; top: 7px; right: 7px;
-            width: 22px; height: 22px; border-radius: 50%;
-            background: var(--accent2); color: #fff;
-            font-size: 12px; font-weight: 700; line-height: 22px; text-align: center;
+            position: absolute; bottom: 8px; left: 8px;
+            width: 21px; height: 21px; border-radius: 50%;
+            background: linear-gradient(135deg, #ffb020, #ff8a3d); color: #fff;
+            font-size: 12px; font-weight: 700; line-height: 21px; text-align: center;
             display: none; z-index: 2;
-            box-shadow: 0 2px 6px rgba(0,0,0,.25);
+            box-shadow: 0 2px 8px rgba(255,138,61,.45);
         }
         .intel-cap.has-order .cap-order { display: block; }
+        /* 左下角角标占用空间：底部标签右移避让 */
+        .intel-cap.has-order .cap-tags { padding-left: 24px; }
         .intel-cap .cap-head { display: flex; align-items: flex-start; gap: 12px; }
         .intel-cap .cap-avatar-col { display: flex; flex-direction: column; align-items: center; gap: 6px; flex: 0 0 auto; }
         .intel-cap .cap-avatar {
@@ -3027,10 +3051,13 @@ async function executeFixSql(taskId, sql) {
         }
         .intel-cap .cap-avatar svg { width: 23px; height: 23px; stroke: var(--accent2); fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
         .intel-cap .cap-meta { min-width: 0; flex: 1; display: flex; flex-direction: column; }
-        .intel-cap .cap-name-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+        .intel-cap .cap-name-row { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
         .intel-cap .cap-name {
             font-weight: 600; font-size: 14px; flex: 1; min-width: 0;
-            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            line-height: 1.35;
+            /* 长标题最多两行，超出省略（悬停有 title 全名），不再截成一行看不全 */
+            display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+            overflow: hidden; white-space: normal; word-break: break-all;
         }
         .intel-cap .cap-domain {
             flex: 0 0 auto; white-space: nowrap;
@@ -3086,6 +3113,11 @@ async function executeFixSql(taskId, sql) {
         .intel-cap.domain-general .cap-avatar { background: linear-gradient(135deg, rgba(100,116,139,.18), rgba(148,163,184,.18)); }
         .intel-cap.domain-general .cap-avatar svg { stroke: #64748b; }
         .intel-cap.domain-general .cap-tag { background: rgba(100,116,139,.12); color: #475569; border-color: rgba(100,116,139,.18); }
+
+        /* 定向分析专员（focus）：只答所问 */
+        .intel-cap.domain-focus .cap-avatar { background: linear-gradient(135deg, rgba(20,184,166,.18), rgba(56,139,253,.18)); }
+        .intel-cap.domain-focus .cap-avatar svg { stroke: #14b8a6; }
+        .intel-cap.domain-focus .cap-tag { background: rgba(20,184,166,.12); color: #0d9488; border-color: rgba(20,184,166,.18); }
 
         /* 状态 */
         .intel-cap.is-waiting .cap-state { color: var(--text-muted); background: var(--surface); }
@@ -3460,6 +3492,11 @@ async function executeFixSql(taskId, sql) {
   <script src="/static/js/xterm-addon-fit.js"></script>
   <script src="/static/js/xterm-addon-attach.js"></script>
   <script src="/static/js/socket.io.min.js"></script>
+  <!-- 全局 Socket.IO 连接：历史版本缺失此创建调用，导致所有 typeof socket !== 'undefined'
+       守卫的实时推送（实时监控 metrics / 巡检任务日志 / AI 助手 chat_task_log 等）静默失效，
+       前端从未 join 房间、收不到任何 emit——实时监控图表因此"好久不更新"。
+       此处必须在任何 socket.on(...) 顶层注册代码之前建立连接；emit 先于连接会被客户端缓冲，无需等握手。 -->
+  <script>var socket = io();</script>
   <!-- 健康态势大屏：ECharts 本地离线包（无网环境优先），本地失败再回退 CDN -->
   <script src="/static/js/echarts.min.js"></script>
   <script>
@@ -3571,7 +3608,7 @@ async function executeFixSql(taskId, sql) {
 <body data-page-node-id="Z8wXYH3Kq2Lmo04jsdprwJ">
 <div class="app-layout" data-page-node-id="jyhASvy4sIJW4QwFDK2QUg">
 <!-- 左侧：主内容区（侧边栏 + 页面内容） -->
-<div class="main-content" data-page-node-id="ad96uAIHe8MmWxJ4SSMXAi">
+<div class="main-content ai-panel-collapsed" data-page-node-id="ad96uAIHe8MmWxJ4SSMXAi">
 <!-- 背景层 -->
 <div class="bg-anim" data-page-node-id="Apghcp2CSGnKrZhVN88GbA">
   <svg viewBox="0 0 1440 900" preserveAspectRatio="xMidYMid slice" xmlns="http://www.w3.org/2000/svg" data-page-node-id="o0oy9GQr125N09PnrIAiiL">
@@ -3815,7 +3852,9 @@ const INTEL_SPEC_SVG = {
   native_db: '<svg viewBox="0 0 24 24"><circle cx="12" cy="7" r="4"/><path d="M4 20c0-3.3 2.7-6 6-6h4c3.3 0 6 2.7 6 6"/><path d="M8 10V6M16 10V6M12 6V3"/><path d="M7 14l-2 2 2 2M17 14l2 2-2 2"/></svg>',
   nl_query_expert: '<svg viewBox="0 0 24 24"><path d="M8 9h8M8 13h5M8 17h3"/><circle cx="17" cy="17" r="2.5"/><path d="M19 19l2.5 2.5"/></svg>',
   // 阶段 2：BIC-QA 知识检索专家
-  bicqa_expert: '<svg viewBox="0 0 24 24"><path d="M4 5a2 2 0 0 1 2-2h6v16H6a2 2 0 0 0-2 2V5Z"/><path d="M20 5a2 2 0 0 0-2-2h-6v16h6a2 2 0 0 1 2 2V5Z"/><path d="M12 3v16"/></svg>'
+  bicqa_expert: '<svg viewBox="0 0 24 24"><path d="M4 5a2 2 0 0 1 2-2h6v16H6a2 2 0 0 0-2 2V5Z"/><path d="M20 5a2 2 0 0 0-2-2h-6v16h6a2 2 0 0 1 2 2V5Z"/><path d="M12 3v16"/></svg>',
+  // 定向分析专员：靶心 + 单点聚焦
+  focus_analyst: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="0.8"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>'
 };
 
 // 专家 domain -> 视觉主题（头像渐变、标签、状态色）
@@ -3828,6 +3867,7 @@ const INTEL_SPEC_DOMAIN = {
   lock:          { cls: 'domain-sql',            label: '并发' },
   nl:            { cls: 'domain-nl',            label: 'NL2SQL' },
   knowledge:     { cls: 'domain-knowledge',     label: '知识' },
+  focus:         { cls: 'domain-focus',         label: '定向' },
   general:       { cls: 'domain-general',       label: '通用' }
 };
 function intelSpecSvg(id) {
@@ -4316,11 +4356,12 @@ function renderDiagResultInto(d, findingsId, planId, pvId, reviewId) {
   const sevColor = { critical: 'var(--danger)', warning: 'var(--warn)', info: 'var(--info)', fatal: 'var(--danger)' };
   const sevLabel = { critical: '严重', warning: '警告', info: '提示', fatal: '致命', high: '高', medium: '中', low: '低' };
   const f = document.getElementById(findingsId);
-  if (f) f.innerHTML = (d.findings || []).map(x => {
-    const color = sevColor[x.severity] || 'var(--border)';
-    const srcLabel = specMap[x.source] || x.source;
-    const sev = sevLabel[x.severity] || x.severity || '';
-    return `<div style="display:flex;gap:10px;border-left:4px solid ${color};padding:8px 12px;margin:10px 0;background:var(--surface2);border-radius:0 8px 8px 0">
+  if (f) {
+    const findingCard = x => {
+      const color = sevColor[x.severity] || 'var(--border)';
+      const srcLabel = specMap[x.source] || x.source;
+      const sev = sevLabel[x.severity] || x.severity || '';
+      return `<div style="display:flex;gap:10px;border-left:4px solid ${color};padding:8px 12px;margin:10px 0;background:var(--surface2);border-radius:0 8px 8px 0">
       <span class="intel-finding-avatar" title="${escHtml(srcLabel)}">${intelSpecSvg(x.source)}</span>
       <div style="min-width:0;flex:1">
         <div style="font-weight:600">${escHtml(x.title || '')} <span style="font-size:12px;color:var(--text-muted)">[${escHtml(srcLabel)} · ${escHtml(sev)}]</span></div>
@@ -4328,7 +4369,66 @@ function renderDiagResultInto(d, findingsId, planId, pvId, reviewId) {
         ${x.suggestion ? `<div style="font-size:13px;margin-top:4px;line-height:1.6">建议：${_markdownToHtml(x.suggestion)}</div>` : ''}
       </div>
     </div>`;
-  }).join('') || '<div style="font-size:12px;color:var(--text-muted)">未发现明确风险。</div>';
+    };
+    // 定向分析：置顶说明「只答所问」+ 折叠与问题无关的发现
+    let focusBanner = '';
+    if (d.focus) {
+      const sideN = (d.side_findings && d.side_findings.length) || d.focus.side_count || 0;
+      focusBanner = `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;border:1px solid rgba(20,184,166,.4);background:rgba(20,184,166,.08);border-radius:10px;padding:8px 12px;margin:8px 0">
+        <span style="font-weight:700;color:#0d9488">🎯 定向分析（${escHtml(d.focus.topic_label || '定向')}）</span>
+        <span style="font-size:12px;color:var(--text-muted)">只呈现与「${escHtml(d.focus.goal || '')}」相关的内容</span>
+        ${sideN ? `<span style="font-size:11.5px;color:var(--text-muted)">另 ${sideN} 条与该问题无关的发现已折叠到下方</span>` : ''}
+      </div>`;
+    }
+    const mainHtml = (d.findings || []).map(findingCard).join('');
+    const sideList = (d.side_findings && d.side_findings.length) ? d.side_findings : [];
+    const sideHtml = sideList.length
+      ? `<details style="margin:10px 0;border:1px dashed var(--border);border-radius:10px;padding:6px 12px;background:var(--surface)">
+           <summary style="cursor:pointer;font-size:12px;color:var(--text-muted)">与本问题无关的发现（${sideList.length} 条，已折叠）</summary>
+           ${sideList.map(findingCard).join('')}
+         </details>`
+      : '';
+    f.innerHTML = (focusBanner + mainHtml + sideHtml) || '<div style="font-size:12px;color:var(--text-muted)">未发现明确风险。</div>';
+    // ── 信创合规联动（2026-10-02）：诊断结果顶部注入国产化标签 ──
+    const _xcdt = (d.target_meta && d.target_meta.db_type) || '';
+    if (_xcdt && f) {
+      fetch('/api/intelligence/compliance/tag?db_type=' + encodeURIComponent(_xcdt))
+        .then(r => r.json())
+        .then(j => {
+          if (!j.ok || !j.data) return;
+          const t = j.data;
+          let banner;
+          if (t.is_domestic) {
+            banner = '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;border:1px solid rgba(22,163,74,.4);background:rgba(22,163,74,.08);border-radius:10px;padding:8px 12px;margin:0 0 10px">'
+              + '<span style="font-weight:700;color:#16A34A">✓ 国产（信创）数据库</span>'
+              + '<span style="font-size:12px;color:var(--text-muted)">' + escHtml(t.label_zh || t.normalized || t.db_type) + ' · 已符合国家信创导向</span>'
+              + '</div>';
+          } else if (t.is_foreign) {
+            const repl = (t.replacement_detail && t.replacement_detail.length)
+              ? t.replacement_detail.map(function (s) {
+                  const rel = s.relation ? ' <span style="color:#185FA5">' + escHtml(s.relation) + '</span>' : '';
+                  const eff = s.effort ? ' <span style="color:#854F0B">改动' + escHtml(s.effort) + '</span>' : '';
+                  const b = s.certified ? ' <span style="color:#16A34A;font-weight:600">[国测]</span>' : '';
+                  return escHtml(s.label) + rel + eff + b;
+                }).join(' / ')
+              : '暂无明确单库替代';
+            banner = '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;border:1px solid rgba(220,38,38,.4);background:rgba(220,38,38,.08);border-radius:10px;padding:8px 12px;margin:0 0 10px">'
+              + '<span style="font-weight:700;color:#DC2626">⚠ 国外数据库</span>'
+              + '<span style="font-size:12px;color:var(--text-muted)">' + escHtml(t.label_zh || t.normalized || t.db_type) + ' · 建议国产化替代（' + repl + '）：</span>'
+              + '<button class="btn btn-ghost" style="font-size:12px;padding:3px 10px;margin-left:auto" onclick="showPage(\'xinchuang\'); loadXinchuangPage()">查看信创合规态势 →</button>'
+              + '</div>';
+          } else {
+            banner = '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;border:1px solid var(--border);background:var(--surface2);border-radius:10px;padding:8px 12px;margin:0 0 10px">'
+              + '<span style="font-weight:700;color:var(--text-muted)">ⓘ 未知库类型</span>'
+              + '<span style="font-size:12px;color:var(--text-muted)">' + escHtml(t.db_type || t.normalized) + ' · 可在「信创合规」页「库型维护」中标注</span>'
+              + '<button class="btn btn-ghost" style="font-size:12px;padding:3px 10px;margin-left:auto" onclick="showPage(\'xinchuang\'); loadXinchuangPage()">去标注 →</button>'
+              + '</div>';
+          }
+          f.insertAdjacentHTML('afterbegin', banner);
+        })
+        .catch(() => {});
+    }
+  }
   const p = document.getElementById(planId);
   if (p) p.innerHTML = (d.plan || []).map(s => `<div style="border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin:10px 0;background:var(--surface2)">
     <div style="font-weight:700;color:var(--accent2)">步骤 ${escHtml(String(s.step || ''))} · ${escHtml(s.focus || '')}</div>
@@ -4731,6 +4831,7 @@ async function loadWorkflowNodes() {
     var data = await res.json();
     window.__wfSpecialists = (data.ok && data.specialists) || [];
     window.__wfSkills = (data.ok && data.skills) || [];
+    window.__wfComponents = (data.ok && data.components) || [];
     window.__wfNodesReady = true;
     wfRenderPalette();
   } catch(e) { toastError('加载节点清单失败：' + e.message); }
@@ -4741,8 +4842,39 @@ function wfRefOptions(kind) {
   if (kind === 'specialist') list = (window.__wfSpecialists || []).filter(function(s){ return s.id !== 'coordinator'; }).map(function(s){ return {v: s.id, t: s.name}; });
   else if (kind === 'skill') list = (window.__wfSkills || []).map(function(s){ return {v: s.ref || s.name, t: (s.title || s.name) + (s.requires_approval ? ' (需审批)' : '')}; });
   else if (kind === 'hub') list = [{v: 'hub', t: '诊断(hub)'}];
+  else if (kind === 'inspect') list = (window.__wfComponents || []).map(function(c){ return {v: c.id, t: '[' + (c.db_type||'') + '] ' + c.title}; });
   if (!list.length) list = [{v: '', t: '（无需 ref）'}];
   return list;
+}
+
+function wfCompDbType(ref) {
+  // 巡检组件 ref → 库型（非组件 ref 返回 ''）
+  var comps = window.__wfComponents || [];
+  for (var i = 0; i < comps.length; i++) if (comps[i].id === ref) return comps[i].db_type || '';
+  return '';
+}
+
+function wfCanvasDbTypes() {
+  // 画布上巡检组件覆盖的库型集合（去重）
+  var set = {};
+  __wfSteps.forEach(function(s){
+    if (s.kind === 'inspect' && s.ref) {
+      var d = wfCompDbType(s.ref);
+      if (d) set[d] = true;
+    }
+  });
+  return Object.keys(set);
+}
+
+function wfMixedDbConflict(newRef) {
+  // 拖入/切换到 newRef 后是否会与画布上已有组件库型冲突；冲突返回 {new, existing}，否则 null
+  var ndb = newRef ? wfCompDbType(newRef) : '';
+  if (!ndb) return null;
+  var dbs = wfCanvasDbTypes();
+  var hasSame = dbs.indexOf(ndb) >= 0;
+  var others = dbs.filter(function(d){ return d !== ndb; });
+  if (!hasSame && others.length) return { new: ndb, existing: others.join('、') };
+  return null;
 }
 
 function wfIconSvg(kind, domain) {
@@ -4753,7 +4885,8 @@ function wfIconSvg(kind, domain) {
     hub:    '<path d="M3 12h4l3 8 4-16 3 8h4"/>',
     skill:  '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10"/>',
     func:   '<path d="M9 3H7a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h2v4a2 2 0 0 1-2 2H5"/><path d="M15 21h2a2 2 0 0 0 2-2v-4a2 2 0 0 0-2-2h-2v-4a2 2 0 0 1 2-2h2"/>',
-    output: '<path d="M4 4h16v16H4z"/><path d="m4 4 8 6 8-6"/>'
+    output: '<path d="M4 4h16v16H4z"/><path d="m4 4 8 6 8-6"/>',
+    inspect:'<path d="M9 11l3 3 8-8"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>'
   };
   var domainIcon = {
     sql:           '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/>',
@@ -4776,6 +4909,7 @@ function wfRenderPalette() {
   if (!box) return;
   var specs = window.__wfSpecialists || [];
   var skills = window.__wfSkills || [];
+  var comps = window.__wfComponents || [];
   var groups = [];
   // 基础控制
   groups.push({
@@ -4786,6 +4920,13 @@ function wfRenderPalette() {
       {kind: 'end', label: '结束', ref: ''}
     ]
   });
+  // 巡检组件（章节级，P1 组件化）：单组收纳，条目上挂库型徽章，避免按库型拆多组把面板拉长
+  if (comps.length) {
+    var citems = comps.map(function(c){
+      return {kind: 'inspect', label: c.title, ref: c.id, domain: 'inspection', db: c.db_type || '通用'};
+    }).sort(function(a, b){ return (a.db === b.db) ? a.label.localeCompare(b.label) : a.db.localeCompare(b.db); });
+    groups.push({key: 'inspect', title: '巡检组件', items: citems});
+  }
   // 专家能力按 domain 分组（排除协调员，用户自己编排不需要它）
   var domainMap = {};
   specs.forEach(function(s){
@@ -4806,16 +4947,24 @@ function wfRenderPalette() {
       })
     });
   }
-  // 渲染：分组标题 + 两列网格，全部默认展开，SVG 图标 + 标题卡片
+  // 渲染：可折叠分组标题（含计数徽章）+ 紧凑单行条目；默认仅「基础控制」展开，其余折叠
   var html = '';
   groups.forEach(function(g){
-    html += '<div class="wf-palette-group" data-group="' + escHtml(g.key) + '">' +
-      '<div class="wf-palette-title"><span>' + escHtml(g.title) + '</span></div>' +
+    if (window.__wfOpen === undefined) window.__wfOpen = {};
+    var open = (window.__wfOpen[g.key] !== undefined) ? window.__wfOpen[g.key] : (g.key === 'basic');
+    html += '<div class="wf-palette-group" data-group="' + escHtml(g.key) + '" data-open="' + (open ? '1' : '0') + '">' +
+      '<div class="wf-palette-title" onclick="wfToggleGroup(this)">' +
+        '<span class="chevron">▸</span>' +
+        '<span class="gt">' + escHtml(g.title) + '</span>' +
+        '<span class="gcount">' + g.items.length + '</span>' +
+      '</div>' +
       '<div class="wf-palette-items">';
     g.items.forEach(function(it){
-      html += '<div class="wf-palette-item" draggable="true" data-kind="' + escHtml(it.kind) + '" data-ref="' + escHtml(it.ref || '') + '" data-label="' + escHtml(it.label || '') + '" title="' + escHtml(it.label || '') + '">' +
+      html += '<div class="wf-palette-item" draggable="true" data-kind="' + escHtml(it.kind) + '" data-ref="' + escHtml(it.ref || '') + '" data-label="' + escHtml(it.label || '') + '" data-db="' + escHtml(it.db || '') + '" title="' + escHtml((it.db ? '[' + it.db + '] ' : '') + (it.label || '')) + '">' +
         '<span class="pi-ico">' + wfIconSvg(it.kind, it.domain) + '</span>' +
-        '<span class="pi-name">' + escHtml(it.label) + '</span></div>';
+        '<span class="pi-name">' + escHtml(it.label) + '</span>' +
+        (it.db ? '<span class="pi-db">' + escHtml(it.db) + '</span>' : '') +
+      '</div>';
     });
     html += '</div></div>';
   });
@@ -4833,7 +4982,11 @@ function wfRenderPalette() {
 }
 
 function wfToggleGroup(titleEl) {
-  // 组件库已默认全部展开，无需折叠
+  var g = titleEl.parentElement;
+  var open = g.dataset.open === '1';
+  g.dataset.open = open ? '0' : '1';
+  if (window.__wfOpen === undefined) window.__wfOpen = {};
+  window.__wfOpen[g.dataset.group] = !open;
 }
 
 function wfFilterPalette(q) {
@@ -4841,12 +4994,14 @@ function wfFilterPalette(q) {
   var items = document.querySelectorAll('.wf-palette-item');
   var groups = document.querySelectorAll('.wf-palette-group');
   items.forEach(function(it){
-    var txt = (it.dataset.label + ' ' + it.dataset.ref).toLowerCase();
+    var txt = (it.dataset.label + ' ' + it.dataset.ref + ' ' + (it.dataset.db || '')).toLowerCase();
     it.style.display = txt.indexOf(q) >= 0 ? '' : 'none';
   });
   groups.forEach(function(g){
     var visible = Array.from(g.querySelectorAll('.wf-palette-item')).some(function(it){ return it.style.display !== 'none'; });
     g.style.display = (q && !visible) ? 'none' : '';
+    // 搜索时自动展开有命中的分组，便于直接看到结果
+    if (q && visible) g.dataset.open = '1';
   });
 }
 
@@ -4862,6 +5017,11 @@ function wfGenLabel(kind) {
 }
 
 function wfAddNodeAt(kind, ref, x, y, presetLabel) {
+  // 跨库型拖入提醒（非阻断）：同一画布混用不同库型的巡检组件，执行时非当前实例库型的组件会失败
+  if (kind === 'inspect' && ref) {
+    var mm = wfMixedDbConflict(ref);
+    if (mm) toastError('库型不一致：新组件是「' + mm.new + '」，画布上已有「' + mm.existing + '」组件，混合保存后执行会失败');
+  }
   var id = wfGenId(kind);
   var label = presetLabel || wfGenLabel(kind);
   // 如果 presetLabel 已被占用，递增
@@ -5030,7 +5190,15 @@ function wfRenderProps() {
     wfRenderCanvas();
   });
   var refSel = document.getElementById('wf-p-ref');
-  if (refSel) refSel.addEventListener('change', function(){ s.ref = this.value; wfRenderCanvas(); });
+  if (refSel) refSel.addEventListener('change', function(){
+    s.ref = this.value;
+    // 切换引用后库型可能变化，与画布其他巡检组件冲突时提醒
+    if (s.kind === 'inspect') {
+      var mm = wfMixedDbConflict(s.ref);
+      if (mm) toastError('库型不一致：该组件是「' + mm.new + '」，画布上已有「' + mm.existing + '」组件，混合保存后执行会失败');
+    }
+    wfRenderCanvas();
+  });
   var actSel = document.getElementById('wf-p-action');
   if (actSel) actSel.addEventListener('change', function(){ s.args = s.args || {}; s.args.action = this.value; });
   var toSel = document.getElementById('wf-p-to');
@@ -5217,6 +5385,18 @@ async function wfSave() {
   __wfEdges.forEach(function(e){ incident[e[0]] = true; incident[e[1]] = true; });
   var isolated = __wfSteps.filter(function(s){ return !incident[s.id]; }).map(function(s){ return s.label; });
   if (isolated.length) { toastError('存在未连线的孤立节点：' + isolated.join('、')); return; }
+  // 混合库型巡检组件检查：不同库型的组件无法在同一实例上同时生效，保存前确认
+  var dbs = wfCanvasDbTypes();
+  if (dbs.length > 1) {
+    var keep = await showConfirmDialog(
+      '混合库型巡检组件',
+      '该工作流包含 ' + dbs.length + ' 种数据库类型的巡检组件（' + dbs.join('、') + '）。\n\n' +
+      '工作流执行时只针对一个实例，其余库型组件的查询会全部失败、产生无效结果。\n\n' +
+      '跨库型通用编排建议：在该组件节点的参数 JSON 中改用 match_title（按标题匹配），运行时自动匹配当前实例的库型。\n\n' +
+      '仍要保存吗？'
+    );
+    if (!keep) return;
+  }
   var steps = __wfSteps.map(function(s){ return { id: s.id, label: s.label, kind: s.kind, ref: s.ref || '', args: s.args || {}, x: s.x, y: s.y }; });
   var edges = __wfEdges.map(function(e){ return [e[0], e[1]]; });
   try {
@@ -5259,10 +5439,15 @@ async function loadWorkflows() {
       return;
     }
     if (cnt) cnt.textContent = d.workflows.length;
+    window.__wfList = d.workflows;
     box.innerHTML = d.workflows.map(function(w){
       var nc = (w.steps ? w.steps.length : 0);
       var ec = (w.edges ? w.edges.length : 0);
-      return '<div style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin:8px 0;background:var(--surface2)"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><div><b>' + escHtml(w.name) + '</b> <span class="badge">' + nc + ' 节点</span>' + (ec ? ' <span class="badge">' + ec + ' 连线</span>' : '') + '</div><div style="display:flex;gap:6px"><button class="btn btn-ghost" style="font-size:12px;padding:3px 9px" onclick="wfLoad(' + w.id + ')">编辑</button><button class="btn btn-primary" style="font-size:12px;padding:3px 9px" onclick="wfShowRun(' + w.id + ')">执行</button><button class="btn btn-ghost" style="color:#EF4444;font-size:12px;padding:3px 9px" onclick="wfDelete(' + w.id + ')">删除</button></div></div></div>';
+      var published = (w.visibility === 'published');
+      var pubBtn = published
+        ? '<button class="btn btn-ghost" style="font-size:12px;padding:3px 9px" disabled title="已发布到市场">已发布</button>'
+        : '<button class="btn btn-ghost" style="font-size:12px;padding:3px 9px" onclick="wfShowPublish(' + w.id + ')">发布</button>';
+      return '<div style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin:8px 0;background:var(--surface2)"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><div><b>' + escHtml(w.name) + '</b> <span class="badge">' + nc + ' 节点</span>' + (ec ? ' <span class="badge">' + ec + ' 连线</span>' : '') + (published ? ' <span class="badge" style="border-color:var(--accent);color:var(--accent)">已上架</span>' : '') + '</div><div style="display:flex;gap:6px"><button class="btn btn-ghost" style="font-size:12px;padding:3px 9px" onclick="wfLoad(' + w.id + ')">编辑</button><button class="btn btn-primary" style="font-size:12px;padding:3px 9px" onclick="wfShowRun(' + w.id + ')">执行</button><button class="btn btn-ghost" style="font-size:12px;padding:3px 9px" onclick="wfExport(' + w.id + ')" title="导出为可分享 JSON">导出</button>' + pubBtn + '<button class="btn btn-ghost" style="color:#EF4444;font-size:12px;padding:3px 9px" onclick="wfDelete(' + w.id + ')">删除</button></div></div></div>';
     }).join('');
   } catch(e) { toastError('加载列表失败：' + e.message); }
 }
@@ -5312,6 +5497,228 @@ async function wfDelete(id) {
     toastSuccess('已删除');
     loadWorkflows();
   } catch(e) { toastError('删除失败：' + e.message); }
+}
+
+// ── P1 工作流市场：导出 / 导入 / 内置模板 ───────────────────────────
+
+async function wfExport(id) {
+  try {
+    const res = await fetch('/api/intelligence/workflows/' + id + '/export');
+    const d = await res.json();
+    if (!d.ok) { toastError(d.msg || '导出失败'); return; }
+    const blob = new Blob([JSON.stringify(d.payload, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = (d.payload.name || 'workflow') + '.dbcheck-wf.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toastSuccess('已导出（可分享给社区/伙伴）');
+  } catch(e) { toastError('导出失败：' + e.message); }
+}
+
+// ── P1 工作流市场 UGC：市场弹窗 + 卡片 + 发布/评分/URL 安装/更新 ──────
+
+async function wfOpenMarket() {
+  let modal = document.getElementById('wf-market-mask');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'wf-market-mask';
+    modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10000;display:flex;align-items:center;justify-content:center';
+    modal.innerHTML = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;width:min(760px,94vw);max-height:84vh;overflow:auto;padding:18px 20px">' +
+      '<div style="display:flex;align-items:center;margin-bottom:10px"><b style="font-size:15px">📦 工作流模板市场</b>' +
+      '<button class="btn btn-ghost" style="margin-left:auto;font-size:12px;padding:4px 10px" onclick="document.getElementById(\'wf-market-mask\').style.display=\'none\'">关闭</button></div>' +
+      '<div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">模板 = 运维 runbook as code：不携带实例信息，导入后按目标实例库型动态解析巡检组件。支持从内置模板、社区 URL 或本地文件安装；你的工作流可在列表点「发布」上架。</div>' +
+      '<div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap"><input id="wf-remote-url" placeholder="社区索引 URL（market/index.json）" value="https://raccoonx.cn/market/index.json" style="flex:1;min-width:200px;font-size:12px;padding:5px 8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text)">' +
+      '<button class="btn btn-ghost" style="font-size:12px;padding:4px 12px" onclick="wfMarketRemote()">🌐 从 URL 安装</button>' +
+      '<input type="file" id="wf-import-file" accept=".json" style="font-size:12px">' +
+      '<button class="btn btn-ghost" style="font-size:12px;padding:4px 12px" onclick="wfImportFile()">📥 从文件导入</button></div>' +
+      '<div id="wf-market-list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px;margin-top:6px"></div></div>';
+    document.body.appendChild(modal);
+    modal.addEventListener('click', function(e){ if (e.target === modal) modal.style.display = 'none'; });
+  }
+  modal.style.display = 'flex';
+  try {
+    const res = await fetch('/api/intelligence/market/list');
+    const d = await res.json();
+    wfRenderMarket((d.ok && d.items) ? d.items : []);
+  } catch(e) {
+    const box = document.getElementById('wf-market-list');
+    if (box) box.innerHTML = '<div style="font-size:12.5px;color:#EF4444;grid-column:1/-1">加载失败：' + escHtml(e.message) + '</div>';
+  }
+}
+
+function wfRenderMarket(items) {
+  const box = document.getElementById('wf-market-list');
+  if (!box) return;
+  window.__wfMarketItems = items || [];
+  if (!items.length) { box.innerHTML = '<div style="font-size:12.5px;color:var(--text-muted);grid-column:1/-1">暂无市场模板</div>'; return; }
+  box.innerHTML = items.map(function(it, i){ return wfMarketCard(it, i); }).join('');
+}
+
+function wfStars(avg, count) {
+  const a = Number(avg) || 0;
+  const s = '★'.repeat(Math.round(a)) + '☆'.repeat(Math.max(0, 5 - Math.round(a)));
+  return '<span title="评分 ' + a.toFixed(1) + '">' + s + '</span>' + (count ? ' <span style="color:var(--text-muted)">(' + count + ')</span>' : '');
+}
+
+function wfMarketCard(it, i) {
+  const isInt = typeof it.id === 'number';
+  const srcLabel = it.source === 'builtin' ? '官方内置' : (it.source === 'remote' ? '社区' : (it.source === 'market' ? '已安装' : '已发布'));
+  const tags = (it.tags && it.tags.length ? it.tags : []).map(function(t){ return '<span class="badge">#' + escHtml(t) + '</span>'; }).join(' ');
+  const catTag = it.category ? '<span class="badge" style="border-color:var(--accent2);color:var(--accent2)">' + escHtml(it.category) + '</span>' : '';
+  const srcTag = '<span class="badge" style="border-color:var(--accent);color:var(--accent)">v' + escHtml(it.version || '1.0.0') + ' · ' + srcLabel + '</span>';
+  const rateRow = (isInt && (it.source === 'user' || it.source === 'market'))
+    ? '<div class="mpc-tags" style="margin-top:4px">' + [1,2,3,4,5].map(function(k){ return '<button class="badge" style="cursor:pointer;border-color:var(--warn);color:var(--warn);padding:1px 5px" onclick="wfRate(' + it.id + ',' + k + ')">' + k + '★</button>'; }).join('') + '</div>'
+    : '';
+  let action;
+  if (!isInt) {
+    action = '<button class="btn btn-primary" style="font-size:12px;padding:4px 12px" onclick="wfMarketInstall(' + i + ')">导入</button>';
+  } else if (it.source === 'market') {
+    action = '<span class="mkt-status">✓ 已安装</span>' + (it.has_update ? '<button class="btn btn-ghost" style="font-size:12px;padding:4px 10px" onclick="wfMarketUpdate(' + i + ')">更新</button>' : '');
+  } else if (it.source === 'user') {
+    action = it.installed ? '<span class="mkt-status">✓ 已上架</span>' : '<span class="badge" style="border-color:var(--accent);color:var(--accent)">已发布</span>';
+  } else {
+    action = '<button class="btn btn-primary" style="font-size:12px;padding:4px 12px" onclick="wfMarketInstall(' + i + ')">导入</button>';
+  }
+  return '<div class="market-plugin-card">' +
+    '<div class="mpc-title">' + escHtml(it.name) + '</div>' +
+    '<div class="mpc-tags">' + catTag + srcTag + tags + '</div>' +
+    '<div class="mpc-desc">' + escHtml(it.description || '') + '</div>' +
+    rateRow +
+    '<div class="mpc-footer"><span class="mpc-meta">' + wfStars(it.rating_avg, it.rating_count) + '</span>' +
+    '<span class="mpc-author">' + escHtml(it.author || '') + '</span>' +
+    '<span class="mpc-actions">' + action + '</span></div></div>';
+}
+
+async function wfMarketInstall(idx) {
+  const it = (window.__wfMarketItems || [])[idx];
+  if (!it) return;
+  try {
+    const res = await fetch('/api/intelligence/market/install', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ item: it })
+    });
+    const d = await res.json();
+    if (!d.ok) { toastError(d.msg || '安装失败'); return; }
+    toastSuccess('已安装「' + (it.name || '') + '」');
+    loadWorkflows();
+    wfOpenMarket();
+  } catch(e) { toastError('安装失败：' + e.message); }
+}
+
+async function wfMarketUpdate(idx) {
+  const it = (window.__wfMarketItems || [])[idx];
+  if (!it || !it.installed_id) { toastError('找不到已安装副本'); return; }
+  try {
+    const res = await fetch('/api/intelligence/market/update', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workflow_id: it.installed_id, item: it })
+    });
+    const d = await res.json();
+    if (!d.ok) { toastError(d.msg || '更新失败'); return; }
+    toastSuccess('已更新到 v' + (it.version || ''));
+    wfOpenMarket();
+  } catch(e) { toastError('更新失败：' + e.message); }
+}
+
+async function wfMarketRemote() {
+  const inp = document.getElementById('wf-remote-url');
+  const url = inp && inp.value && inp.value.trim();
+  if (!url) { toastError('请先填写社区索引 URL'); return; }
+  try {
+    const res = await fetch('/api/intelligence/market/list?remote=' + encodeURIComponent(url));
+    const d = await res.json();
+    if (!d.ok) { toastError(d.msg || '拉取远程索引失败'); return; }
+    wfRenderMarket(d.items || []);
+    toastSuccess('已加载远程索引（' + ((d.items || []).length) + ' 项）');
+  } catch(e) { toastError('拉取失败：' + e.message); }
+}
+
+async function wfRate(id, score) {
+  try {
+    const res = await fetch('/api/intelligence/market/rate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workflow_id: id, score: score })
+    });
+    const d = await res.json();
+    if (!d.ok) { toastError(d.msg || '评分失败'); return; }
+    toastSuccess('已评分 ' + score + '★');
+    wfOpenMarket();
+  } catch(e) { toastError('评分失败：' + e.message); }
+}
+
+async function wfShowPublish(id) {
+  let m = document.getElementById('wf-publish-mask');
+  if (!m) {
+    m = document.createElement('div');
+    m.id = 'wf-publish-mask';
+    m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10001;display:flex;align-items:center;justify-content:center';
+    m.innerHTML = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;width:min(440px,92vw);padding:18px 20px">' +
+      '<div style="display:flex;align-items:center;margin-bottom:12px"><b style="font-size:15px">🚀 发布到市场</b><button class="btn btn-ghost" style="margin-left:auto;font-size:12px;padding:4px 10px" onclick="document.getElementById(\'wf-publish-mask\').style.display=\'none\'">关闭</button></div>' +
+      '<div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">发布后他人可在「市场」中浏览、安装、评分你的 runbook。仅发布编排元数据，不含实例信息。</div>' +
+      '<label style="font-size:12px">模板名称</label><input id="wf-pub-name" disabled style="width:100%;font-size:13px;padding:6px 8px;margin:4px 0 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text)">' +
+      '<label style="font-size:12px">作者 *</label><input id="wf-pub-author" placeholder="你的名字/昵称" style="width:100%;font-size:13px;padding:6px 8px;margin:4px 0 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text)">' +
+      '<div style="display:flex;gap:10px"><div style="flex:1"><label style="font-size:12px">版本</label><input id="wf-pub-version" value="1.0.0" style="width:100%;font-size:13px;padding:6px 8px;margin:4px 0 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text)"></div><div style="flex:1"><label style="font-size:12px">分类</label><input id="wf-pub-category" placeholder="如：性能/容灾" style="width:100%;font-size:13px;padding:6px 8px;margin:4px 0 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text)"></div></div>' +
+      '<label style="font-size:12px">描述</label><textarea id="wf-pub-desc" rows="2" placeholder="一句话介绍这个 runbook 解决什么问题" style="width:100%;font-size:13px;padding:6px 8px;margin:4px 0 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text)"></textarea>' +
+      '<label style="font-size:12px">标签（逗号分隔）</label><input id="wf-pub-tags" placeholder="慢查询,巡检,MySQL" style="width:100%;font-size:13px;padding:6px 8px;margin:4px 0 14px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text)">' +
+      '<button class="btn btn-primary" style="width:100%;font-size:13px;padding:8px" onclick="wfDoPublish()">发布</button>' +
+      '<div id="wf-pub-err" style="color:var(--danger);font-size:12px;margin-top:8px"></div></div>';
+    document.body.appendChild(m);
+    m.addEventListener('click', function(e){ if (e.target === m) m.style.display = 'none'; });
+  }
+  const w = (window.__wfList || []).find(function(x){ return x.id === id; });
+  document.getElementById('wf-pub-name').value = w ? w.name : '';
+  m.dataset.wfid = id;
+  m.style.display = 'flex';
+}
+
+async function wfDoPublish() {
+  const m = document.getElementById('wf-publish-mask');
+  const id = m && m.dataset.wfid;
+  if (!id) return;
+  const author = (document.getElementById('wf-pub-author').value || '').trim();
+  if (!author) { document.getElementById('wf-pub-err').textContent = '作者不能为空'; return; }
+  const version = (document.getElementById('wf-pub-version').value || '1.0.0').trim() || '1.0.0';
+  const category = (document.getElementById('wf-pub-category').value || '').trim();
+  const description = (document.getElementById('wf-pub-desc').value || '').trim();
+  const tags = (document.getElementById('wf-pub-tags').value || '').split(',').map(function(s){return s.trim();}).filter(Boolean);
+  try {
+    const res = await fetch('/api/intelligence/market/publish', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workflow_id: id, author: author, version: version, category: category, description: description, tags: tags })
+    });
+    const d = await res.json();
+    if (!d.ok) { document.getElementById('wf-pub-err').textContent = (d.msg || '发布失败'); return; }
+    toastSuccess('已发布到市场');
+    m.style.display = 'none';
+    loadWorkflows();
+    wfOpenMarket();
+  } catch(e) { document.getElementById('wf-pub-err').textContent = '发布失败：' + e.message; }
+}
+
+async function wfImportFile() {
+  const inp = document.getElementById('wf-import-file');
+  const f = inp && inp.files && inp.files[0];
+  if (!f) { toastError('请先选择 JSON 文件'); return; }
+  try {
+    const text = await f.text();
+    const obj = JSON.parse(text);
+    const payloads = Array.isArray(obj) ? obj : (Array.isArray(obj.templates) ? obj.templates : [obj]);
+    await wfImportPayloads(payloads);
+  } catch(e) { toastError('文件解析失败：' + e.message); }
+}
+
+async function wfImportPayloads(payloads) {
+  try {
+    const res = await fetch('/api/intelligence/workflows/import', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ templates: payloads })
+    });
+    const d = await res.json();
+    if (!d.ok) { toastError(d.msg || (d.results && d.results[0] && d.results[0].error) || '导入失败'); return; }
+    toastSuccess('已导入 ' + d.imported + ' 个模板');
+    loadWorkflows();
+  } catch(e) { toastError('导入失败：' + e.message); }
 }
 
 async function wfRun() {
@@ -6025,7 +6432,7 @@ function formatBytes(bytes) {
             listEl.innerHTML = list.map(ds => {
               const dbIcons = window.DB_ICONS;
               const icon = dbIcons[ds.db_type] || '🗄️';
-              const dbLogos = {oceanbase:'/oceanbase.png'};
+              const dbLogos = {oceanbase:'/oceanbase.png', halodb:'/halodb.png', vastbase:'/vastbase.png'};
               const logo = dbLogos[ds.db_type];
               const iconHtml = logo
                 ? '<img src="' + logo + '" alt="' + (ds.db_type||'') + '" style="width:14px;height:14px;object-fit:contain;vertical-align:middle" onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'inline\'"><span style="display:none">' + icon + '</span>'
@@ -6388,7 +6795,8 @@ function formatBytes(bytes) {
         'mysql':           'mysql',       // MySQL Connector/J
         'mariadb':         'mariadb',     // MariaDB Connector/J
         'tidb':            'mysql',       // TiDB 兼容 MySQL 协议，复用 MySQL 驱动
-        'oceanbase':       'oceanbase'    // OceanBase 官方 JDBC
+        'oceanbase':       'oceanbase',   // OceanBase 官方 JDBC
+        'vastbase':        'vastbase'     // Vastbase G100 基于 openGauss 内核，复用 openGauss JDBC
       };
       var _JDBC_TYPES = Object.keys(_JDBC_CATALOG);     // 所有走 JDBC 的 plugin/核心 db_type
       function isJdbcType(dbType) {                     // 统一判定入口（取代 4 处硬编码 indexOf/||）
@@ -6455,7 +6863,7 @@ function formatBytes(bytes) {
         const user = document.getElementById('ds-user').value.trim();
         const svcName = document.getElementById('ds-service-name')?.value || '';
         let dbName = (document.getElementById('ds-database')?.value || '').trim();
-        if (!dbName && (dbType === 'pg' || dbType === 'ivorysql' || dbType === 'uxdb')) dbName = (dbType === 'uxdb' ? 'uxdb' : (dbType === 'ivorysql' ? 'ivorysql' : 'postgres'));
+        if (!dbName && (dbType === 'pg' || dbType === 'ivorysql' || dbType === 'uxdb' || dbType === 'vastbase')) dbName = (dbType === 'uxdb' ? 'uxdb' : (dbType === 'ivorysql' ? 'ivorysql' : (dbType === 'vastbase' ? 'vastbase' : 'postgres')));
         if (!dbName && dbType === 'kingbase') dbName = 'kingbase';
         if (!dbName && dbType === 'gbase') dbName = 'sysmaster';
         if (!dbName && dbType === 'oceanbase') dbName = 'oceanbase';
@@ -6752,6 +7160,80 @@ function formatBytes(bytes) {
           if (data.ok) { toastSuccess(data.msg || '连接成功'); }
           else { toastError((data.error || data.message || '连接失败')); }
         } catch(e) { toastError(e.message); }
+      }
+
+      // ─── 数据源 JSON 导出/导入（升级迁移） ───────────────
+      async function exportDatasourcesJson() {
+        const ok = await showConfirmDialog(
+          '导出数据源',
+          '将导出当前可见的数据源为 JSON 文件（含 SSH/MongoDB/TLS 等全部连接参数与分组）。\n\n' +
+          '• 管理员导出将包含明文密码，便于升级后免重录——导出文件务必妥善保管，不要外传；\n' +
+          '• 非管理员导出不含密码，导入后需重新录入。');
+        if (!ok) return;
+        try {
+          let resp = await fetch('/api/pro/instances/export-json?with_password=1');
+          if (resp.status === 403) {
+            resp = await fetch('/api/pro/instances/export-json?with_password=0');
+          }
+          if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            toastError('导出失败: ' + (err.error || resp.status)); return;
+          }
+          const blob = await resp.blob();
+          const cd = resp.headers.get('Content-Disposition') || '';
+          const m = cd.match(/filename="?([^";]+)"?/);
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = (m && m[1]) || ('dbcheck-datasources-' + Date.now() + '.json');
+          document.body.appendChild(a); a.click(); a.remove();
+          URL.revokeObjectURL(a.href);
+          toastSuccess('数据源已导出');
+        } catch(e) { toastError('导出失败: ' + e.message); }
+      }
+
+      function importDatasourcesJson(btn) {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.json,application/json';
+        input.onchange = async () => {
+          const file = input.files && input.files[0];
+          if (!file) return;
+          let payload;
+          try { payload = JSON.parse(await file.text()); }
+          catch(e) { toastError('JSON 解析失败：' + e.message); return; }
+          if (!payload || !Array.isArray(payload.instances) || !payload.instances.length) {
+            toastError('文件中没有 instances 数据，请确认是「数据源导出」生成的 JSON 文件'); return;
+          }
+          const n = payload.instances.length;
+          const pwdInfo = payload.with_password
+            ? '文件包含明文密码，导入后将按本机密钥重新加密存储。'
+            : '文件不含密码，导入后需到各数据源重新录入密码。';
+          const ok = await showConfirmDialog(
+            '导入数据源',
+            '文件中共 ' + n + ' 个数据源' + (Array.isArray(payload.groups) && payload.groups.length ? '、' + payload.groups.length + ' 个分组' : '') + '。\n\n' +
+            '导入规则：与现有数据源 ID 相同的将覆盖更新（以文件为准），其余作为新增。\n' + pwdInfo);
+          if (!ok) return;
+          if (btn) { btn.disabled = true; btn.dataset.oldText = btn.textContent; btn.textContent = '⤒ 导入中…'; }
+          try {
+            const res = await fetch('/api/pro/instances/import-json', {
+              method: 'POST', headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({ payload: payload })
+            });
+            const d = await res.json();
+            if (!res.ok || d.ok === false && !d.added && !d.updated) {
+              toastError('导入失败: ' + (d.error || d.message || res.status)); return;
+            }
+            let msg = '导入完成：' + (d.message || '');
+            if (d.errors && d.errors.length) msg += '\n' + d.errors.slice(0, 5).join('\n');
+            if (d.failed) { toastError(msg); } else { toastSuccess(msg); }
+            loadDataSources(currentGroupFilter);
+            loadGroupChips();
+          } catch(e) { toastError('导入失败: ' + e.message); }
+          finally {
+            if (btn) { btn.disabled = false; btn.textContent = btn.dataset.oldText || '⤒ 导入'; }
+          }
+        };
+        input.click();
       }
 
       // ─── Rules Page ─────────────────────────────
@@ -7085,7 +7567,7 @@ function wfCloseRunDrawer() {
     </div>
 
     <!-- ── 智能巡检 ── -->
-    <div class="nav-section" data-page-node-id="ZyqVYiEOcSAMJSAUJ5FTIj">智能巡检</div>
+    <div class="nav-section" data-i18n="webui.nav_group_inspection" data-page-node-id="ZyqVYiEOcSAMJSAUJ5FTIj">智能巡检</div>
     <div class="nav-item" onclick="showPage('wizard')" id="nav-wizard" data-page-node-id="0s1i4XoV7mrkCmSGMRQehZ">
       <span class="icon" data-page-node-id="DrHFLEAWRT13ACQ2y5z4RM"><svg viewBox="0 0 24 24" aria-hidden="true" data-page-node-id="0Rj183jDr51JEgBNZ5DV8R"><circle cx="11" cy="11" r="7" data-page-node-id="mYU8PSGHATBBkGD4RoOoxg"/><path d="m21 21-4.3-4.3" data-page-node-id="fFJTOU0AsDrMAfm7ziBADM"/></svg></span> <span data-i18n="webui.nav_wizard" data-page-node-id="McPTsi1YWML2DN1bPBHD3T">数据库巡检</span>
     </div>
@@ -7117,7 +7599,7 @@ function wfCloseRunDrawer() {
     {% endif %}
 
     <!-- ── 巡检报告 ── -->
-    <div class="nav-section" data-page-node-id="VDYrGwTVlfkg1hZjymoJ0K">巡检报告</div>
+    <div class="nav-section" data-i18n="webui.nav_group_reports" data-page-node-id="VDYrGwTVlfkg1hZjymoJ0K">巡检报告</div>
     <div class="nav-item" onclick="showPage('awr')" id="nav-awr" data-page-node-id="gndEg7LMT03FglKWum1nkZ">
       <span class="icon" data-page-node-id="nTPibEEkIA0K3rhr7LVEOF"><svg viewBox="0 0 24 24" aria-hidden="true" data-page-node-id="RJU9zfXf6HlYCRly0DpltF"><path d="M3 21h18" data-page-node-id="bgRSB2vCC8mcEAshtYAu15"/><path d="M7 21v-6M12 21V8M17 21v-3" data-page-node-id="qBkYsmE0eoaOp4AvkAIPpB"/></svg></span> <span data-i18n="webui.awr_nav" data-page-node-id="1qJ0ixNsQHGamNFvzbb0rs">AWR 报告分析</span>
     </div>
@@ -7135,12 +7617,12 @@ function wfCloseRunDrawer() {
     </div>
 
     <!-- ── AI 与知识 ── -->
-    <div class="nav-section" data-page-node-id="Rrr4dPbsOM8ZpWXtU5vzUJ">AI 与知识</div>
+    <div class="nav-section" data-i18n="webui.nav_group_ai" data-page-node-id="Rrr4dPbsOM8ZpWXtU5vzUJ">AI 与知识</div>
     <div class="nav-item" onclick="showPage('ai')" id="nav-ai" data-page-node-id="qTEC8Xvg61FqDfDoB3GBxr">
       <span class="icon" data-page-node-id="o3j1fPDklCtT6TWWn5caYM"><svg viewBox="0 0 24 24" aria-hidden="true" data-page-node-id="xUnyGeVknr4HyRlkbd3Elj"><rect x="4" y="4" width="16" height="16" rx="2" data-page-node-id="P22faxnZnGUgdhgk46Hgmo"/><rect x="9" y="9" width="6" height="6" data-page-node-id="VcZhxmJNq6ClspH6QsNUdR"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3" data-page-node-id="cCABExCDq4WtTFjCcBLd47"/></svg></span> <span data-i18n="webui.nav_ai" data-page-node-id="FFzWnwO4xIlKH2722gRwZv">AI 诊断设置</span>
     </div>
     <div class="nav-item" onclick="showPage('schema-dict')" id="nav-schema-dict" data-page-node-id="G4qkFTYajuq8PXlOOKXUis">
-      <span class="icon" data-page-node-id="sDUXOtyqIEGRE1j2I7zbXn"><svg viewBox="0 0 24 24" aria-hidden="true" data-page-node-id="LfVDpP17LYtCGPG1c8CiR0"><ellipse cx="12" cy="6" rx="8" ry="3" data-page-node-id="ZN7em6fPyOC3dFjvMNBniD"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3" data-page-node-id="0C0k76pHCTVYYVHyplj4S0"/></svg></span> <span data-page-node-id="UIdEMmkBh5gSz5cAWGRGD8">系统字典表</span>
+      <span class="icon" data-page-node-id="sDUXOtyqIEGRE1j2I7zbXn"><svg viewBox="0 0 24 24" aria-hidden="true" data-page-node-id="LfVDpP17LYtCGPG1c8CiR0"><ellipse cx="12" cy="6" rx="8" ry="3" data-page-node-id="ZN7em6fPyOC3dFjvMNBniD"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3" data-page-node-id="0C0k76pHCTVYYVHyplj4S0"/></svg></span> <span data-i18n="webui.nav_schema_dict" data-page-node-id="UIdEMmkBh5gSz5cAWGRGD8">系统字典表</span>
     </div>
     <div class="nav-item" onclick="showPage('rag')" id="nav-rag" data-page-node-id="weylNJXDNSPWECY6idf7Ff">
       <span class="icon" data-page-node-id="BFnle26D0KA56C9nkWIToF"><svg viewBox="0 0 24 24" aria-hidden="true" data-page-node-id="vvEFkYm7A7N3GL6CJU7vJ0"><path d="M12 7v14" data-page-node-id="EZD79Gg3gC8kAe7jJwOova"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-5a4 4 0 0 0-4 4 4 4 0 0 0-4-4H3Z" data-page-node-id="Ztxdao8CkwtjpnKF8u8nSm"/></svg></span> <span data-i18n="webui.rag_nav" data-page-node-id="PdtD96VwH5rTCUAV2smPlh">RAG 知识库</span>
@@ -7150,13 +7632,16 @@ function wfCloseRunDrawer() {
     </div>
 
     <!-- ── 变更安全 ── -->
-    <div class="nav-section" data-page-node-id="Fy9fByftKI6O4F7vQSKAHr">变更安全</div>
+    <div class="nav-section" data-i18n="webui.nav_group_change" data-page-node-id="Fy9fByftKI6O4F7vQSKAHr">变更安全</div>
     <div class="nav-item" onclick="showPage('sql-audit')" id="nav-sql-audit" data-page-node-id="ChEDGS7ngFZCaJ1baX82Jg">
-      <span class="icon" data-page-node-id="K58MscJOaq8HgfYKHj7pTS"><svg viewBox="0 0 24 24" aria-hidden="true" data-page-node-id="z6U0EXVLzFidMYU6s2f5Dk"><path d="M12 2 4 5v6c0 5 3.4 8.5 8 11 4.6-2.5 8-6 8-11V5l-8-3z" data-page-node-id="fYcIpg0oNQainihHFSHjUz"/><path d="M9 12l2 2 4-4" data-page-node-id="SCwsWPEPOcwnE45IdBYeMx"/></svg></span> <span data-page-node-id="yFYKcgSrdaqkz7nCVLvTYf">SQL 审核</span>
+      <span class="icon" data-page-node-id="K58MscJOaq8HgfYKHj7pTS"><svg viewBox="0 0 24 24" aria-hidden="true" data-page-node-id="z6U0EXVLzFidMYU6s2f5Dk"><path d="M12 2 4 5v6c0 5 3.4 8.5 8 11 4.6-2.5 8-6 8-11V5l-8-3z" data-page-node-id="fYcIpg0oNQainihHFSHjUz"/><path d="M9 12l2 2 4-4" data-page-node-id="SCwsWPEPOcwnE45IdBYeMx"/></svg></span> <span data-page-node-id="yFYKcgSrdaqkz7nCVLvTYf" data-i18n="webui.nav_sql_audit">SQL 审核</span>
+    </div>
+    <div class="nav-item" onclick="showPage('autonomy')" id="nav-autonomy" data-page-node-id="aUtoNmY1LoOpClOsELoOpX">
+      <span class="icon" data-page-node-id="aUtoNmY2shield"><svg viewBox="0 0 24 24" aria-hidden="true" data-page-node-id="aUtoNmY3shield"><path d="M12 2 4 5v6c0 5 3.4 8.5 8 11 4.6-2.5 8-6 8-11V5l-8-3z" data-page-node-id="aUtoNmY4shield"/><path d="M9 12l2 2 4-4" data-page-node-id="aUtoNmY5shield"/><circle cx="12" cy="11" r="2.4" data-page-node-id="aUtoNmY6shield"/></svg></span> <span data-page-node-id="aUtoNmY7label" data-i18n="webui.nav_autonomy">安全自治</span>
     </div>
 
     <!-- ── 监控运维 ── -->
-    <div class="nav-section" data-page-node-id="JwtMYgReffEI0E6IrW2qdw">监控运维</div>
+    <div class="nav-section" data-i18n="webui.nav_group_monitor" data-page-node-id="JwtMYgReffEI0E6IrW2qdw">监控运维</div>
     <div class="nav-item" onclick="showPage('monitor-slow')" id="nav-monitor-slow" data-page-node-id="Z7T5SIHe5OQVpFjhmtaOT5">
       <span class="icon" data-page-node-id="qosmieVwYLryo8PvkoEaPQ"><svg viewBox="0 0 24 24" aria-hidden="true" data-page-node-id="2ecA69gvLtY2DbM2Pn0Nib"><path d="M22 12h-4l-3 9L9 3l-3 9H2" data-page-node-id="IVh5dGymAzWFbpDLDkGcjz"/></svg></span> <span data-i18n="webui.nav_monitor_slow" data-page-node-id="spBUB7JTxGiCXlEpxJCCzv">实时慢查询</span>
     </div>
@@ -7165,6 +7650,18 @@ function wfCloseRunDrawer() {
     </div>
     <div class="nav-item" onclick="window.open('/monitor-screen', '_blank')" id="nav-monitor-screen" data-page-node-id="scrNavMenu1">
       <span class="icon" data-page-node-id="scrNavMenu2"><svg viewBox="0 0 24 24" aria-hidden="true" data-page-node-id="scrNavMenu3"><rect x="2" y="4" width="20" height="13" rx="2" data-page-node-id="scrNavMenu4"/><path d="M8 21h8M12 17v4" data-page-node-id="scrNavMenu5"/></svg></span> <span data-i18n="webui.nav_monitor_screen">监控大屏</span>
+    </div>
+    <div class="nav-item" onclick="showPage('fleet')" id="nav-fleet" data-page-node-id="fLeEt1nav">
+      <span class="icon" data-page-node-id="fLeEt2icon"><svg viewBox="0 0 24 24" aria-hidden="true" data-page-node-id="fLeEt3icon"><circle cx="5" cy="6" r="2.2"/><circle cx="19" cy="6" r="2.2"/><circle cx="12" cy="18" r="2.2"/><path d="M6.6 7.6 10.5 16M17.4 7.6 13.5 16M7.2 6h9.6"/></svg></span> <span data-page-node-id="fLeEt4label" data-i18n="webui.nav_fleet">智能基线</span>
+    </div>
+    <div class="nav-item" onclick="showPage('twin')" id="nav-twin" data-page-node-id="tWiN1nav">
+      <span class="icon" data-page-node-id="tWiN2icon"><svg viewBox="0 0 24 24" aria-hidden="true" data-page-node-id="tWiN3icon"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/><path d="M11 7h4a2 2 0 0 1 2 2v4M13 17H9a2 2 0 0 1-2-2v-4"/></svg></span> <span data-page-node-id="tWiN4label" data-i18n="webui.nav_twin">拓扑巡检</span>
+    </div>
+    <div class="nav-item" onclick="showPage('xinchuang'); loadXinchuangPage()" id="nav-xinchuang" data-page-node-id="xInCh1nav">
+      <span class="icon" data-page-node-id="xInCh2icon"><svg viewBox="0 0 24 24" aria-hidden="true" data-page-node-id="xInCh3icon"><path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9 12l2 2 4-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span> <span data-page-node-id="xInCh4label" data-i18n="menu.xinchuang">信创合规</span>
+    </div>
+    <div class="nav-item" onclick="showPage('run-log')" id="nav-run-log" data-page-node-id="rUnL0g1nav">
+      <span class="icon" data-page-node-id="rUnL0g2icon"><svg viewBox="0 0 24 24" aria-hidden="true" data-page-node-id="rUnL0g3icon"><path d="M4 4h16v12H5l-1 4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8 9h8M8 12h5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span> <span data-i18n="menu.run-log" data-page-node-id="rUnL0g4label">运行日志</span>
     </div>
     <div class="nav-item" onclick="showPage('sql-editor')" id="nav-sql-editor" data-page-node-id="N1B30jWZmpX0kKvfSud965">
       <span class="icon" data-page-node-id="WB7ROL3LKzu9sulipRzqIc"><svg viewBox="0 0 24 24" aria-hidden="true" data-page-node-id="S8uYKaDi3JnNbYhUH6Xgos"><path d="m16 18 6-6-6-6" data-page-node-id="xcl9gEKKlFmaJlU8By7ej5"/><path d="m8 6-6 6 6 6" data-page-node-id="rzyAKbzdAFplGGNCEnupxb"/></svg></span> <span data-i18n="webui.nav_sql_editor" data-page-node-id="tkBf0jEEQGjTiW7sM7OFlL">SQL 编辑器</span>
@@ -7183,7 +7680,7 @@ function wfCloseRunDrawer() {
     </div>
 
     <!-- ── 数据源与配置 ── -->
-    <div class="nav-section" data-page-node-id="kBAOW1ECHlfwTmjaIUTXCo">数据源与配置</div>
+    <div class="nav-section" data-i18n="webui.nav_group_datasource" data-page-node-id="kBAOW1ECHlfwTmjaIUTXCo">数据源与配置</div>
     <div class="nav-item" onclick="showPage('oracle-client')" id="nav-oracle-client" data-page-node-id="MYRiP7FnFSYQOYGknY01JO">
       <span class="icon" data-page-node-id="eQCDZmrngg0iyqsXARIAxY"><svg viewBox="0 0 24 24" aria-hidden="true" data-page-node-id="WDxUsF4Fi51sjSoWnuNoOl"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" data-page-node-id="QP0tPOK4BknGvofY7sUq6B"/><polyline points="7 10 12 15 17 10" data-page-node-id="BZIv1AcONlwYCBX83vLRZL"/><line x1="12" y1="15" x2="12" y2="3" data-page-node-id="ud8YtM0NDIa8R8qbCuQ0BA"/></svg></span> <span data-i18n="webui.nav_oracle_client" data-page-node-id="ut8P85FQanYz4nxBe5d7qD">数据库驱动管理</span>
     </div>
@@ -7586,6 +8083,14 @@ function wfCloseRunDrawer() {
               <div class="db-icon-item" title="ClickHouse" data-page-node-id="y4RehvNXIzMGNuC9qoHg3A">
                 <img src="/clickhouse.png" alt="ClickHouse" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" data-page-node-id="2Dm9xOxjoE8xlMBB7Tj9Vk"><span class="db-icon-fallback" style="display:none;" data-page-node-id="CuDLwZYTpQAJVG3A4HpP5E">⚡</span>
                 <span class="db-icon-label" data-page-node-id="E4Pqh4CtbUsBp9zCRdCBvF">ClickHouse</span>
+              </div>
+              <div class="db-icon-item" title="HaloDB" data-page-node-id="halodb-icon-item">
+                <img src="/halodb.png" alt="HaloDB" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" data-page-node-id="halodb-icon-img"><span class="db-icon-fallback" style="display:none;" data-page-node-id="halodb-icon-fb">🌀</span>
+                <span class="db-icon-label" data-page-node-id="halodb-icon-label">HaloDB</span>
+              </div>
+              <div class="db-icon-item" title="Vastbase" data-page-node-id="vastbase-icon-item">
+                <img src="/vastbase.png" alt="Vastbase" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" data-page-node-id="vastbase-icon-img"><span class="db-icon-fallback" style="display:none;" data-page-node-id="vastbase-icon-fb">🌊</span>
+                <span class="db-icon-label" data-page-node-id="vastbase-icon-label">Vastbase</span>
               </div>
               <!-- <div class="db-icon-item" title="IBM Db2">
                 <img src="/db2.png" alt="IBM Db2" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"><span class="db-icon-fallback" style="display:none;">📦</span>
@@ -8702,7 +9207,7 @@ curl -H "X-API-Key: YOUR_API_KEY" http://localhost:5003/api/v1/inspect/{task_id}
               <span style="font-weight:600" data-page-node-id="xxhSQ11CEVTyBgKOGCeEds">显示 AI 巡检助手（右侧聊天框）</span>
             </label>
             <div style="font-size:11.5px;color:var(--text-muted);margin-top:4px;margin-left:24px" data-page-node-id="p5kT4wxBOYL6DlClzZDgLO">
-              关闭后右侧 AI 巡检助手聊天框默认隐藏，对所有用户生效。
+              默认隐藏，可点右下角 💬 浮动按钮唤出；勾选后页面加载即展开，对所有用户生效。
             </div>
           </div>
 
@@ -9155,6 +9660,37 @@ curl -H "X-API-Key: YOUR_API_KEY" http://localhost:5003/api/v1/inspect/{task_id}
         </div>
       </div>
 
+      <!-- ══ Page: Run Log (运行日志) ══ -->
+      <div class="page" id="page-run-log" data-page-node-id="rUnL0gPage">
+        <div class="card" data-page-node-id="rUnL0gCard">
+          <div class="card-title" data-page-node-id="rUnL0gTitle"><span data-page-node-id="rUnL0gIcon">📑</span> <span data-i18n="menu.run-log" data-page-node-id="rUnL0gTitleTxt">运行日志</span>
+            <span style="float:right;font-size:12px;color:var(--text-muted);font-weight:400" id="run-log-meta" data-page-node-id="rUnL0gMeta"></span>
+          </div>
+
+          <!-- 分类过滤芯片（巡检 / 定时巡检 / 智能诊断 / 监控 / 系统） -->
+          <div id="run-log-filters" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px" data-page-node-id="rUnL0gFilters">
+            <button class="filter-chip active" data-cat="all" onclick="runLogSetCat('all')" data-page-node-id="rUnL0gC0">全部</button>
+            <button class="filter-chip" data-cat="inspection" onclick="runLogSetCat('inspection')" data-page-node-id="rUnL0gC1">巡检</button>
+            <button class="filter-chip" data-cat="scheduled" onclick="runLogSetCat('scheduled')" data-page-node-id="rUnL0gC2">定时巡检</button>
+            <button class="filter-chip" data-cat="diagnosis" onclick="runLogSetCat('diagnosis')" data-page-node-id="rUnL0gC3">智能诊断</button>
+            <button class="filter-chip" data-cat="monitor" onclick="runLogSetCat('monitor')" data-page-node-id="rUnL0gC4">监控</button>
+            <button class="filter-chip" data-cat="system" onclick="runLogSetCat('system')" data-page-node-id="rUnL0gC5">系统</button>
+          </div>
+
+          <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;flex-wrap:wrap" data-page-node-id="rUnL0gToolbar">
+            <input type="text" id="run-log-search" class="form-input" style="max-width:280px" placeholder="关键字过滤..." data-page-node-id="rUnL0gSearch" onkeydown="if(event.key==='Enter') runLogReload()" />
+            <button class="btn btn-ghost" onclick="runLogReload()" data-page-node-id="rUnL0gBtnFilter">🔍 筛选</button>
+            <label style="font-size:12px;color:var(--text-muted);display:flex;align-items:center;gap:4px;cursor:pointer" data-page-node-id="rUnL0gAutoLabel">
+              <input type="checkbox" id="run-log-autorefresh" checked onchange="runLogToggleAuto()" data-page-node-id="rUnL0gAuto" /> 自动刷新
+            </label>
+            <span style="flex:1"></span>
+            <button class="btn btn-ghost" onclick="runLogClear()" data-page-node-id="rUnL0gBtnClear">🧹 清屏</button>
+          </div>
+
+          <div id="run-log-area" style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:Consolas,Monaco,monospace;font-size:12px;max-height:60vh;overflow-y:auto;line-height:1.8;white-space:pre-wrap" data-page-node-id="rUnL0gArea"></div>
+        </div>
+      </div>
+
       <!-- ══ Page: Server Inspection History ══ -->
       <div class="page" id="page-server-history" data-page-node-id="HTNIJCOO1yxB3NdBsbrVHl">
         <div class="card" data-page-node-id="WiCibBrHHBJYUsNOqaq3Kr">
@@ -9575,7 +10111,9 @@ curl -H "X-API-Key: YOUR_API_KEY" http://localhost:5003/api/v1/inspect/{task_id}
           <div class="card-title" data-page-node-id="I3JwLtLh4xujurjUlUEANr">
             <span data-page-node-id="FA4kTpWulGlOxXuM45DLP3">🗄️</span> <span data-i18n="webui.datasources_title" data-page-node-id="gEytgGYHZSEIClIN0CWGlD">数据源管理</span>
             <span class="badge" id="datasources-count" data-page-node-id="VPoZSzoIg6HYCTyBfNuwon">0</span>
-            <button class="btn btn-primary" style="margin-left:auto;padding:6px 14px;font-size:12px" onclick="showAddDatasourceModal()" data-page-node-id="Sz7f7EU39QKBq61TLPuCUG">➕ <span data-i18n="webui.datasources_add" data-page-node-id="d106HdzB5aF7yJbXxNIjtI">添加数据源</span></button>
+            <button class="btn btn-ghost" style="margin-left:auto;padding:6px 14px;font-size:12px" onclick="exportDatasourcesJson()" data-i18n="webui.ds_export" data-page-node-id="dSxP0rtBtn1">⤓ <span data-i18n="webui.ds_export" data-page-node-id="dSxP0rtBtn1t">导出</span></button>
+            <button class="btn btn-ghost" style="padding:6px 14px;font-size:12px" onclick="importDatasourcesJson(this)" data-i18n="webui.ds_import" data-page-node-id="dSxImptBtn1">⤒ <span data-i18n="webui.ds_import" data-page-node-id="dSxImptBtn1t">导入</span></button>
+            <button class="btn btn-primary" style="padding:6px 14px;font-size:12px" onclick="showAddDatasourceModal()" data-page-node-id="Sz7f7EU39QKBq61TLPuCUG">➕ <span data-i18n="webui.datasources_add" data-page-node-id="d106HdzB5aF7yJbXxNIjtI">添加数据源</span></button>
           </div>
           <!-- 分组筛选 -->
           <div style="margin:12px 0 4px;display:flex;align-items:center;gap:8px;flex-wrap:wrap" data-page-node-id="nrAOtHzHI4HB9MHAXbqRMK">
@@ -10001,6 +10539,8 @@ curl -H "X-API-Key: YOUR_API_KEY" http://localhost:5003/api/v1/inspect/{task_id}
                     <option value="dm8" data-page-node-id="f9iAhtVNfI3zO3Jb1BOWYE">DM</option>
                     <option value="tidb" data-page-node-id="7imLtgpxFlLn9ZvCPWR4nG">TiDB</option>
                     <option value="ivorysql" data-page-node-id="DgWTiqOp2MS5DTRFCyPG61">IvorySQL</option>
+                    <option value="halodb">HaloDB</option>
+                    <option value="vastbase">Vastbase</option>
                     <option value="kingbase" data-page-node-id="JGeJWQ0NPGlewXal2keXlB">KingbaseES</option>
                     <option value="gbase" data-page-node-id="fituSC0iKhZXrCVg9g86et">GBase 8s</option>
                   </select>
@@ -10615,11 +11155,12 @@ curl -H "X-API-Key: YOUR_API_KEY" http://localhost:5003/api/v1/inspect/{task_id}
       <!-- ══ Page: Workflow Builder (阶段 D) ══ -->
       <div class="page" id="page-workflow" style="display:none;" data-page-node-id="pdVxXpNfXObDjfn1LplCcj">
         <style>
-          .wf-palette-item{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;padding:10px 6px;border:1px solid var(--border);border-radius:10px;background:var(--surface2);cursor:grab;font-size:12px;font-weight:500;text-align:center;transition:background .15s,transform .1s,border-color .15s;min-height:72px}
-          .wf-palette-item:hover{background:var(--surface);border-color:var(--accent2);transform:translateY(-1px)}
-          .wf-palette-item .pi-ico{width:30px;height:30px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;border-radius:8px;background:linear-gradient(135deg,rgba(56,139,253,.18),rgba(163,113,247,.16));color:var(--accent2)}
-          .wf-palette-item .pi-ico svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
-          .wf-palette-item .pi-name{font-weight:500;line-height:1.25;font-size:12px;white-space:normal;word-break:break-word;width:100%}
+          .wf-palette-item{display:flex;align-items:center;gap:8px;padding:5px 7px;border:1px solid transparent;border-radius:8px;background:transparent;cursor:grab;font-size:12px;font-weight:500;transition:background .15s,border-color .15s}
+          .wf-palette-item:hover{background:var(--surface2);border-color:var(--accent2)}
+          .wf-palette-item .pi-ico{width:24px;height:24px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;border-radius:6px;background:linear-gradient(135deg,rgba(56,139,253,.18),rgba(163,113,247,.16));color:var(--accent2)}
+          .wf-palette-item .pi-ico svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+          .wf-palette-item .pi-name{font-weight:500;line-height:1.3;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+          .wf-palette-item .pi-db{flex:0 0 auto;font-size:10px;font-weight:600;color:var(--accent2);background:rgba(56,139,253,.12);border-radius:4px;padding:1px 5px;max-width:72px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
           #wf-canvas{position:relative;width:100%;height:calc(100vh - 210px);min-height:560px;background:var(--surface2);border-radius:10px;overflow:auto;background-image:radial-gradient(var(--border) 1.2px,transparent 1.2px);background-size:22px 22px}
           #wf-edges{position:absolute;left:0;top:0;width:2400px;height:1600px;pointer-events:none;overflow:visible}
           #wf-edges path{pointer-events:stroke;cursor:pointer}
@@ -10634,10 +11175,15 @@ curl -H "X-API-Key: YOUR_API_KEY" http://localhost:5003/api/v1/inspect/{task_id}
           .wf-node .wf-port:hover::after{opacity:1}
           .wf-placeholder{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:13px;color:var(--text-muted);pointer-events:none}
           .wf-palette{max-height:calc(100vh - 240px);overflow-y:auto;padding-right:4px}
-          .wf-palette-group{margin-bottom:14px}
-          .wf-palette-title{display:flex;align-items:center;padding:6px 2px;font-size:12px;font-weight:600;color:var(--text-muted);user-select:none}
-          .wf-palette-title .chevron{display:none}
-          .wf-palette-items{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+          .wf-palette-group{margin-bottom:6px}
+          .wf-palette-title{display:flex;align-items:center;gap:5px;padding:5px 4px;font-size:12px;font-weight:600;color:var(--text-muted);user-select:none;cursor:pointer;border-radius:6px}
+          .wf-palette-title:hover{color:var(--text);background:var(--surface2)}
+          .wf-palette-title .chevron{display:inline-block;font-size:10px;line-height:1;transition:transform .15s}
+          .wf-palette-group[data-open="1"] > .wf-palette-title .chevron{transform:rotate(90deg)}
+          .wf-palette-title .gt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+          .wf-palette-title .gcount{flex:0 0 auto;font-size:10px;font-weight:600;color:var(--text-muted);background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:0 6px;line-height:15px}
+          .wf-palette-group[data-open="0"] > .wf-palette-items{display:none}
+          .wf-palette-items{display:flex;flex-direction:column;gap:2px}
           .wf-palette-search{width:100%;padding:6px 9px;border-radius:8px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:12px;margin-bottom:10px;outline:none}
           .wf-palette-search:focus{border-color:var(--accent2)}
           .wf-palette-empty{font-size:11.5px;color:var(--text-muted);padding:8px;text-align:center}
@@ -10654,7 +11200,9 @@ curl -H "X-API-Key: YOUR_API_KEY" http://localhost:5003/api/v1/inspect/{task_id}
             <button class="btn btn-primary" onclick="wfNew()" data-page-node-id="EJfY0hCQXnwMSuEKDT8XXg">+ 新增工作流</button>
           </div>
           <div class="card" data-page-node-id="CTw2FjaErMwcgY62RXGDnJ">
-            <div class="card-title" data-page-node-id="Gzyq6V1bLkFW1AdZi0RZlM">已保存工作流 <span class="badge" id="wf-count" data-page-node-id="9Wdby7gKyBAEGBaJPbEtn2">0</span></div>
+            <div class="card-title" data-page-node-id="Gzyq6V1bLkFW1AdZi0RZlM">已保存工作流 <span class="badge" id="wf-count" data-page-node-id="9Wdby7gKyBAEGBaJPbEtn2">0</span>
+              <button class="btn btn-ghost" style="margin-left:auto;font-size:12px;padding:4px 12px" onclick="wfOpenMarket()" data-page-node-id="wfMarketBtn">📦 模板市场</button>
+            </div>
             <div id="wf-list" data-page-node-id="czEyuKVhLRsGohfKrO7XDl"></div>
           </div>
           <div class="card" id="wf-run-card" style="display:none" data-page-node-id="AJRqMPKr6EBWsQY2rJe4lf">
@@ -10960,6 +11508,635 @@ curl -H "X-API-Key: YOUR_API_KEY" http://localhost:5003/api/v1/inspect/{task_id}
         <!-- 卡片菜单（动态定位） -->
         <div class="wf-task-menu" id="wf-task-menu" data-page-node-id="l8mTtwVfCgU8MpbmihGmrM"></div>
       </div><!-- /page-workflow-task -->
+
+      <!-- ─────────── 安全自治 DBA 闭环看板（P0-c） ─────────── -->
+      <div class="page" id="page-autonomy" style="display:none;" data-page-node-id="aUtoNmYpage">
+        <style>
+          .aut-stats{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+          .aut-st{flex:1;min-width:120px;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:12px 14px;display:flex;flex-direction:column;gap:4px}
+          .aut-st .n{font-size:22px;font-weight:800;line-height:1}
+          .aut-st .l{font-size:12px;color:var(--text-muted)}
+          .aut-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
+          .aut-card{background:var(--surface);border:1.5px solid var(--border);border-radius:12px;padding:13px 14px;display:flex;flex-direction:column;gap:9px;cursor:pointer;transition:border-color .15s,transform .1s;position:relative;overflow:hidden}
+          .aut-card:hover{border-color:var(--accent2);transform:translateY(-1px)}
+          .aut-card .ac-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+          .aut-card .ac-inst{font-weight:700;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px}
+          .aut-card .ac-meta{display:flex;gap:8px;font-size:11px;color:var(--text-muted);flex-wrap:wrap}
+          .aut-card .ac-cnt{display:flex;gap:14px;font-size:11.5px;color:var(--text-muted)}
+          .aut-card .ac-cnt b{color:var(--text);font-weight:700;font-size:13px}
+          .aut-badge{font-size:11px;font-weight:700;padding:3px 9px;border-radius:999px;white-space:nowrap;flex:0 0 auto}
+          .aut-kill{display:flex;align-items:center;gap:10px}
+          .aut-switch{position:relative;width:46px;height:24px;flex:0 0 auto;cursor:pointer}
+          .aut-switch input{display:none}
+          .aut-switch .track{position:absolute;inset:0;background:var(--border);border-radius:999px;transition:background .2s}
+          .aut-switch .knob{position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:#fff;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.3)}
+          .aut-switch input:checked + .track{background:var(--accent)}
+          .aut-switch input:checked + .track + .knob{left:24px}
+          .aut-drawer{position:fixed;top:0;right:0;height:100%;width:min(560px,92vw);background:var(--surface);border-left:1px solid var(--border);box-shadow:-8px 0 28px rgba(0,0,0,.32);transform:translateX(100%);transition:transform .22s ease,right .22s ease;z-index:10002;display:flex;flex-direction:column}
+          /* AI 巡检助手展开时，抽屉自动让位到其左侧（与 sa-drawer / wf-run-drawer 同模式） */
+          .aut-drawer.ai-panel-open{right:432px}
+          .aut-drawer-mask{position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:10001;display:none}
+          /* 窄屏：抽屉占满全屏并忽略 AI 让位 */
+          @media (max-width: 900px){
+            .aut-drawer{right:0 !important;width:auto}
+            .aut-drawer.ai-panel-open{right:0 !important}
+          }
+          .aut-drawer-mask.open{display:block}
+          .aut-drawer.open{transform:translateX(0)}
+          .aut-drawer .ad-head{display:flex;align-items:center;justify-content:space-between;padding:16px 18px;border-bottom:1px solid var(--border)}
+          .aut-drawer .ad-body{padding:16px 18px;overflow-y:auto;flex:1}
+          .aut-sec{margin-bottom:18px}
+          .aut-sec h4{font-size:13px;margin:0 0 8px;color:var(--accent2);display:flex;align-items:center;gap:6px}
+          .aut-prop{background:var(--surface2);border:1px solid var(--border);border-radius:9px;padding:10px 12px;margin-bottom:8px;font-size:12.5px}
+          .aut-prop .ph{font-weight:700;margin-bottom:4px}
+          .aut-prop pre{margin:6px 0 0;white-space:pre-wrap;word-break:break-word;font-size:11.5px;background:var(--surface);border:1px solid var(--border);border-radius:7px;padding:8px;max-height:180px;overflow:auto;color:var(--text-muted)}
+          .aut-empty{text-align:center;color:var(--text-muted);padding:36px 0;font-size:13px}
+          .aut-approver{display:flex;gap:8px;align-items:center;margin-top:6px}
+          .aut-approver input{flex:1}
+          .aut-sql-edit{width:100%;box-sizing:border-box;margin-top:6px;padding:8px;background:var(--surface);border:1px solid var(--border);border-radius:7px;color:var(--text);font-family:monospace;font-size:11.5px;resize:vertical;line-height:1.5}
+          .aut-actions{display:flex;gap:8px;margin:10px 0 2px;flex-wrap:wrap}
+        </style>
+
+        <!-- 顶部 hero：说明 + 全局熔断 + 触发入口 -->
+        <div class="card intel-hero" data-page-node-id="aUtoNmYhero">
+          <div class="card-title" data-page-node-id="aUtoNmYtitle">
+            <svg viewBox="0 0 24 24" width="18" height="18" style="stroke:var(--accent2);fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round" data-page-node-id="aUtoNmYticon"><path d="M12 2 4 5v6c0 5 3.4 8.5 8 11 4.6-2.5 8-6 8-11V5l-8-3z"/><path d="M9 12l2 2 4-4"/><circle cx="12" cy="11" r="2.4"/></svg>
+            <span data-page-node-id="aUtoNmYttext">安全自治 DBA 闭环</span>
+          </div>
+          <div style="color:var(--text-muted);font-size:12.5px;margin-bottom:14px" data-page-node-id="aUtoNmYsub">
+            检测 → 诊断 → 提议 → <b>审批闸门</b> → 执行 → 复检 的全自动闭环；所有写类动作默认停在 <b>pending_approval</b>，需人工审批后才执行——这是相对盲自动 Agentic DBA 的差异化护城河。
+          </div>
+          <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap" data-page-node-id="aUtoNmYctrl">
+            <select id="aut-instance" class="form-input" style="flex:1;min-width:200px" data-page-node-id="aUtoNmYsel"></select>
+            <button class="btn btn-primary" onclick="runAutonomy(this)" data-page-node-id="aUtoNmYrun">⚡ 触发自治闭环</button>
+            <div class="aut-kill" data-page-node-id="aUtoNmYkill">
+              <label class="aut-switch"><input type="checkbox" id="aut-kill" onchange="toggleAutonomyKill(this.checked)" data-page-node-id="aUtoNmYkillin"><span class="track"></span><span class="knob"></span></label>
+              <span style="font-size:12px;color:var(--text-muted)" data-page-node-id="aUtoNmYkilllbl">全局自治开关</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 闭环运行矩阵 -->
+        <div class="card" data-page-node-id="aUtoNmYmatrix">
+          <div class="card-title" data-page-node-id="aUtoNmYmtitle">
+            闭环运行矩阵
+            <button class="btn btn-ghost" style="margin-left:auto;padding:4px 12px;font-size:12px" onclick="loadAutonomyRuns()" data-page-node-id="aUtoNmYrefresh">↻ 刷新</button>
+          </div>
+          <div class="aut-stats" id="autonomy-stats" data-page-node-id="aUtoNmYstats"></div>
+          <div class="aut-grid" id="autonomy-list" data-page-node-id="aUtoNmYlist"></div>
+        </div>
+
+        <!-- 下钻抽屉 -->
+        <div class="aut-drawer" id="autonomy-drawer" data-page-node-id="aUtoNmYdrawer">
+          <div class="ad-head" data-page-node-id="aUtoNmYdhead">
+            <div data-page-node-id="aUtoNmYdtitle"><b id="ad-run-id">闭环详情</b> <span id="ad-run-state" class="aut-badge"></span></div>
+            <button class="btn btn-ghost" style="padding:4px 10px" onclick="closeAutonomyDrawer()" data-page-node-id="aUtoNmYdclose">✕</button>
+          </div>
+          <div class="ad-body" id="ad-body" data-page-node-id="aUtoNmYdbody"></div>
+        </div>
+        <div class="aut-drawer-mask" id="autonomy-drawer-mask" onclick="closeAutonomyDrawer()" data-page-node-id="aUtoNmYmask"></div>
+      </div><!-- /page-autonomy -->
+
+      <div class="page" id="page-fleet" style="display:none;" data-page-node-id="fLeEtpage">
+        <style>
+          .fl-stats{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+          .fl-st{flex:1;min-width:120px;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:12px 14px;display:flex;flex-direction:column;gap:4px}
+          .fl-st .n{font-size:22px;font-weight:800;line-height:1}
+          .fl-st .l{font-size:12px;color:var(--text-muted)}
+          .fl-table{width:100%;border-collapse:collapse;font-size:12.5px}
+          .fl-table th{text-align:left;padding:8px 10px;color:var(--text-muted);font-weight:600;border-bottom:1px solid var(--border);white-space:nowrap}
+          .fl-table td{padding:9px 10px;border-bottom:1px solid var(--border);vertical-align:middle}
+          .fl-table tr:hover td{background:var(--surface2)}
+          .fl-badge{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;white-space:nowrap}
+          .fl-bar{height:6px;border-radius:4px;background:var(--border);overflow:hidden;min-width:70px}
+          .fl-bar>i{display:block;height:100%;border-radius:4px}
+          .fl-drawer{position:fixed;top:0;right:0;height:100%;width:min(600px,94vw);background:var(--surface);border-left:1px solid var(--border);box-shadow:-8px 0 28px rgba(0,0,0,.32);transform:translateX(100%);transition:transform .22s ease,right .22s ease;z-index:10002;display:flex;flex-direction:column}
+          .fl-drawer-mask{position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:10001;display:none}
+          @media (max-width:900px){.fl-drawer{width:auto}}
+          .fl-drawer.open{transform:translateX(0)}
+          .fl-drawer .fd-head{display:flex;align-items:center;justify-content:space-between;padding:16px 18px;border-bottom:1px solid var(--border)}
+          .fl-drawer .fd-body{padding:16px 18px;overflow-y:auto;flex:1}
+          .fl-sec{margin-bottom:18px}
+          .fl-sec h4{font-size:13px;margin:0 0 8px;color:var(--accent2);display:flex;align-items:center;gap:6px}
+          .fl-item{background:var(--surface2);border:1px solid var(--border);border-radius:9px;padding:10px 12px;margin-bottom:8px;font-size:12.5px}
+        </style>
+
+        <!-- Hero：说明 + 基线学习 -->
+        <div class="card intel-hero" data-page-node-id="fLeEthero">
+          <div class="card-title" data-page-node-id="fLeEttitle">
+            <svg viewBox="0 0 24 24" width="18" height="18" style="stroke:var(--accent2);fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round" data-page-node-id="fLeEticon"><circle cx="5" cy="6" r="2.2"/><circle cx="19" cy="6" r="2.2"/><circle cx="12" cy="18" r="2.2"/><path d="M6.6 7.6 10.5 16M17.4 7.6 13.5 16M7.2 6h9.6"/></svg>
+            <span data-page-node-id="fLeEttitletext">智能基线 · Smart Baseline</span>
+          </div>
+          <div style="color:var(--text-muted);font-size:12.5px;margin-bottom:14px" data-page-node-id="fLeEtsub">
+            对全部纳管实例（含国产库）做<b>无监督基线学习</b>：按「小时」学习各指标一天内不同时段的正常波动区间，自动发现<b>偏离基线的漂移</b>与<b>容量触顶风险</b>——从单点巡检升级为全库级智能。
+          </div>
+          <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap" data-page-node-id="fLeEtctrl">
+            <select id="fl-learn-days" class="form-input" style="width:150px" data-page-node-id="fLeEtdays">
+              <option value="7">学习近 7 天</option>
+              <option value="14" selected>学习近 14 天</option>
+              <option value="30">学习近 30 天</option>
+            </select>
+            <button class="btn btn-primary" onclick="fleetLearnAll(this)" data-page-node-id="fLeEtlearnbtn">🧠 学习全部基线</button>
+            <button class="btn btn-ghost" onclick="loadFleetOverview()" data-page-node-id="fLeEtrefresh">↻ 刷新总览</button>
+          </div>
+        </div>
+
+        <!-- 统计卡 -->
+        <div class="fl-stats" id="fleet-stats" data-page-node-id="fLeEtstats"></div>
+
+        <!-- 实例排行 -->
+        <div class="card" data-page-node-id="fLeEttablecard">
+          <div class="card-title" data-page-node-id="fLeEttabletitle">实例排行
+            <span style="margin-left:auto;font-size:11px;color:var(--text-muted);font-weight:400" data-page-node-id="fLeEttablehint">按 容量风险 → 漂移严重度 排序 · 基线=小时桶</span>
+          </div>
+          <div style="overflow-x:auto" data-page-node-id="fLeEttablewrap">
+            <table class="fl-table" id="fleet-table" data-page-node-id="fLeEttable">
+              <thead><tr data-page-node-id="fLeEtthead">
+                <th data-page-node-id="fLeEtth1">实例</th><th data-page-node-id="fLeEtth2">类型</th><th data-page-node-id="fLeEtth3">样本</th>
+                <th data-page-node-id="fLeEtth4">基线</th><th data-page-node-id="fLeEtth5">漂移</th><th data-page-node-id="fLeEtth6">容量风险</th><th data-page-node-id="fLeEtth7">操作</th>
+              </tr></thead>
+              <tbody id="fleet-tbody" data-page-node-id="fLeEttbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- 下钻抽屉 -->
+        <div class="fl-drawer" id="fleet-drawer" data-page-node-id="fLeEtdrawer">
+          <div class="fd-head" data-page-node-id="fLeEtdhead">
+            <div data-page-node-id="fLeEtdtitle"><b id="fd-title">实例详情</b></div>
+            <button class="btn btn-ghost" style="padding:4px 10px" onclick="closeFleetDrawer()" data-page-node-id="fLeEtdclose">✕</button>
+          </div>
+          <div class="fd-body" id="fd-body" data-page-node-id="fLeEtdbody"></div>
+        </div>
+        <div class="fl-drawer-mask" id="fleet-drawer-mask" onclick="closeFleetDrawer()" data-page-node-id="fLeEtmask"></div>
+      </div><!-- /page-fleet -->
+
+      <!-- ══ Page: 拓扑巡检（P2 DB Twin）══ -->
+      <div class="page" id="page-twin" style="display:none;" data-page-node-id="tWiNpage">
+        <style>
+          .tw-summary{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+          .tw-st{flex:1;min-width:100px;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:10px 14px;display:flex;flex-direction:column;gap:3px}
+          .tw-st .n{font-size:20px;font-weight:800;line-height:1}
+          .tw-st .l{font-size:11.5px;color:var(--text-muted)}
+          .tw-canvas-wrap{overflow:auto;border:1px solid var(--border);border-radius:10px;background:var(--surface2);background-image:radial-gradient(var(--border) 1px,transparent 1px);background-size:20px 20px}
+          .tw-node{cursor:pointer}
+          .tw-node:hover .tw-box{filter:brightness(1.15)}
+          .tw-replay{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+          .tw-replay input[type=range]{flex:1;min-width:180px;accent-color:var(--accent2)}
+          .tw-modal-mask{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:10005;display:none;align-items:center;justify-content:center}
+          .tw-modal-mask.open{display:flex}
+          .tw-modal{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;width:min(560px,94vw);max-height:86vh;overflow-y:auto}
+          .tw-form-row{display:flex;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+          .tw-form-row>div{flex:1;min-width:140px}
+          .tw-form-row label{display:block;font-size:12px;color:var(--text-muted);margin-bottom:4px}
+          .tw-link-row{display:flex;justify-content:space-between;align-items:center;gap:8px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:7px 10px;margin-bottom:6px;font-size:12.5px}
+        </style>
+
+        <!-- Hero -->
+        <div class="card intel-hero" data-page-node-id="tWiNhero">
+          <div class="card-title" data-page-node-id="tWiNtitle">
+            <svg viewBox="0 0 24 24" width="18" height="18" style="stroke:var(--accent2);fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round" data-page-node-id="tWiNicon"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/><path d="M11 7h4a2 2 0 0 1 2 2v4M13 17H9a2 2 0 0 1-2-2v-4"/></svg>
+            <span data-page-node-id="tWiNtitletext">拓扑巡检 · Topology Inspection</span>
+          </div>
+          <div style="color:var(--text-muted);font-size:12.5px;margin-bottom:14px" data-page-node-id="tWiNsub">
+            全部纳管数据库的<b>活的数字镜像</b>：实时状态 + 关键指标叠加智能基线结论（漂移 / 容量预测 / 复合健康分），自动识别 Oracle ADG 主备与 RAC 集群关系，支持手动声明跨库型依赖连线与 <b>24 小时历史回放</b>。
+          </div>
+          <div class="tw-replay" data-page-node-id="tWiNctrl">
+            <button class="btn btn-primary" onclick="loadTwinTopology()" data-page-node-id="tWiNrefresh">↻ 刷新实时</button>
+            <button class="btn btn-ghost" onclick="openTwinLinksModal()" data-page-node-id="tWiNlinksbtn">🔗 依赖连线管理</button>
+            <span style="font-size:12px;color:var(--text-muted)" data-page-node-id="tWiNreplaylabel">回放</span>
+            <input type="range" id="tw-replay-slider" min="0" max="24" step="1" value="0" oninput="twinReplayHint(this.value)" onchange="twinOnReplay(this.value)" data-page-node-id="tWiNslider">
+            <span id="tw-replay-val" style="font-size:12px;font-weight:600;color:var(--accent2);min-width:64px" data-page-node-id="tWiNreplayval">实时</span>
+          </div>
+        </div>
+
+        <!-- 汇总 -->
+        <div class="tw-summary" id="twin-summary" data-page-node-id="tWiNsummary"></div>
+
+        <!-- 画布 -->
+        <div class="card" data-page-node-id="tWiNcanvascard">
+          <div class="card-title" data-page-node-id="tWiNcanvastitle">拓扑全景
+            <span style="margin-left:auto;font-size:11px;color:var(--text-muted);font-weight:400" data-page-node-id="tWiNcanvashint">
+              节点颜色=健康分档 · 点击下钻 · 虚线=自动识别(ADG/RAC) · 实线=手动声明
+            </span>
+          </div>
+          <div class="tw-canvas-wrap" data-page-node-id="tWiNcanvaswrap">
+            <svg id="twin-svg" xmlns="http://www.w3.org/2000/svg" data-page-node-id="tWiNsvg"></svg>
+          </div>
+          <div id="twin-replay-note" style="display:none;font-size:12px;color:var(--warn);margin-top:8px" data-page-node-id="tWiNreplaynote"></div>
+        </div>
+
+        <!-- 下钻抽屉（复用基线页抽屉样式）-->
+        <div class="fl-drawer" id="twin-drawer" data-page-node-id="tWiNdrawer">
+          <div class="fd-head" data-page-node-id="tWiNdhead">
+            <div data-page-node-id="tWiNdtitle"><b id="twd-title">节点详情</b></div>
+            <button class="btn btn-ghost" style="padding:4px 10px" onclick="closeTwinDrawer()" data-page-node-id="tWiNdclose">✕</button>
+          </div>
+          <div class="fd-body" id="twd-body" data-page-node-id="tWiNdbody"></div>
+        </div>
+        <div class="fl-drawer-mask" id="twin-drawer-mask" onclick="closeTwinDrawer()" data-page-node-id="tWiNmask"></div>
+
+        <!-- 连线管理模态 -->
+        <div class="tw-modal-mask" id="tw-links-mask" onclick="if(event.target===this)closeTwinLinksModal()" data-page-node-id="tWiNmodalmask">
+          <div class="tw-modal" data-page-node-id="tWiNmodal">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px" data-page-node-id="tWiNmodalhead">
+              <b style="font-size:15px" data-page-node-id="tWiNmodaltitle">🔗 依赖连线管理</b>
+              <button class="btn btn-ghost" style="padding:4px 10px" onclick="closeTwinLinksModal()" data-page-node-id="tWiNmodalclose">✕</button>
+            </div>
+            <div class="tw-form-row" data-page-node-id="tWiNform1">
+              <div><label data-page-node-id="tWiNl1">源实例（发起方）</label><select id="tw-link-src" class="form-input"></select></div>
+              <div><label data-page-node-id="tWiNl2">目标实例（对端）</label><select id="tw-link-dst" class="form-input"></select></div>
+            </div>
+            <div class="tw-form-row" data-page-node-id="tWiNform2">
+              <div><label data-page-node-id="tWiNl3">连线语义</label>
+                <select id="tw-link-kind" class="form-input" data-page-node-id="tWiNl3sel">
+                  <option value="replica">主从复制</option>
+                  <option value="cluster">集群成员</option>
+                  <option value="standby">容灾 standby</option>
+                  <option value="app">应用依赖</option>
+                  <option value="custom" selected>自定义</option>
+                </select>
+              </div>
+              <div><label data-page-node-id="tWiNl4">备注（可选）</label><input id="tw-link-label" class="form-input" placeholder="如：机房 A → 机房 B 异步复制" data-page-node-id="tWiNl4in"></div>
+            </div>
+            <button class="btn btn-primary" style="margin-bottom:14px" onclick="twinAddLink()" data-page-node-id="tWiNaddbtn">+ 添加连线</button>
+            <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px" data-page-node-id="tWiNlisthint">已声明连线</div>
+            <div id="tw-links-list" data-page-node-id="tWiNlist"></div>
+          </div>
+        </div>
+      </div><!-- /page-twin -->
+
+      <!-- ══ Page: 信创合规态势（P2） ══ -->
+      <div class="page" id="page-xinchuang" style="display:none;" data-page-node-id="xInChpage">
+        <style>
+          .xc-stats{display:flex;gap:12px;flex-wrap:wrap;margin:14px 0}
+          .xc-st{flex:1;min-width:130px;background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
+          .xc-st .n{font-size:24px;font-weight:800;line-height:1}
+          .xc-st .l{font-size:12px;color:var(--text-muted);margin-top:5px}
+          .xc-st.ring{display:flex;align-items:center;gap:16px}
+          .xc-ring-wrap{position:relative;width:96px;height:96px;flex:none}
+          .xc-ring-wrap .xc-ring-num{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:800}
+          .xc-table{width:100%;border-collapse:collapse;font-size:12.5px}
+          .xc-table th{text-align:left;padding:8px 10px;color:var(--text-muted);font-weight:600;border-bottom:1px solid var(--border);white-space:nowrap}
+          .xc-table td{padding:9px 10px;border-bottom:1px solid var(--border);vertical-align:middle}
+          .xc-table tr:hover td{background:var(--surface2)}
+          .xc-badge{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px}
+          .xc-drawer{position:fixed;top:0;right:0;height:100%;width:min(560px,94vw);background:var(--surface);border-left:1px solid var(--border);box-shadow:-8px 0 28px rgba(0,0,0,.32);transform:translateX(100%);transition:transform .22s ease;z-index:10002;display:flex;flex-direction:column}
+          .xc-drawer.open{transform:translateX(0)}
+          .xc-drawer-head{display:flex;align-items:center;justify-content:space-between;padding:16px 18px;border-bottom:1px solid var(--border)}
+          .xc-drawer-body{padding:16px 18px;overflow-y:auto;flex:1}
+          .xc-drawer-mask{position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:10001;display:none}
+          .xc-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 12px;border:1px solid var(--border);border-radius:9px;margin-bottom:8px;font-size:12.5px}
+        </style>
+
+        <!-- Hero -->
+        <div class="card xc-hero" data-page-node-id="xInChero">
+          <div class="card-title" data-page-node-id="xInCtitle">
+            🛡️ 信创合规态势
+            <span style="margin-left:auto;font-size:11px;color:var(--text-muted);font-weight:400" data-page-node-id="xInChint">加权合规率 · 生产/核心实例权重加倍</span>
+          </div>
+          <div style="color:var(--text-muted);font-size:12.5px;margin-bottom:12px" data-page-node-id="xInChsub">
+            对纳管实例做信创化程度盘点：国产（信创）占比、国外数据库待替换清单、库型分布。判定以权威默认清单为基准，可在「库型维护」中按库类型覆盖。
+          </div>
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap" data-page-node-id="xInChctrl">
+            <button class="btn btn-ghost" onclick="loadXinchuangPage()" data-page-node-id="xInChrefresh">↻ 刷新</button>
+            <button class="btn btn-ghost" onclick="xcDownloadReport('html')" data-page-node-id="xInChhtml">⬇ 报告(HTML)</button>
+            <button class="btn btn-ghost" onclick="xcDownloadReport('json')" data-page-node-id="xInChjson">⬇ 报告(JSON)</button>
+            <button class="btn btn-primary" onclick="loadXinchuangMaintain()" data-page-node-id="xInChmanage">⚙ 库型维护（分类 + 国测）</button>
+          </div>
+        </div>
+
+        <!-- 统计 + 评分环 -->
+        <div class="xc-stats" id="xc-stats" data-page-node-id="xInChstats"></div>
+
+        <!-- 库型分布 -->
+        <div class="card" data-page-node-id="xInChtypetable">
+          <div class="card-title" data-page-node-id="xInChtypetitle">库型分布</div>
+          <div style="overflow-x:auto" data-page-node-id="xInChtypewrap">
+            <table class="xc-table" data-page-node-id="xInChtypetbl">
+              <thead><tr data-page-node-id="xInChtypehead">
+                <th data-page-node-id="xInCht1">类型</th><th data-page-node-id="xInCht2">db_type</th>
+                <th data-page-node-id="xInCht3">实例数</th>
+                <th data-page-node-id="xInCht7">判定</th>
+              </tr></thead>
+              <tbody id="xc-type-tbody" data-page-node-id="xInChtypetbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- 待替换清单 -->
+        <div class="card" data-page-node-id="xInChrisktable">
+          <div class="card-title" data-page-node-id="xInChrisktitle">
+            国外数据库待替换清单
+            <span id="xc-risk-count" style="margin-left:auto;font-size:11px;color:var(--text-muted);font-weight:400" data-page-node-id="xInChriskcnt"></span>
+          </div>
+          <div id="xc-risk-sort" data-page-node-id="xInChrisksort"></div>
+          <div style="font-size:11.5px;color:var(--text-muted);margin:0 0 10px;line-height:1.7" data-page-node-id="xInChriskdesc">
+            推荐口径：<b>同源</b>=同内核分支（如 PostgreSQL→瀚高/openGauss），改动少；
+            <b>兼容</b>=语法/协议层兼容（如 Oracle→达梦）；
+            <b>适配</b>=需重写评估。改动量：少/中/多。<b>国测</b>=通过国家信创测评。
+          </div>
+          <div style="overflow-x:auto" data-page-node-id="xInChriskwrap">
+            <table class="xc-table" data-page-node-id="xInChrisktbl">
+              <thead><tr data-page-node-id="xInChriskhead">
+                <th data-page-node-id="xInChr1">实例</th><th data-page-node-id="xInChr2">主机</th>
+                <th data-page-node-id="xInChr3">类型</th><th data-page-node-id="xInChr4">业务组</th>
+                <th data-page-node-id="xInChr5">候选替代 / 决策</th>
+              </tr></thead>
+              <tbody id="xc-risk-tbody" data-page-node-id="xInChrisktbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- 库型维护抽屉（信创分类 + 国测认证 合并） -->
+        <div class="xc-drawer" id="xc-drawer" data-page-node-id="xInChdrawer">
+          <div class="xc-drawer-head" data-page-node-id="xInChdhead">
+            <b data-page-node-id="xInChdtitle">库型维护 · 信创分类 + 国测认证</b>
+            <button class="btn btn-ghost" style="padding:4px 10px" onclick="xcCloseDrawer()" data-page-node-id="xInChdclose">✕</button>
+          </div>
+          <div class="xc-drawer-body" id="xc-drawer-body" data-page-node-id="xInChdbody"></div>
+        </div>
+        <div class="xc-drawer-mask" id="xc-drawer-mask" onclick="xcCloseDrawer()" data-page-node-id="xInChdmask"></div>
+      </div><!-- /page-xinchuang -->
+
+      <script>
+      // ── 信创合规态势（P2） ──────────────────────────────
+      let __xcRisk = [];
+      let __xcSort = 'lineage';  // lineage=同源优先 | guoce=国测优先 | effort=改动少优先
+
+      async function loadXinchuangPage() {
+        const box = document.getElementById('xc-stats');
+        if (box) box.innerHTML = '<div class="xc-st"><div class="l">加载中…</div></div>';
+        try {
+          const res = await fetch('/api/intelligence/compliance/overview');
+          const d = await res.json();
+          if (!d.ok) { if (box) box.innerHTML = '<div class="xc-st" style="color:#EF4444">加载失败：' + escHtml(d.msg || '') + '</div>'; return; }
+          const o = d.overview;
+          __xcRisk = o.risk_instances || [];
+          renderXinchuangStats(o);
+          renderXinchuangTypes(o.by_type || []);
+          renderXinchuangRisk(__xcRisk);
+        } catch (e) {
+          if (box) box.innerHTML = '<div class="xc-st" style="color:#EF4444">加载失败：' + escHtml(e.message) + '</div>';
+        }
+      }
+
+      function xcScoreColor(s) { return s >= 70 ? '#16A34A' : (s >= 40 ? '#D97706' : '#DC2626'); }
+
+      function renderXinchuangStats(o) {
+        const color = xcScoreColor(o.score);
+        const circ = 2 * Math.PI * 42;
+        const off = circ * (1 - (o.compliance_rate || 0) / 100);
+        const html =
+          '<div class="xc-st ring">' +
+            '<div class="xc-ring-wrap"><svg viewBox="0 0 96 96" width="96" height="96">' +
+              '<circle cx="48" cy="48" r="42" fill="none" stroke="var(--border)" stroke-width="9"/>' +
+              '<circle cx="48" cy="48" r="42" fill="none" stroke="' + color + '" stroke-width="9" stroke-linecap="round" stroke-dasharray="' + circ.toFixed(1) + '" stroke-dashoffset="' + off.toFixed(1) + '" transform="rotate(-90 48 48)"/>' +
+            '</svg><div class="xc-ring-num" style="color:' + color + '">' + o.score + '</div></div>' +
+            '<div><div style="font-size:13px;font-weight:600">信创合规评分</div>' +
+            '<div style="font-size:12px;color:var(--text-muted)">合规率 ' + o.compliance_rate + '% · 加权</div></div>' +
+          '</div>' +
+          xcStat(o.total, '纳管实例总数') +
+          xcStat(o.domestic, '国产(信创)', '#16A34A') +
+          xcStat(o.foreign, '国外(待替换)', '#DC2626') +
+          xcStat(o.neutral, '待定(未知)', '#6b7280');
+        document.getElementById('xc-stats').innerHTML = html;
+      }
+      function xcStat(n, l, c) {
+        return '<div class="xc-st"><div class="n" ' + (c ? 'style="color:' + c + '"' : '') + '>' + n + '</div><div class="l">' + l + '</div></div>';
+      }
+
+      function renderXinchuangTypes(rows) {
+        const tb = document.getElementById('xc-type-tbody');
+        if (!tb) return;
+        if (!rows.length) { tb.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--text-muted)">暂无实例</td></tr>'; return; }
+        tb.innerHTML = rows.map(function (b) {
+          const cls = b.xinchuang === null ? '待定' : (b.xinchuang ? '国产' : '国外');
+          const cb = b.xinchuang === null ? 'background:#6b7280' : (b.xinchuang ? 'background:#16A34A' : 'background:#DC2626');
+          return '<tr><td>' + escHtml(b.name_zh) + '</td><td>' + escHtml(b.db_type) + '</td><td>' + b.total + '</td><td><span class="xc-badge" style="' + cb + ';color:#fff">' + cls + '</span></td></tr>';
+        }).join('');
+      }
+
+      function renderXinchuangRisk(list) {
+        const tb = document.getElementById('xc-risk-tbody');
+        const cnt = document.getElementById('xc-risk-count');
+        if (cnt) cnt.textContent = list.length ? ('共 ' + list.length + ' 个待替换') : '';
+        xcSortChips();
+        if (!tb) return;
+        if (!list.length) { tb.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#16A34A">✓ 无国外数据库实例</td></tr>'; return; }
+        let html = '';
+        list.forEach(function (r, idx) {
+          const sugg = sortSuggestions(r.suggestions || [], __xcSort);
+          const n = sugg.length;
+          const summ = n ? (n + ' 个候选 · 点击展开决策') : '暂无明确单库替代';
+          html += '<tr class="xc-risk-row" style="cursor:pointer" onclick="xcToggleRisk(' + idx + ')">'
+            + '<td>' + escHtml(r.name) + '</td>'
+            + '<td>' + escHtml(r.host || '') + '</td>'
+            + '<td>' + escHtml(r.db_type_name) + '</td>'
+            + '<td>' + escHtml(r.group) + '</td>'
+            + '<td><span style="font-size:12.5px;color:var(--text-muted)">' + escHtml(summ) + '</span> <span style="color:var(--text-muted)">▾</span></td>'
+            + '</tr>';
+          html += '<tr id="xc-risk-detail-' + idx + '" style="display:none"><td colspan="5" style="background:rgba(0,0,0,0.015);padding:10px 14px">' + renderRiskDetail(r, sugg) + '</td></tr>';
+        });
+        tb.innerHTML = html;
+      }
+
+      function renderRiskDetail(r, sugg) {
+        if (!sugg.length) {
+          const note = (r && r.empty_note) ? r.empty_note : '暂无明确单库替代，建议结合业务读写模型评估国产分布式/多模方案。';
+          return '<div style="font-size:12.5px;color:var(--text-muted);padding:4px 2px">' + escHtml(note) + '</div>';
+        }
+        return '<div style="display:flex;flex-direction:column;gap:8px">' + sugg.map(function (s) {
+          const guoce = s.certified ? '<span style="font-size:11px;padding:1px 7px;border-radius:5px;background:#EAF3DE;color:#3B6D11">国测</span>' : '';
+          const compat = s.compat ? '<span style="font-size:11px;color:var(--text-muted)">兼容度 ' + escHtml(s.compat) + '</span>' : '';
+          return '<div style="border:1px solid var(--border,#e5e7eb);border-radius:8px;padding:10px">'
+            + '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
+            + '<b style="font-size:13px">' + escHtml(s.label) + '</b>'
+            + xcRelBadge(s.relation) + guoce + xcEffBadge(s.effort) + compat
+            + '</div>'
+            + (s.reason ? '<div style="font-size:12.5px;margin-top:6px;line-height:1.6"><b>理由</b>：' + escHtml(s.reason) + '</div>' : '')
+            + (s.diff ? '<div style="font-size:12.5px;color:var(--text-muted);margin-top:3px;line-height:1.6"><b>差异</b>：' + escHtml(s.diff) + '</div>' : '')
+            + '</div>';
+        }).join('') + '</div>';
+      }
+
+      function xcRelBadge(r) {
+        if (!r) return '';
+        const m = {'同源': ['#EEEDFE', '#534AB7'], '兼容': ['#E6F1FB', '#185FA5'], '适配': ['#FAEEDA', '#854F0B']};
+        const c = m[r] || ['#f1f5f9', '#475569'];
+        return '<span style="font-size:11px;padding:1px 7px;border-radius:5px;background:' + c[0] + ';color:' + c[1] + '">' + escHtml(r) + '</span>';
+      }
+      function xcEffBadge(e) {
+        if (!e) return '';
+        const m = {'少': ['#EAF3DE', '#3B6D11'], '中': ['#FAEEDA', '#854F0B'], '多': ['#FCEBEB', '#A32D2D']};
+        const c = m[e] || ['#f1f5f9', '#475569'];
+        return '<span style="font-size:11px;padding:1px 7px;border-radius:5px;background:' + c[0] + ';color:' + c[1] + '">改动' + escHtml(e) + '</span>';
+      }
+
+      function sortSuggestions(arr, mode) {
+        const a = (arr || []).slice();
+        if (mode === 'lineage') {
+          const rk = {'同源': 0, '兼容': 1, '适配': 2};
+          a.sort(function (x, y) { return ((rk[x.relation] !== undefined ? rk[x.relation] : 3) - (rk[y.relation] !== undefined ? rk[y.relation] : 3)) || (x.priority - y.priority); });
+        } else if (mode === 'guoce') {
+          a.sort(function (x, y) { return ((y.certified ? 1 : 0) - (x.certified ? 1 : 0)) || (x.priority - y.priority); });
+        } else if (mode === 'effort') {
+          const rk = {'少': 0, '中': 1, '多': 2};
+          a.sort(function (x, y) { return ((rk[x.effort] !== undefined ? rk[x.effort] : 3) - (rk[y.effort] !== undefined ? rk[y.effort] : 3)) || (x.priority - y.priority); });
+        }
+        return a;
+      }
+
+      function xcSortChips() {
+        const box = document.getElementById('xc-risk-sort');
+        if (!box) return;
+        const modes = [['lineage', '同源优先'], ['guoce', '国测优先'], ['effort', '改动少优先']];
+        box.innerHTML = modes.map(function (m) {
+          const active = __xcSort === m[0];
+          const st = active ? 'background:#185FA5;color:#fff' : 'border:1px solid var(--border,#e5e7eb);color:var(--text-muted)';
+          return '<span onclick="xcSetSort(\'' + m[0] + '\')" style="cursor:pointer;font-size:12px;padding:3px 12px;border-radius:6px;' + st + '">' + m[1] + '</span>';
+        }).join(' ');
+      }
+      function xcSetSort(m) { __xcSort = m; xcSortChips(); renderXinchuangRisk(__xcRisk); }
+      function xcToggleRisk(idx) {
+        const el = document.getElementById('xc-risk-detail-' + idx);
+        if (!el) return;
+        el.style.display = (el.style.display === 'none') ? 'table-row' : 'none';
+      }
+
+      function xcDownloadReport(fmt) {
+        window.open('/api/intelligence/compliance/report?fmt=' + fmt, '_blank');
+      }
+
+      async function loadXinchuangMaintain() {
+        const body = document.getElementById('xc-drawer-body');
+        body.innerHTML = '<div style="color:var(--text-muted);font-size:12.5px">加载中…</div>';
+        document.getElementById('xc-drawer').classList.add('open');
+        document.getElementById('xc-drawer-mask').style.display = 'block';
+        try {
+          const res = await fetch('/api/intelligence/compliance/xinchuang-map');
+          const d = await res.json();
+          if (!d.ok) { body.innerHTML = '<div style="color:#EF4444">加载失败：' + escHtml(d.msg || '') + '</div>'; return; }
+          window.__xcMaintain = d.items || [];
+          const note = d.guoce_note || '';
+          const rows = window.__xcMaintain;
+          if (!rows.length) { body.innerHTML = '<div style="color:var(--text-muted)">暂无可维护的库型</div>'; return; }
+          let html = '<div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">本界面统一维护「信创分类」与「国测认证」：内置库型判定以权威默认清单为基准；自定义库型在添加时指定国产/国外与国测。' + escHtml(note) + '</div>' +
+            '<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px;padding:10px;border:1px solid var(--border);border-radius:8px">' +
+              '<div style="font-size:12px;font-weight:600;color:var(--text)">添加自定义库型</div>' +
+              '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
+                '<input id="xc-add-type" placeholder="库类型名（如 Vastbase / AntDB）" style="flex:1;min-width:140px;font-size:12px;padding:5px 8px;border:1px solid var(--border,#ddd);border-radius:6px;background:transparent;color:var(--text)">' +
+                '<input id="xc-add-name" placeholder="中文名（可选）" style="flex:1;min-width:140px;font-size:12px;padding:5px 8px;border:1px solid var(--border,#ddd);border-radius:6px;background:transparent;color:var(--text)">' +
+              '</div>' +
+              '<div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">' +
+                '<label style="font-size:12px;color:var(--text)"><input type="radio" name="xc-add-xc" value="1" checked onchange="xcAddXcChange(1)"> 国产（信创）</label>' +
+                '<label style="font-size:12px;color:var(--text)"><input type="radio" name="xc-add-xc" value="0" onchange="xcAddXcChange(0)"> 国外</label>' +
+                '<label id="xc-add-guoce-wrap" style="font-size:12px;color:var(--text)"><input type="checkbox" id="xc-add-guoce"> 国测（已通过国家信创测评）</label>' +
+                '<button class="btn btn-primary" style="font-size:12px;padding:4px 12px;margin-left:auto" onclick="xcCustomAdd()">添加库型</button>' +
+              '</div>' +
+            '</div>' +
+            rows.map(function (it, i) {
+              const isCustom = !!it.custom;
+              const eff = it.effective_xinchuang;
+              const xcBadge = eff ? '<span class="xc-badge" style="background:#16A34A;color:#fff">国产</span>' : '<span class="xc-badge" style="background:#DC2626;color:#fff">国外</span>';
+              let gcBadge, gcBtn;
+              if (!it.effective_xinchuang) {
+                // 国外库不适用国测，不提供标记/取消按钮
+                gcBadge = '<span style="font-size:11px;color:#6b7280">—</span>';
+                gcBtn = '<span style="font-size:10px;color:#9ca3af">国外库不适用</span>';
+              } else if (it.certified) {
+                gcBadge = '<span class="xc-badge" style="background:#7C3AED;color:#fff">国测</span>';
+                gcBtn = '<button class="btn btn-ghost" style="font-size:12px;padding:3px 10px" onclick="xcGuoceToggle(' + i + ',false)">取消国测</button>';
+              } else {
+                gcBadge = '<span style="font-size:11px;color:#6b7280">—</span>';
+                gcBtn = '<button class="btn btn-ghost" style="font-size:12px;padding:3px 10px" onclick="xcGuoceToggle(' + i + ',true)">标记国测</button>';
+              }
+              const delBtn = isCustom ? '<button class="btn btn-ghost" style="font-size:12px;padding:3px 10px" onclick="xcCustomRemove(' + i + ')">删除</button>' : '';
+              const tag = isCustom ? ' <span style="font-size:10px;color:var(--accent2)">自定义</span>' : (it.override ? ' <span style="font-size:10px;color:var(--accent2)">已覆盖</span>' : '');
+              return '<div class="xc-row" style="flex-wrap:wrap;gap:8px">' +
+                '<div style="flex:1;min-width:160px"><b>' + escHtml(it.name_zh) + '</b> <span style="color:var(--text-muted)">' + escHtml(it.db_type) + '</span>' + tag + '</div>' +
+                '<div style="display:flex;align-items:center;gap:6px">' + xcBadge + '</div>' +
+                '<div style="display:flex;align-items:center;gap:6px">' + gcBadge + gcBtn + delBtn + '</div>' +
+              '</div>';
+            }).join('');
+          body.innerHTML = html;
+        } catch (e) { body.innerHTML = '<div style="color:#EF4444">加载失败：' + escHtml(e.message) + '</div>'; }
+      }
+      async function xcGuoceToggle(i, val) {
+        const it = (window.__xcMaintain || [])[i]; if (!it) return;
+        try {
+          let res;
+          if (it.custom) {
+            res = await fetch('/api/intelligence/compliance/custom/' + encodeURIComponent(it.db_type) + '/certified', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ value: val })
+            });
+          } else {
+            res = await fetch('/api/intelligence/compliance/guoce', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ db_type: it.db_type, value: val })
+            });
+          }
+          const d = await res.json();
+          if (!d.ok) { toastError(d.msg || '保存失败'); return; }
+          await loadXinchuangMaintain();
+          loadXinchuangPage();
+        } catch (e) { toastError(e.message); }
+      }
+      function xcAddXcChange(val) {
+        // 选「国外」时禁用国测勾选并清空；选回「国产」时恢复可用
+        const chk = document.getElementById('xc-add-guoce');
+        const wrap = document.getElementById('xc-add-guoce-wrap');
+        if (!chk || !wrap) return;
+        if (val === 0) {
+          chk.checked = false;
+          chk.disabled = true;
+          wrap.style.opacity = '0.4';
+          wrap.style.cursor = 'not-allowed';
+        } else {
+          chk.disabled = false;
+          wrap.style.opacity = '1';
+          wrap.style.cursor = 'default';
+        }
+      }
+      async function xcCustomAdd() {
+        const typeInp = document.getElementById('xc-add-type');
+        const nameInp = document.getElementById('xc-add-name');
+        const type = (typeInp && typeInp.value || '').trim();
+        if (!type) { toastError('请输入库类型名'); return; }
+        const name = (nameInp && nameInp.value || '').trim();
+        const xcRadio = document.querySelector('input[name="xc-add-xc"]:checked');
+        const xinchuang = xcRadio ? xcRadio.value === '1' : true;
+        const guoceEl = document.getElementById('xc-add-guoce');
+        let certified = !!(guoceEl && guoceEl.checked);
+        if (!xinchuang) certified = false; // 国外库不可标记国测，强制兜底
+        try {
+          const res = await fetch('/api/intelligence/compliance/custom', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ db_type: type, name_zh: name, xinchuang: xinchuang, certified: certified })
+          });
+          const d = await res.json();
+          if (!d.ok) { toastError(d.msg || '添加失败'); return; }
+          toastSuccess('已添加自定义库型：' + type);
+          await loadXinchuangMaintain();
+          loadXinchuangPage();
+        } catch (e) { toastError(e.message); }
+      }
+      async function xcCustomRemove(i) {
+        const it = (window.__xcMaintain || [])[i]; if (!it) return;
+        try {
+          const res = await fetch('/api/intelligence/compliance/custom/' + encodeURIComponent(it.db_type), { method: 'DELETE' });
+          const d = await res.json();
+          if (!d.ok) { toastError(d.msg || '删除失败'); return; }
+          await loadXinchuangMaintain();
+          loadXinchuangPage();
+        } catch (e) { toastError(e.message); }
+      }
+      function xcCloseDrawer() {
+        document.getElementById('xc-drawer').classList.remove('open');
+        document.getElementById('xc-drawer-mask').style.display = 'none';
+      }
+      </script>
 
       {% if pro_available %}
             <div class="page" id="page-flow" style="display:none;padding:0;" data-page-node-id="V78O7ZrLpeEFP4pwaQIXz4">
@@ -11544,6 +12721,8 @@ function dm8OfflineDownloadReport() {
 
 // ─── Page Navigation ───
 function showPage(name) {
+  // P0-c：切换页面时关闭自治闭环抽屉（避免 fixed 抽屉残留浮层）
+  try { closeAutonomyDrawer(); } catch (e) {}
   // v2.6.2：更新全局页面变量（供 AI 上下文感知使用）
   _currentPage = name;
   // 切换菜单时把滚动位置复位到顶部：外层滚动容器是文档（body），
@@ -11614,6 +12793,10 @@ function showPage(name) {
     'diag-history': [i18n('webui.nav_diag_history') || '诊断历史', i18n('diag_history.subtitle') || '回看历次协同诊断结果。'],
     'flow': [i18n('webui.flow_title') || '巡检编排', i18n('webui.flow_desc') || ''],
     'sql-audit': ['SQL 审核', '提交 SQL 变更前的安全审计：解析、规则校验、风险评分（MVP1 仅只读分析，不执行）'],
+    'autonomy': ['安全自治 DBA 闭环', '检测→诊断→提议→审批闸门→执行→复检 的可审计自治闭环（P0-c 看板）'],
+    'fleet': ['智能基线 · Smart Baseline', '无监督基线学习 + 漂移检测 + 容量预测：从单点巡检到全库智能（P1）'],
+    'xinchuang': [i18n('menu.xinchuang') || '信创合规', i18n('webui.xinchuang_subtitle') || '对纳管实例做信创化程度盘点：国产（信创）占比、国外数据库待替换清单、库型分布。'],
+    'run-log': [i18n('menu.run-log') || '运行日志', i18n('webui.run_log_subtitle') || '统一汇聚巡检 / 定时巡检 / 智能诊断 / 监控 的运行日志，可按分类过滤。'],
   };
   const t = titles[name] || [name, ''];
   document.getElementById('topbar-title').textContent = t[0];
@@ -11641,6 +12824,7 @@ function showPage(name) {
   if (name === 'um-admin') loadUmAdminPage();
   if (name === 'oracle-client') loadDrivers();
   if (name === 'plugin-market') loadMarketPlugins();
+  if (name === 'run-log') loadRunLog();
     if (name === 'remote-shell') {
         initRemoteShellPage();
         switchRemoteTab('connection');
@@ -11662,6 +12846,9 @@ function showPage(name) {
   if (name === 'intelligence') loadIntelligencePage();
   if (name === 'diag-history') loadDiagHistoryPage();
   if (name === 'sql-audit') loadSqlAudit();
+  if (name === 'autonomy') loadAutonomyPage();
+  if (name === 'fleet') loadFleetOverview();
+  if (name === 'twin') loadTwinTopology();
 
   if (name === 'sql-editor') {
     loadSqlTree();
@@ -14708,6 +15895,811 @@ async function deleteSqlAuditTask(taskId) {
   }
 }
 
+// ─── 安全自治 DBA 闭环看板（P0-c） ─────────────────────────────────────
+const AUTONOMY_STATE_META = {
+  detected:         { label: '已检测', color: '#3b82f6' },
+  diagnosing:       { label: '诊断中', color: '#3b82f6' },
+  proposing:        { label: '提案中', color: '#3b82f6' },
+  pending_approval: { label: '待审批', color: '#f59e0b' },
+  approved:         { label: '已审批', color: '#f59e0b' },
+  executing:        { label: '执行中', color: '#3b82f6' },
+  verifying:        { label: '复检中', color: '#3b82f6' },
+  resolved:         { label: '已闭环', color: '#22c55e' },
+  no_proposals:     { label: '无可执行提案', color: '#94a3b8' },
+  reopened:         { label: '需重诊', color: '#fb923c' },
+  rejected:         { label: '已拒绝', color: '#94a3b8' },
+  blocked:          { label: '已阻断', color: '#94a3b8' },
+  failed:           { label: '失败',   color: '#ef4444' },
+};
+
+async function loadAutonomyPage() {
+  await loadAutonomyConfig();
+  await loadAutonomyInstances();
+  await loadAutonomyRuns();
+}
+
+async function loadAutonomyConfig() {
+  try {
+    const r = await fetch('/api/intelligence/autonomy/config');
+    const d = await r.json();
+    const sw = document.getElementById('aut-kill');
+    if (sw) sw.checked = !!d.kill_switch;
+  } catch (e) { console.error('autonomy config', e); }
+}
+
+async function loadAutonomyInstances() {
+  const sel = document.getElementById('aut-instance');
+  if (!sel) return;
+  try {
+    const r = await fetch('/api/pro/datasources');
+    const d = await r.json();
+    const list = (d.ok && d.datasources) ? d.datasources : [];
+    sel.innerHTML = '<option value="" disabled selected>选择目标实例</option>' +
+      list.map(x => {
+        const label = (x.name || (x.host + ':' + x.port)) + (x.db_type ? ' · ' + x.db_type : '');
+        return '<option value="' + x.id + '">' + escapeHtml(label) + '</option>';
+      }).join('');
+  } catch (e) { sel.innerHTML = '<option value="">实例加载失败</option>'; }
+}
+
+async function loadAutonomyRuns() {
+  const listEl = document.getElementById('autonomy-list');
+  const statsEl = document.getElementById('autonomy-stats');
+  if (!listEl) return;
+  listEl.innerHTML = '<div class="aut-empty">加载中…</div>';
+  try {
+    const r = await fetch('/api/intelligence/autonomy/runs');
+    const d = await r.json();
+    const runs = d.runs || [];
+    const cnt = {};
+    runs.forEach(x => { cnt[x.state] = (cnt[x.state] || 0) + 1; });
+    const total = runs.length;
+    const open = (cnt.pending_approval || 0) + (cnt.approved || 0) + (cnt.executing || 0) + (cnt.verifying || 0) + (cnt.diagnosing || 0);
+    const resolved = cnt.resolved || 0;
+    const risk = (cnt.failed || 0) + (cnt.reopened || 0);
+    statsEl.innerHTML =
+      '<div class="aut-st"><div class="n">' + total + '</div><div class="l">闭环总数</div></div>' +
+      '<div class="aut-st"><div class="n" style="color:#f59e0b">' + open + '</div><div class="l">进行中/待审批</div></div>' +
+      '<div class="aut-st"><div class="n" style="color:#22c55e">' + resolved + '</div><div class="l">已闭环</div></div>' +
+      '<div class="aut-st"><div class="n" style="color:#ef4444">' + risk + '</div><div class="l">需关注(失败/重诊)</div></div>';
+    if (!runs.length) {
+      listEl.innerHTML = '<div class="aut-empty">暂无自治闭环。在上方选择实例并点击「触发自治闭环」开始。</div>';
+      return;
+    }
+    listEl.innerHTML = runs.map(r => {
+      const m = AUTONOMY_STATE_META[r.state] || { label: r.state, color: '#94a3b8' };
+      const seed = (r.finding_ref || []).length;
+      const props = (r.proposals || []).length;
+      const aud = (r.audit_task_ids || []).length;
+      return '<div class="aut-card" onclick="openAutonomyDrawer(' + r.id + ')">' +
+        '<div class="ac-top">' +
+          '<span class="ac-inst" title="' + escapeHtml(r.instance_id) + '">' + escapeHtml(r.instance_id) + '</span>' +
+          '<span class="aut-badge" style="background:' + m.color + '22;color:' + m.color + ';border:1px solid ' + m.color + '55">' + m.label + '</span>' +
+        '</div>' +
+        '<div class="ac-meta"><span>#' + r.id + '</span><span>' + escapeHtml(r.created_at || '') + '</span></div>' +
+        '<div class="ac-cnt"><span>种子<b>' + seed + '</b></span><span>提案<b>' + props + '</b></span><span>审计<b>' + aud + '</b></span></div>' +
+      '</div>';
+    }).join('');
+  } catch (e) {
+    listEl.innerHTML = '<div class="aut-empty">加载失败：' + escapeHtml(e.message || e) + '</div>';
+  }
+}
+
+async function runAutonomy(btn) {
+  const sel = document.getElementById('aut-instance');
+  if (!sel || !sel.value) { toastError('请选择目标实例'); return; }
+  try {
+    if (btn) { btn.disabled = true; btn.textContent = '自治中…'; }
+    const res = await fetch('/api/intelligence/autonomy/run', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ instance_id: sel.value, severity_threshold: 'warning', submitter: 'autonomy-ui' })
+    });
+    const d = await res.json();
+    if (!res.ok || !d.ok) {
+      toastError('触发失败: ' + (d.msg || d.error || res.status));
+    } else {
+      toastSuccess('已触发自治闭环 #' + d.run_id + '，写类提案已落 pending_approval 待审批');
+      await loadAutonomyRuns();
+      openAutonomyDrawer(d.run_id);
+    }
+  } catch (e) {
+    toastError('触发失败: ' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '⚡ 触发自治闭环'; }
+  }
+}
+
+async function openAutonomyDrawer(id) {
+  const drawer = document.getElementById('autonomy-drawer');
+  const mask = document.getElementById('autonomy-drawer-mask');
+  const body = document.getElementById('ad-body');
+  if (!drawer || !body) return;
+  body.innerHTML = '<div class="aut-empty">加载中…</div>';
+  drawer.classList.add('open');
+  syncAutDrawerAiPanel();
+  if (mask) mask.classList.add('open');
+  try {
+    const res = await fetch('/api/intelligence/autonomy/runs/' + id);
+    const d = await res.json();
+    if (!res.ok || !d.ok) { body.innerHTML = '<div class="aut-empty">加载失败：' + escapeHtml(d.msg || res.status) + '</div>'; return; }
+    renderAutonomyDetail(d.run);
+  } catch (e) {
+    body.innerHTML = '<div class="aut-empty">加载失败：' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+// 自治抽屉与 AI 巡检助手联动：助手展开时抽屉让位到其左侧（与 wf-run-drawer 同模式）
+function syncAutDrawerAiPanel() {
+  const drawer = document.getElementById('autonomy-drawer');
+  if (!drawer || !drawer.classList.contains('open')) return;
+  const aiPanel = document.getElementById('ai-chat-sidebar');
+  const aiOpen = aiPanel && (aiPanel.classList.contains('open') || !aiPanel.classList.contains('collapsed'));
+  drawer.classList.toggle('ai-panel-open', !!aiOpen);
+}
+function closeAutonomyDrawer() {
+  const drawer = document.getElementById('autonomy-drawer');
+  const mask = document.getElementById('autonomy-drawer-mask');
+  if (drawer) drawer.classList.remove('open', 'ai-panel-open');
+  if (mask) mask.classList.remove('open');
+}
+
+function _autBadgeStyle(state) {
+  const m = AUTONOMY_STATE_META[state] || { label: state, color: '#94a3b8' };
+  return { label: m.label, color: m.color };
+}
+
+function renderAutonomyDetail(run) {
+  const canExec = ['pending_approval', 'approved', 'verifying'].includes(run.state);
+  const body = document.getElementById('ad-body');
+  const sid = document.getElementById('ad-run-id');
+  const sst = document.getElementById('ad-run-state');
+  if (sid) sid.textContent = '闭环 #' + run.id;
+  const sm = _autBadgeStyle(run.state);
+  if (sst) { sst.textContent = sm.label; sst.style.background = sm.color + '22'; sst.style.color = sm.color; sst.style.border = '1px solid ' + sm.color + '55'; }
+
+  let html = '<div class="aut-sec"><h4>基本信息</h4>' +
+    '<div class="aut-prop"><div class="ph">实例</div>' + escapeHtml(run.instance_id) + '</div>' +
+    '<div class="aut-prop"><div class="ph">时间线</div>创建：' + escapeHtml(run.created_at || '-') + '<br>更新：' + escapeHtml(run.updated_at || '-') + (run.closed_at ? '<br>闭环：' + escapeHtml(run.closed_at) : '') + '</div>' +
+  '</div>';
+
+  const seed = run.finding_ref || [];
+  html += '<div class="aut-sec"><h4>① 种子发现（巡检感知）· ' + seed.length + '</h4>';
+  if (!seed.length) html += '<div class="aut-empty" style="padding:10px">无</div>';
+  seed.forEach(f => {
+    html += '<div class="aut-prop"><div class="ph">' + escapeHtml(f.title || '-') + ' <span style="color:var(--text-muted);font-weight:400">[' + escapeHtml(f.severity || 'info') + ']</span></div>' +
+      '<div style="color:var(--text-muted)">' + escapeHtml(String(f.detail || '-').slice(0, 220)) + '</div>' +
+      (f.suggestion ? '<div style="margin-top:4px">建议：' + escapeHtml(String(f.suggestion).slice(0, 220)) + '</div>' : '') + '</div>';
+  });
+  html += '</div>';
+
+  const props = run.proposals || [];
+  html += '<div class="aut-sec"><h4>② 处置提案（经 WriteGate）· ' + props.length + '</h4>';
+  if (!props.length) html += '<div class="aut-empty" style="padding:10px">诊断结论中未抽取到可执行的写类 SQL（SELECT 等只读语句不进入审批），无可编辑对象</div>';
+  props.forEach(p => {
+    const tid = p.task_id;
+    const sql = (p.args && p.args.sql_text) ? p.args.sql_text : (p.sql_text || '');
+    // 编辑与「审批按钮」解耦：只要该提案有审计任务且未执行/未解决，SQL 即可编辑
+    // （含 rejected 态，便于修改后重新提交）。仅 executed/resolved 才锁定为只读。
+    const editable = !!tid && p.status !== 'executed' && p.status !== 'resolved';
+    html += '<div class="aut-prop"><div class="ph">' + escapeHtml(p.skill || 'write_skill') +
+      ' <span style="color:var(--text-muted);font-weight:400">→ #' + (tid || '-') + ' · ' + escapeHtml(p.status || '') + '</span></div>';
+    if (sql) {
+      if (editable) {
+        html += '<textarea id="aut-sql-' + tid + '" rows="5" class="aut-sql-edit">' + escapeHtml(sql) + '</textarea>';
+      } else {
+        html += '<pre>' + escapeHtml(sql) + '</pre>';
+      }
+    } else {
+      html += '<div style="color:var(--text-muted)">' + escapeHtml(String((p.args && p.args.reason) || p.remark || '')) + '</div>';
+    }
+    html += '</div>';
+  });
+  html += '</div>';
+
+  const aud = run.audit_task_ids || [];
+  html += '<div class="aut-sec"><h4>③ SQL 审计任务 · ' + aud.length + '</h4>';
+  if (!aud.length) html += '<div class="aut-empty" style="padding:10px">无</div>';
+  else html += '<div class="aut-prop">' + aud.map(t => '#' + t).join('、') + '（可在「SQL 审核」页审批执行）</div>';
+  html += '</div>';
+
+  const vr = run.verify_report;
+  html += '<div class="aut-sec"><h4>④ 复检报告</h4>';
+  if (!vr) html += '<div class="aut-empty" style="padding:10px">尚未执行闭环</div>';
+  else html += '<div class="aut-prop"><div class="ph">' + (vr.resolved ? '✅ 已清除闭环' : '⚠️ 仍存在问题，需重新诊断') + '</div>原因：' + escapeHtml(vr.reason || '-') + (vr.still_present && vr.still_present.length ? '<br>残留：' + vr.still_present.map(s => escapeHtml(s.title || s)).join('、') : '') + '</div>';
+  html += '</div>';
+
+  if (canExec && props.length) {
+    html += '<div class="aut-sec"><h4>⑤ 人工审批（闭环续跑）</h4>' +
+      '<div class="aut-approver"><input class="form-input" id="aut-approver" placeholder="审批人" value="admin"></div>' +
+      '<div class="aut-actions">' +
+        '<button class="btn btn-primary" onclick="execAutonomyRun(' + run.id + ')">✅ 审批并执行</button> ' +
+        '<button class="btn btn-danger" onclick="rejectAutonomyRun(' + run.id + ')">⛔ 驳回</button>' +
+      '</div>' +
+      '<div style="font-size:11px;color:var(--text-muted);margin-top:6px">可直接编辑上方 SQL 后再审批（编辑将重算风险并替换执行语句）；驳回需填写意见。执行将自动放行 pending_approval 写类任务并复检。</div></div>';
+  }
+
+  if (run.state === 'rejected') {
+    html += '<div class="aut-sec" style="border-color:#ef444455;background:#ef44440a">' +
+      '<h4>⛔ 驳回结论</h4>' +
+      '<div class="aut-prop"><div class="ph">驳回人</div>' + escapeHtml(run.rejected_by || '未知') + '</div>' +
+      (run.rejected_at ? '<div class="aut-prop"><div class="ph">驳回时间</div>' + escapeHtml(run.rejected_at) + '</div>' : '') +
+      '<div class="aut-prop"><div class="ph">驳回意见</div>' +
+      (run.reject_comment ? '<div style="white-space:pre-wrap;word-break:break-word">' + escapeHtml(run.reject_comment) + '</div>'
+                          : '<div style="color:var(--text-muted)">（未填写驳回意见）</div>') +
+      '</div>' +
+      '<div style="font-size:11px;color:var(--text-muted);margin-top:8px">上方 ② 处置提案的 SQL 已可编辑，修改后点击下方按钮重新提交审批。</div>' +
+      '<div class="aut-actions" style="margin-top:8px">' +
+        '<button class="btn btn-primary" onclick="reopenAutonomyRun(' + run.id + ')">🔄 修改 SQL 并重新提交</button>' +
+      '</div></div>';
+  }
+  body.innerHTML = html;
+}
+
+async function execAutonomyRun(id) {
+  const approverEl = document.getElementById('aut-approver');
+  const approver = approverEl ? approverEl.value.trim() : 'admin';
+  if (!approver) { toastError('请填写审批人'); return; }
+  // 收集已编辑的 SQL（key = audit task id）
+  const sqlOverrides = {};
+  document.querySelectorAll('.aut-sql-edit').forEach(ta => {
+    const m = (ta.id || '').match(/^aut-sql-(\d+)$/);
+    if (m) sqlOverrides[m[1]] = ta.value;
+  });
+  try {
+    const res = await fetch('/api/intelligence/autonomy/runs/' + id + '/execute', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ approver: approver, sql_overrides: sqlOverrides })
+    });
+    const d = await res.json();
+    if (!res.ok || !d.ok) { toastError('执行失败: ' + (d.msg || d.error || res.status)); }
+    else { toastSuccess('闭环 #' + id + ' 已' + (d.state === 'resolved' ? '闭环' : d.state)); }
+    await openAutonomyDrawer(id);
+    await loadAutonomyRuns();
+  } catch (e) { toastError('执行失败: ' + e.message); }
+}
+
+async function rejectAutonomyRun(id) {
+  const approverEl = document.getElementById('aut-approver');
+  const approver = approverEl ? approverEl.value.trim() : 'admin';
+  if (!approver) { toastError('请填写审批人'); return; }
+  const comment = await showPromptDialog('驳回闭环 #' + id, '请填写驳回意见（可留空）：', '');
+  if (comment === null) return; // 取消
+  try {
+    const res = await fetch('/api/intelligence/autonomy/runs/' + id + '/reject', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ approver: approver, comment: comment })
+    });
+    const d = await res.json();
+    if (!res.ok || !d.ok) { toastError('驳回失败: ' + (d.msg || d.error || res.status)); }
+    else { toastSuccess('闭环 #' + id + ' 已驳回'); }
+    await openAutonomyDrawer(id);
+    await loadAutonomyRuns();
+  } catch (e) { toastError('驳回失败: ' + e.message); }
+}
+
+async function reopenAutonomyRun(id) {
+  // 收集已编辑的 SQL（key = audit task id），重新提交审批
+  const sqlOverrides = {};
+  document.querySelectorAll('.aut-sql-edit').forEach(ta => {
+    const m = (ta.id || '').match(/^aut-sql-(\d+)$/);
+    if (m) sqlOverrides[m[1]] = ta.value;
+  });
+  const approverEl = document.getElementById('aut-approver');
+  const approver = approverEl ? approverEl.value.trim() : 'admin';
+  try {
+    const res = await fetch('/api/intelligence/autonomy/runs/' + id + '/reopen', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ approver: approver, sql_overrides: sqlOverrides })
+    });
+    const d = await res.json();
+    if (!res.ok || !d.ok) { toastError('重新提交失败: ' + (d.detail || d.msg || d.error || res.status)); }
+    else { toastSuccess('闭环 #' + id + ' 已重新提交审批'); }
+    await openAutonomyDrawer(id);
+    await loadAutonomyRuns();
+  } catch (e) { toastError('重新提交失败: ' + e.message); }
+}
+
+async function toggleAutonomyKill(on) {
+  try {
+    const res = await fetch('/api/intelligence/autonomy/config', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kill_switch: on })
+    });
+    const d = await res.json();
+    if (!res.ok || !d.ok) { toastError('设置失败: ' + (d.msg || res.status)); const sw = document.getElementById('aut-kill'); if (sw) sw.checked = !on; }
+    else toastSuccess(on ? '已开启安全自治' : '已熔断：新建自治闭环被拒绝');
+  } catch (e) { toastError('设置失败: ' + e.message); const sw = document.getElementById('aut-kill'); if (sw) sw.checked = !on; }
+}
+
+// ─── 智能基线 Smart Baseline（P1）────────────────────────────────
+let _fleetOverview = null;
+
+async function loadFleetOverview() {
+  const tbody = document.getElementById('fleet-tbody');
+  const statsEl = document.getElementById('fleet-stats');
+  if (!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:24px">加载中…</td></tr>';
+  try {
+    const r = await fetch('/api/intelligence/fleet/overview');
+    const d = await r.json();
+    if (!r.ok || !d.ok) { tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:24px">' + escapeHtml(d.msg || '加载失败') + '</td></tr>'; return; }
+    _fleetOverview = d;
+    const insts = d.instances || [];
+    const driftInsts = insts.filter(x => x.drift_critical + x.drift_warning > 0).length;
+    const capInsts = insts.filter(x => (x.capacity_risks || []).length > 0).length;
+    statsEl.innerHTML =
+      '<div class="fl-st"><span class="n">' + d.total + '</span><span class="l">监控实例</span></div>' +
+      '<div class="fl-st"><span class="n" style="color:var(--accent2)">' + d.with_baseline + '</span><span class="l">已学基线</span></div>' +
+      '<div class="fl-st"><span class="n" style="color:' + (driftInsts ? '#ef4444' : 'var(--text)') + '">' + driftInsts + '</span><span class="l">漂移实例</span></div>' +
+      '<div class="fl-st"><span class="n" style="color:' + (capInsts ? '#f59e0b' : 'var(--text)') + '">' + capInsts + '</span><span class="l">容量风险</span></div>';
+    if (!insts.length) {
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:24px">监控历史库暂无数据——大屏采集运行后回来看</td></tr>';
+      return;
+    }
+    tbody.innerHTML = insts.map(x => {
+      const blBadge = x.has_baseline
+        ? '<span class="fl-badge" style="background:#22c55e22;color:#22c55e">✔ ' + x.baseline_buckets + ' 桶</span>'        : '<span class="fl-badge" style="background:var(--border);color:var(--text-muted)">未学习</span>';
+      let driftHtml = '<span style="color:var(--text-muted)">—</span>';
+      if (x.drift_critical + x.drift_warning > 0) {
+        driftHtml = (x.drift_critical ? '<span class="fl-badge" style="background:#ef444422;color:#ef4444;margin-right:4px">' + x.drift_critical + ' 严重</span>' : '') +
+                    (x.drift_warning ? '<span class="fl-badge" style="background:#f59e0b22;color:#f59e0b">' + x.drift_warning + ' 警告</span>' : '');
+      }
+      let capHtml = '<span style="color:var(--text-muted)">—</span>';
+      if ((x.capacity_risks || []).length) {
+        capHtml = x.capacity_risks.map(f =>
+          '<span class="fl-badge" style="background:' + (f.severity === 'critical' ? '#ef444422;color:#ef4444' : '#f59e0b22;color:#f59e0b') + ';margin-right:4px" title="' + escapeHtml(f.label + ' 预计 ' + f.eta + ' 触及 ' + f.threshold) + '">' +
+          escapeHtml(f.label) + ' ' + escapeHtml(f.eta) + '</span>').join('');
+      }
+      const driftColor = x.drift_critical ? '#ef4444' : (x.drift_warning ? '#f59e0b' : '#22c55e');
+      return '<tr>' +
+        '<td style="font-weight:600">' + escapeHtml(x.name) + (x.name !== x.iid ? ' <span style="font-size:10px;color:var(--text-muted)">' + escapeHtml(String(x.iid).slice(0, 8)) + '</span>' : '') + '</td>' +
+        '<td>' + escapeHtml(x.db_type || '—') + '</td>' +
+        '<td>' + x.n_samples + '</td>' +
+        '<td>' + blBadge + '</td>' +
+        '<td style="color:' + driftColor + '">' + driftHtml + '</td>' +
+        '<td>' + capHtml + '</td>' +
+        '<td style="white-space:nowrap">' +
+          '<button class="btn btn-ghost" style="padding:3px 10px;font-size:11.5px" onclick="openFleetDrawer(\'' + x.iid + '\')">🔍 下钻</button> ' +
+          '<button class="btn btn-ghost" style="padding:3px 10px;font-size:11.5px" onclick="fleetLearnOne(\'' + x.iid + '\', this)" title="学习该实例基线">🧠 学习</button>' +
+        '</td></tr>';
+    }).join('');
+  } catch (e) {
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:24px">加载失败: ' + escapeHtml(e.message) + '</td></tr>';
+  }
+}
+
+async function fleetLearnAll(btn) {
+  const days = parseInt((document.getElementById('fl-learn-days') || {}).value || '14', 10);
+  if (btn) { btn.disabled = true; btn.textContent = '🧠 学习中…'; }
+  try {
+    const r = await fetch('/api/intelligence/fleet/learn', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ days: days })
+    });
+    const d = await r.json();
+    if (!r.ok || !d.ok) { toastError('学习失败: ' + (d.msg || res.status)); }
+    else {
+      const fail = (d.results || []).filter(x => !x.ok);
+      if (fail.length) toastError(d.learned + '/' + d.total + ' 成功；' + fail.length + ' 个实例' + escapeHtml(fail[0].detail || '样本不足'));
+      else toastSuccess('已为 ' + d.learned + ' 个实例学习基线');
+    }
+    await loadFleetOverview();
+  } catch (e) { toastError('学习失败: ' + e.message); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = '🧠 学习全部基线'; } }
+}
+
+async function fleetLearnOne(iid, btn) {
+  const days = parseInt((document.getElementById('fl-learn-days') || {}).value || '14', 10);
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  try {
+    const r = await fetch('/api/intelligence/fleet/learn', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ iid: iid, days: days })
+    });
+    const d = await r.json();
+    if (!r.ok || !d.ok) { toastError('学习失败: ' + (d.msg || (d.results && d.results[0] && d.results[0].detail) || res.status)); }
+    else toastSuccess('基线已学习（' + days + ' 天）');
+    await loadFleetOverview();
+  } catch (e) { toastError('学习失败: ' + e.message); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = '🧠 学习'; } }
+}
+
+async function openFleetDrawer(iid) {
+  const drawer = document.getElementById('fleet-drawer');
+  const mask = document.getElementById('fleet-drawer-mask');
+  const body = document.getElementById('fd-body');
+  const inst = ((_fleetOverview || {}).instances || []).find(x => x.iid === iid) || {};
+  document.getElementById('fd-title').textContent = (inst.name || iid) + ' · 基线下钻';
+  drawer.classList.add('open'); mask.classList.add('open');
+  body.innerHTML = '<div class="aut-empty">加载中…</div>';
+
+  let html = '';
+  // ① 基线状态
+  html += '<div class="fl-sec"><h4>① 基线状态</h4><div class="fl-item">' +
+    (inst.has_baseline
+      ? '✔ 已学习 <b>' + inst.baseline_buckets + '</b> 个小时桶，最近学习 ' + escapeHtml(inst.learned_at || '—') + '，样本 ' + inst.n_samples + ' 条'
+      : '⚠ 尚未学习基线——漂移/容量检测不可用，请先点击「🧠 学习」') +
+    '</div></div>';
+
+  // ② 漂移检测
+  html += '<div class="fl-sec"><h4>② 漂移检测（最近 30 分钟 vs 时段基线）</h4><div id="fd-drifts"><div style="color:var(--text-muted);font-size:12px">检测中…</div></div></div>';
+
+  // ③ 容量预测
+  html += '<div class="fl-sec"><h4>③ 容量预测（14 天线性外推）</h4><div id="fd-forecast"><div style="color:var(--text-muted);font-size:12px">计算中…</div></div></div>';
+
+  // ④ 联动自治闭环
+  html += '<div class="fl-sec"><h4>④ 联动处置</h4><div class="fl-item">以漂移/容量事件为种子触发<b>安全自治闭环</b>（诊断 → 写类提案 → 人工审批闸门）。</div>' +
+    '<button class="btn btn-primary" style="padding:7px 16px" onclick="fleetTriggerAutonomy(\'' + iid + '\', this)">⚡ 触发自治闭环</button></div>';
+
+  body.innerHTML = html;
+
+  // 并行拉漂移 + 容量
+  const [dr, fc] = await Promise.all([
+    fetch('/api/intelligence/fleet/drift/' + encodeURIComponent(iid)).then(r => r.json()).catch(() => null),
+    fetch('/api/intelligence/fleet/forecast/' + encodeURIComponent(iid)).then(r => r.json()).catch(() => null)
+  ]);
+
+  const driftEl = document.getElementById('fd-drifts');
+  if (driftEl) {
+    if (!dr || !dr.ok) {
+      driftEl.innerHTML = '<div class="fl-item" style="color:var(--text-muted)">' + escapeHtml((dr && dr.detail) || '暂无漂移数据') + '</div>';
+    } else if (!(dr.drifts || []).length) {
+      driftEl.innerHTML = '<div class="fl-item" style="color:#22c55e">✔ 各指标均在该时段正常区间内，无漂移</div>';
+    } else {
+      driftEl.innerHTML = dr.drifts.map(d => {
+        const color = d.severity === 'critical' ? '#ef4444' : '#f59e0b';
+        const pctBar = d.p95 > d.p50 ? Math.min(100, Math.max(0, (d.value - d.p50) / (d.p95 - d.p50) * 50)) : 50;
+        return '<div class="fl-item"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px">' +
+          '<b>' + escapeHtml(d.label) + '</b>' +
+          '<span class="fl-badge" style="background:' + color + '22;color:' + color + '">' + (d.severity === 'critical' ? '严重漂移' : '警告漂移') + ' z=' + d.z + '</span></div>' +
+          '<div style="margin:6px 0 4px">当前 <b>' + d.value + '</b> · 基线 P50=' + d.p50 + ' / P95=' + d.p95 + '</div>' +
+          '<div class="fl-bar"><i style="width:' + pctBar + '%;background:' + color + '"></i></div></div>';
+      }).join('');
+    }
+  }
+
+  const fcEl = document.getElementById('fd-forecast');
+  if (fcEl) {
+    if (!fc || !fc.ok) {
+      fcEl.innerHTML = '<div class="fl-item" style="color:var(--text-muted)">' + escapeHtml((fc && fc.detail) || '暂无预测数据') + '</div>';
+    } else if (!(fc.forecasts || []).length) {
+      fcEl.innerHTML = '<div class="fl-item" style="color:var(--text-muted)">无趋势型指标可预测</div>';
+    } else {
+      fcEl.innerHTML = fc.forecasts.map(f => {
+        const risky = !!f.eta;
+        const color = f.severity === 'critical' ? '#ef4444' : '#f59e0b';
+        const pct = Math.min(100, Math.max(0, f.current / f.threshold * 100));
+        return '<div class="fl-item"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px">' +
+          '<b>' + escapeHtml(f.label) + '</b>' +
+          (risky ? '<span class="fl-badge" style="background:' + color + '22;color:' + color + '">预计 ' + escapeHtml(f.eta) + ' 触及 ' + f.threshold + '</span>' : '<span class="fl-badge" style="background:#22c55e22;color:#22c55e">预测窗口内安全</span>') +
+          '</div><div style="margin:6px 0 4px">当前 <b>' + f.current + '</b> / 阈值 ' + f.threshold + ' · 日均变化 ' + f.slope_per_day + (f.days_to_threshold != null ? ' · 约 ' + f.days_to_threshold + ' 天后触顶' : '') + '</div>' +
+          '<div class="fl-bar"><i style="width:' + pct + '%;background:' + (risky ? color : '#22c55e') + '"></i></div></div>';
+      }).join('');
+    }
+  }
+}
+
+function closeFleetDrawer() {
+  const drawer = document.getElementById('fleet-drawer');
+  const mask = document.getElementById('fleet-drawer-mask');
+  if (drawer) drawer.classList.remove('open');
+  if (mask) mask.classList.remove('open');
+}
+
+async function fleetTriggerAutonomy(iid, btn) {
+  try {
+    // 闭环为同步接口（感知→诊断→提案约需数十秒），必须立即给按钮反馈，否则像「没反应」
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ 诊断执行中…'; }
+    toast('正在触发自治闭环：诊断 → 写类提案 → 审批闸门，约需数十秒，请勿关闭页面');
+    const res = await fetch('/api/intelligence/autonomy/run', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ instance_id: iid, submitter: 'fleet-bot' })
+    });
+    const d = await res.json();
+    if (!res.ok || !d.ok) { toastError('触发失败: ' + (d.msg || res.status)); return; }
+    toastSuccess('自治闭环 #' + d.run_id + ' 已创建（状态 ' + d.state + '），请到「安全自治」页查看');
+    closeFleetDrawer();
+  } catch (e) { toastError('触发失败: ' + e.message); }
+  finally {
+    if (btn) { btn.disabled = false; btn.textContent = '⚡ 触发自治闭环'; }
+  }
+}
+
+// ─── P2 拓扑巡检（DB Twin） ─────────────────────────────────────────────
+let _twinData = null;
+let _twinMode = 'live';
+const TW_GRADE_COLOR = { healthy: '#22c55e', degraded: '#f59e0b', at_risk: '#f97316', critical: '#ef4444', unknown: '#8b949e' };
+const TW_GRADE_LABEL = { healthy: '健康', degraded: '亚健康', at_risk: '风险', critical: '危急', unknown: '无数据' };
+const TW_STATUS_COLOR = { ok: '#22c55e', warn: '#f59e0b', crit: '#ef4444', down: '#ef4444', pending: '#8b949e', unsupported: '#8b949e', unknown: '#8b949e' };
+const TW_KIND_LABEL = { adg: 'Redo 传输', rac: 'RAC 集群', replica: '主从复制', cluster: '集群成员', standby: '容灾 standby', app: '应用依赖', custom: '自定义' };
+
+function twFm(v) { return (v === null || v === undefined || v === '') ? '—' : v; }
+
+async function loadTwinTopology() {
+  try {
+    const r = await fetch('/api/intelligence/twin/topology');
+    const d = await r.json();
+    if (!r.ok || !d.ok) { toastError(d.msg || '拓扑加载失败'); return; }
+    _twinData = d; _twinMode = 'live';
+    const slider = document.getElementById('tw-replay-slider');
+    if (slider) slider.value = 0;
+    twinReplayHint(0);
+    const note = document.getElementById('twin-replay-note');
+    if (note) note.style.display = 'none';
+    twinRenderAll();
+  } catch (e) { toastError('拓扑加载失败: ' + e.message); }
+}
+
+function twinReplayHint(v) {
+  const el = document.getElementById('tw-replay-val');
+  if (el) el.textContent = (+v === 0) ? '实时' : v + ' 小时前';
+}
+
+async function twinOnReplay(v) {
+  const hours = +v;
+  if (!hours) { loadTwinTopology(); return; }
+  try {
+    const r = await fetch('/api/intelligence/twin/replay?hours_ago=' + hours);
+    const d = await r.json();
+    if (!r.ok || !d.ok) { toastError(d.msg || '回放失败'); return; }
+    _twinData = d; _twinMode = 'replay';
+    const note = document.getElementById('twin-replay-note');
+    if (note) {
+      note.style.display = '';
+      note.innerHTML = '🕐 <b>回放视图</b>：显示 ' + hours + ' 小时前（' + new Date(d.at_ts * 1000).toLocaleString() + '）的拓扑状态；漂移/容量等智能叠加仅在实时视图有效。' +
+        '<button class="btn btn-ghost" style="padding:2px 10px;font-size:11.5px;margin-left:8px" onclick="loadTwinTopology()">回到实时</button>';
+    }
+    twinRenderAll();
+  } catch (e) { toastError('回放失败: ' + e.message); }
+}
+
+function twinRenderAll() {
+  const d = _twinData;
+  if (!d) return;
+  // 汇总卡
+  const s = d.summary || {};
+  const el = document.getElementById('twin-summary');
+  if (el) {
+    const cnt = (g) => s[g] || 0;
+    el.innerHTML =
+      '<div class="tw-st"><span class="n">' + (s.total || 0) + '</span><span class="l">节点</span></div>' +
+      '<div class="tw-st"><span class="n" style="color:#22c55e">' + cnt('healthy') + '</span><span class="l">健康</span></div>' +
+      '<div class="tw-st"><span class="n" style="color:#f59e0b">' + cnt('degraded') + '</span><span class="l">亚健康</span></div>' +
+      '<div class="tw-st"><span class="n" style="color:#f97316">' + cnt('at_risk') + '</span><span class="l">风险</span></div>' +
+      '<div class="tw-st"><span class="n" style="color:#ef4444">' + (cnt('critical') + cnt('down')) + '</span><span class="l">危急/宕机</span></div>' +
+      '<div class="tw-st"><span class="n" style="color:var(--accent2)">' + (s.edges || 0) + '</span><span class="l">连线（自动 ' + (s.auto_edges || 0) + ' / 手动 ' + (s.manual_edges || 0) + '）</span></div>' +
+      '<div class="tw-st"><span class="n" style="font-size:13px;padding-top:4px">' + (d.source === 'screen' ? '大屏富快照' : '历史库回退') + '</span><span class="l">数据源</span></div>';
+  }
+  twinRenderCanvas(d);
+}
+
+function twinLayout(nodes) {
+  const groups = {};
+  nodes.forEach(n => { const g = n.group || '默认'; (groups[g] = groups[g] || []).push(n); });
+  const names = Object.keys(groups).sort((a, b) => a.localeCompare(b));
+  const W = 184, H = 78, COLW = W + 66, ROWH = H + 24, TOP = 64, LEFT = 56;
+  let maxRows = 1;
+  names.forEach(g => { maxRows = Math.max(maxRows, groups[g].length); });
+  const width = Math.max(920, LEFT + names.length * COLW + 30);
+  const height = Math.max(400, TOP + maxRows * ROWH + 40);
+  const pos = {};
+  names.forEach((g, gi) => {
+    groups[g].forEach((n, ni) => { pos[n.iid] = { x: LEFT + gi * COLW, y: TOP + ni * ROWH, w: W, h: H }; });
+  });
+  return { pos: pos, width: width, height: height, names: names };
+}
+
+function twEdgePath(a, b) {
+  const ax = a.x + a.w, ay = a.y + a.h / 2, bx = b.x, by = b.y + b.h / 2;
+  if (bx >= ax + 12) {
+    const mx = (ax + bx) / 2;
+    return 'M' + ax + ' ' + ay + ' C ' + mx + ' ' + ay + ', ' + mx + ' ' + by + ', ' + bx + ' ' + by;
+  }
+  const tx = a.x + a.w / 2, ty = a.y, bx2 = b.x + b.w / 2, by2 = b.y;
+  return 'M' + tx + ' ' + ty + ' C ' + tx + ' ' + (ty - 48) + ', ' + bx2 + ' ' + (by2 - 48) + ', ' + bx2 + ' ' + by2;
+}
+
+function twinRenderCanvas(d) {
+  const svg = document.getElementById('twin-svg');
+  if (!svg) return;
+  const nodes = d.nodes || [];
+  if (!nodes.length) {
+    svg.setAttribute('width', '100%'); svg.setAttribute('height', '300');
+    svg.innerHTML = '<text x="50%" y="150" text-anchor="middle" fill="var(--text-muted)" font-size="13">暂无节点——大屏采集运行后自动出现</text>';
+    return;
+  }
+  const L = twinLayout(nodes);
+  const edges = d.edges || [];
+  // 连线颜色：adg 蓝 / rac 灰 / 手动 teal / 悬空红
+  const eColor = (e) => e.dangling ? '#ef4444' : (e.auto ? (e.kind === 'adg' ? '#378ADD' : '#8b949e') : '#0f9e8e');
+  const eDash = (e) => (e.auto || e.dangling) ? '6 4' : '';
+  const markerIds = {};
+  edges.forEach(e => { const c = eColor(e); if (!markerIds[c]) markerIds[c] = 'tw-arr-' + c.replace('#', ''); });
+
+  let defs = '<defs>';
+  Object.keys(markerIds).forEach(c => {
+    const col = '#' + c.replace('#', '');
+    defs += '<marker id="' + markerIds[c] + '" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="' + col + '"/></marker>';
+  });
+  defs += '</defs>';
+
+  // 列头（环境分组）
+  let headers = '';
+  L.names.forEach(g => {
+    const first = nodes.find(n => (n.group || '默认') === g);
+    if (!first) return;
+    const p = L.pos[first.iid];
+    headers += '<text x="' + (p.x + p.w / 2) + '" y="34" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--text-muted)">' + escapeHtml(g) + '</text>';
+  });
+
+  // 连线（先画，节点压在上层）
+  let edgeHtml = '';
+  edges.forEach(e => {
+    const a = L.pos[e.src], b = L.pos[e.dst];
+    if (!a || !b) return;
+    const col = eColor(e);
+    const mid = e.label || TW_KIND_LABEL[e.kind] || e.kind;
+    edgeHtml += '<path d="' + twEdgePath(a, b) + '" fill="none" stroke="' + col + '" stroke-width="1.6"' +
+      (eDash(e) ? ' stroke-dasharray="' + eDash(e) + '"' : '') +
+      ' marker-end="url(#' + markerIds[col] + ')" opacity="' + (e.dangling ? 0.5 : 0.85) + '">' +
+      '<title>' + escapeHtml(mid + (e.dangling ? '（对端不在当前快照）' : '')) + '</title></path>';
+  });
+
+  // 节点
+  const trunc = (s, n) => { s = String(s || ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+  let nodeHtml = '';
+  nodes.forEach(n => {
+    const p = L.pos[n.iid];
+    if (!p) return;
+    const gc = TW_GRADE_COLOR[n.grade] || TW_GRADE_COLOR.unknown;
+    const sc = TW_STATUS_COLOR[n.status] || TW_STATUS_COLOR.unknown;
+    const score = (n.score === null || n.score === undefined) ? '–' : n.score;
+    const driftN = (n.drift_critical || 0) + (n.drift_warning || 0);
+    const capN = (n.capacity_risks || []).length;
+    let extras = '';
+    if (driftN) extras += '<text x="' + (p.x + p.w - 40) + '" y="' + (p.y + p.h - 8) + '" text-anchor="end" font-size="10" fill="' + ((n.drift_critical || 0) ? '#ef4444' : '#f59e0b') + '">▲ 漂移 ' + driftN + '</text>';
+    if (capN) extras += '<text x="' + (p.x + 12) + '" y="' + (p.y + p.h - 8) + '" font-size="10" fill="#f97316">◆ 容量 ' + capN + '</text>';
+    const roleTxt = n.role ? (' · ' + trunc(String(n.role), 14)) : '';
+    nodeHtml += '<g class="tw-node" onclick="openTwinDrawer(\'' + n.iid + '\')">' +
+      '<rect class="tw-box" x="' + p.x + '" y="' + p.y + '" width="' + p.w + '" height="' + p.h + '" rx="10" fill="var(--surface)" stroke="' + gc + '" stroke-width="' + (n.status === 'down' ? '2.6' : '1.8') + '"' + (n.status === 'down' ? ' stroke-dasharray="5 3"' : '') + '/>' +
+      '<circle cx="' + (p.x + 13) + '" cy="' + (p.y + 16) + '" r="5" fill="' + sc + '"><title>' + escapeHtml(n.status) + '</title></circle>' +
+      '<text x="' + (p.x + 24) + '" y="' + (p.y + 20) + '" font-size="12.5" font-weight="600" fill="var(--text)">' + escapeHtml(trunc(n.name, 13)) + '</text>' +
+      '<text x="' + (p.x + 12) + '" y="' + (p.y + 40) + '" font-size="10.5" fill="var(--text-muted)">' + escapeHtml(String(n.db_type || '—') + roleTxt) + '</text>' +
+      '<circle cx="' + (p.x + p.w - 20) + '" cy="' + (p.y + 19) + '" r="14" fill="' + gc + '" opacity="0.16"/>' +
+      '<text x="' + (p.x + p.w - 20) + '" y="' + (p.y + 23) + '" text-anchor="middle" font-size="10.5" font-weight="700" fill="' + gc + '">' + score + '</text>' +
+      extras +
+      '<title>' + escapeHtml(n.name + (n.host ? '（' + n.host + ':' + n.port + '）' : '') + ' · ' + n.db_type + ' · 状态 ' + n.status + ' · 健康分 ' + (n.score === null ? '无数据' : n.score) + '（' + TW_GRADE_LABEL[n.grade] + '）') + '</title>' +
+      '</g>';
+  });
+
+  svg.setAttribute('width', L.width);
+  svg.setAttribute('height', L.height);
+  svg.innerHTML = defs + headers + edgeHtml + nodeHtml;
+}
+
+function openTwinDrawer(iid) {
+  const d = _twinData;
+  if (!d) return;
+  const n = (d.nodes || []).find(x => x.iid === iid);
+  if (!n) return;
+  const drawer = document.getElementById('twin-drawer');
+  const mask = document.getElementById('twin-drawer-mask');
+  document.getElementById('twd-title').textContent = (n.name || iid) + ' · 拓扑下钻';
+  const gc = TW_GRADE_COLOR[n.grade] || TW_GRADE_COLOR.unknown;
+  const replayed = (_twinMode === 'replay');
+  let html = '';
+  // ① 状态与健康分
+  html += '<div class="fl-sec"><h4>① 状态与复合健康分</h4><div class="fl-item">' +
+    '<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">' +
+    '<span class="fl-badge" style="background:' + gc + '22;color:' + gc + ';font-size:13px;padding:3px 12px">' + (n.score === null || n.score === undefined ? '无数据' : n.score) + ' · ' + TW_GRADE_LABEL[n.grade] + '</span>' +
+    '<span class="fl-badge" style="background:var(--border);color:var(--text-muted)">' + escapeHtml(n.status) + '</span>' +
+    (replayed ? '<span class="fl-badge" style="background:#f59e0b22;color:#f59e0b">回放时刻</span>' : '') +
+    '</div>' +
+    '<div style="font-size:12px;color:var(--text-muted)">' + escapeHtml([n.host ? n.host + ':' + n.port : null, n.db_type, n.role, n.db_unique_name, n.instance_name].filter(Boolean).join(' · ') || '—') + '</div>' +
+    (n.err ? '<div style="font-size:12px;color:#ef4444;margin-top:4px">' + escapeHtml(String(n.err)) + '</div>' : '') +
+    (replayed ? '<div style="font-size:11.5px;color:var(--text-muted);margin-top:6px">回放视图：智能叠加（漂移/容量）仅在实时视图计算</div>' : (n.has_smart ? '' : '<div style="font-size:11.5px;color:var(--text-muted);margin-top:6px">⚠ 尚无基线——请到「智能基线」先学习，才有漂移/容量叠加</div>')) +
+    '</div></div>';
+  // ② 关键指标
+  const m = n.metrics || {};
+  const metric = (label, v) => '<div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:7px 10px"><div style="font-size:10.5px;color:var(--text-muted)">' + label + '</div><div style="font-size:14px;font-weight:700">' + twFm(v) + '</div></div>';
+  html += '<div class="fl-sec"><h4>② 关键指标</h4><div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px">' +
+    metric('QPS', m.qps) + metric('TPS', m.tps) + metric('连接数', m.conn_total) + metric('连接使用率%', m.conn_usage_pct) +
+    metric('缓存命中%', m.cache_hit_pct) + metric('锁等待', m.lock_waits) + metric('慢查询', m.slowq) + metric('复制延迟s', m.repl_lag_s) +
+    '</div></div>';
+  // ③ 智能叠加（仅实时）
+  if (!replayed) {
+    html += '<div class="fl-sec"><h4>③ 智能叠加（漂移 / 容量）</h4>';
+    if ((n.drifts || []).length) {
+      html += n.drifts.map(x => '<div class="fl-item" style="display:flex;justify-content:space-between;gap:8px"><b>' + escapeHtml(x.label) + '</b><span class="fl-badge" style="background:' + (x.severity === 'critical' ? '#ef444422;color:#ef4444' : '#f59e0b22;color:#f59e0b') + '">' + (x.severity === 'critical' ? '严重' : '警告') + ' z=' + x.z + ' · 当前 ' + x.value + '</span></div>').join('');
+    } else {
+      html += '<div class="fl-item" style="color:#22c55e">✔ 无漂移</div>';
+    }
+    (n.capacity_risks || []).forEach(f => {
+      const color = f.severity === 'critical' ? '#ef4444' : '#f59e0b';
+      html += '<div class="fl-item" style="display:flex;justify-content:space-between;gap:8px"><b>' + escapeHtml(f.label) + '</b><span class="fl-badge" style="background:' + color + '22;color:' + color + '">预计 ' + escapeHtml(f.eta) + ' 触及 ' + f.threshold + '</span></div>';
+    });
+    html += '</div>';
+  }
+  // ④ 联动处置
+  html += '<div class="fl-sec"><h4>④ 联动处置</h4><div style="display:flex;gap:8px;flex-wrap:wrap">' +
+    '<button class="btn btn-primary" style="padding:7px 14px" onclick="fleetTriggerAutonomy(\'' + iid + '\', this)">⚡ 触发自治闭环</button>' +
+    '<button class="btn btn-ghost" style="padding:7px 14px" onclick="showPage(\'fleet\');openFleetDrawer(\'' + iid + '\')">🔍 基线下钻</button>' +
+    (replayed ? '' : '<button class="btn btn-ghost" style="padding:7px 14px" onclick="fleetLearnOne(\'' + iid + '\', this)">🧠 学习基线</button>') +
+    '</div></div>';
+  document.getElementById('twd-body').innerHTML = html;
+  drawer.classList.add('open'); mask.classList.add('open');
+}
+
+function closeTwinDrawer() {
+  const drawer = document.getElementById('twin-drawer');
+  const mask = document.getElementById('twin-drawer-mask');
+  if (drawer) drawer.classList.remove('open');
+  if (mask) mask.classList.remove('open');
+}
+
+function openTwinLinksModal() {
+  const nodes = ((_twinData || {}).nodes) || [];
+  const opt = (sel) => nodes.map(n => '<option value="' + escapeHtml(n.iid) + '">' + escapeHtml((n.name || n.iid) + '（' + (n.db_type || '—') + '）') + '</option>').join('');
+  const src = document.getElementById('tw-link-src');
+  const dst = document.getElementById('tw-link-dst');
+  if (src && !src.options.length) src.innerHTML = opt();
+  if (dst && !dst.options.length) dst.innerHTML = opt();
+  twinRenderLinksList();
+  document.getElementById('tw-links-mask').classList.add('open');
+}
+
+function closeTwinLinksModal() {
+  document.getElementById('tw-links-mask').classList.remove('open');
+}
+
+function twinRenderLinksList() {
+  const box = document.getElementById('tw-links-list');
+  if (!box) return;
+  const links = (((_twinData || {}).edges) || []).filter(e => !e.auto);
+  if (!links.length) { box.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:8px 0">暂无手动连线——自动识别的 ADG/RAC 关系无需在此声明</div>'; return; }
+  box.innerHTML = links.map(e => {
+    const nameOf = (iid) => { const n = ((_twinData || {}).nodes || []).find(x => x.iid === iid); return n ? (n.name || iid) : iid; };
+    return '<div class="tw-link-row"><span><b>' + escapeHtml(nameOf(e.src)) + '</b> → <b>' + escapeHtml(nameOf(e.dst)) + '</b>' +
+      ' <span class="badge">' + escapeHtml(e.kind_label || TW_KIND_LABEL[e.kind] || e.kind) + '</span>' +
+      (e.label ? ' <span style="color:var(--text-muted)">' + escapeHtml(e.label) + '</span>' : '') +
+      (e.dangling ? ' <span class="badge" style="background:#ef444422;color:#ef4444">对端离线</span>' : '') + '</span>' +
+      '<button class="btn btn-ghost" style="padding:2px 10px;font-size:11.5px;color:#ef4444" onclick="twinDelLink(' + e.id + ')">删除</button></div>';
+  }).join('');
+}
+
+async function twinAddLink() {
+  const src = document.getElementById('tw-link-src').value;
+  const dst = document.getElementById('tw-link-dst').value;
+  const kind = document.getElementById('tw-link-kind').value;
+  const label = document.getElementById('tw-link-label').value.trim();
+  if (!src || !dst) { toastError('请先选择源与目标实例'); return; }
+  if (src === dst) { toastError('不能连到自身'); return; }
+  try {
+    const r = await fetch('/api/intelligence/twin/links', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ src: src, dst: dst, kind: kind, label: label })
+    });
+    const d = await r.json();
+    if (!r.ok || !d.ok) { toastError(d.msg || '添加失败'); return; }
+    toastSuccess('连线已添加');
+    document.getElementById('tw-link-label').value = '';
+    await loadTwinTopology();
+    twinRenderLinksList();
+  } catch (e) { toastError('添加失败: ' + e.message); }
+}
+
+async function twinDelLink(id) {
+  try {
+    const r = await fetch('/api/intelligence/twin/links/' + id, { method: 'DELETE' });
+    const d = await r.json();
+    if (!r.ok || !d.ok) { toastError(d.msg || '删除失败'); return; }
+    toastSuccess('连线已删除');
+    await loadTwinTopology();
+    twinRenderLinksList();
+  } catch (e) { toastError('删除失败: ' + e.message); }
+}
+
+
 // ─── SQL 审核详情：右侧抽屉开关（P0/P1 ②） ─────────────────────────────
 function openSqlAuditDrawer() {
   const drawer = document.getElementById('sa-drawer');
@@ -14757,6 +16749,7 @@ async function showSqlAuditDetail(taskId) {
         ${adv}
       </div>`;
     };
+    const canEditSql2 = (t.status === 'analyzed' || t.status === 'pending_approval');
     const itemsHtml = (t.items||[]).map(it => {
       const hits = it.rule_hits || [];
       const hitsHtml = hits.length ? hits.map(h => {
@@ -14776,7 +16769,7 @@ async function showSqlAuditDetail(taskId) {
           <span style="font-size:12px;color:var(--text-muted)">表: ${tables}</span>
           <span class="severity-tag severity-${cssLevel(it.risk_level)}" style="margin-left:auto;font-size:11px;padding:2px 7px">风险 ${it.risk_score}</span>
         </div>
-        <pre style="white-space:pre-wrap;word-break:break-all;background:var(--surface2);padding:8px;border-radius:6px;font-size:12px;margin:8px 0">${escHtml(it.sql_text)}</pre>
+        <pre style="white-space:pre-wrap;word-break:break-all;background:var(--surface2);padding:8px;border-radius:6px;font-size:12px;margin:8px 0${canEditSql2 ? ';cursor:pointer' : ''}"${canEditSql2 ? ` onclick="editSqlAuditSql(${t.id})" title="点击直接编辑 SQL"` : ''}>${escHtml(it.sql_text)}</pre>${canEditSql2 ? `<div style="font-size:11px;color:#3b82f6;margin:-4px 0 8px">✏️ 点击上方 SQL 可直接编辑</div>` : ''}
         ${hitsHtml}
         ${planBlock(it.plan_json)}
       </div>`;
@@ -14795,6 +16788,7 @@ async function showSqlAuditDetail(taskId) {
       const alreadyExecuted = (t.status === 'executed');
       const approved = !!t.approved_by;
       const pendingApproval = (t.status === 'pending_approval');
+      const canEditSql = (t.status === 'analyzed' || t.status === 'pending_approval');
       const realDisabled = noInstance || alreadyExecuted || (isHigh && !approved) || (!execEnabled && !approved) || pendingApproval ? 'disabled style="opacity:.5;cursor:not-allowed"' : '';
       let realTip = '真实执行将修改目标库';
       if (alreadyExecuted) realTip = '该任务已执行，如需再次执行请重新提交';
@@ -14803,6 +16797,7 @@ async function showSqlAuditDetail(taskId) {
       else if (isHigh && !approved) realTip = '需先审批通过';
       else if (!execEnabled && !approved) realTip = '未开启真实执行且未审批';
       actionHtml += `<div style="display:flex;gap:10px;flex-wrap:wrap;margin:12px 0">
+        ${canEditSql ? `<button class="btn btn-ghost" style="padding:7px 16px" onclick="editSqlAuditSql(${t.id})">✏️ 编辑 SQL</button>` : ''}
         <button class="btn btn-ghost" style="padding:7px 16px" onclick="dryRunSqlAudit(${t.id})">🔍 预演(dry-run)</button>
         <button class="btn btn-primary" ${realDisabled} style="padding:7px 16px" title="${realTip}" onclick="realExecSqlAudit(${t.id})">⚡ 真实执行</button>
       </div>`;
@@ -14858,6 +16853,44 @@ async function showSqlAuditDetail(taskId) {
   } catch(e) {
     toastError('加载详情失败: ' + e.message);
   }
+}
+
+async function editSqlAuditSql(taskId) {
+  try {
+    const res = await fetch('/api/sql-audit/tasks/' + taskId);
+    const data = await res.json();
+    if (!data.ok) { toastError(data.error); return; }
+    const t = data.task;
+    const panel = document.getElementById('sa-drawer-body');
+    if (!panel) return;
+    panel.innerHTML = `
+      <div class="card-title"><span>🛡️</span> 编辑 SQL ${escHtml(t.task_no || '')}
+        <button class="btn btn-ghost" style="margin-left:auto;font-size:12px;padding:4px 10px" onclick="showSqlAuditDetail(${t.id})">取消</button>
+      </div>
+      <div style="font-size:12px;color:var(--text-muted);margin:6px 0">仅 analyzed / pending_approval 状态可编辑；保存后重拆语句并重新评分风险。</div>
+      <textarea id="sa-edit-sql" rows="12" style="width:100%;padding:10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;font-family:monospace;resize:vertical">${escHtml(t.sql_text || '')}</textarea>
+      <div style="display:flex;gap:10px;margin:12px 0">
+        <button class="btn btn-primary" style="padding:7px 16px" onclick="saveSqlAuditSql(${t.id})">💾 保存</button>
+        <button class="btn btn-ghost" style="padding:7px 16px" onclick="showSqlAuditDetail(${t.id})">取消</button>
+      </div>
+      <div id="sa-edit-result"></div>`;
+  } catch (e) { toastError('加载失败: ' + e.message); }
+}
+
+async function saveSqlAuditSql(taskId) {
+  const ta = document.getElementById('sa-edit-sql');
+  if (!ta) return;
+  const sql = ta.value;
+  if (!sql.trim()) { toastError('SQL 不能为空'); return; }
+  try {
+    const res = await fetch('/api/sql-audit/tasks/' + taskId + '/update-sql', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sql_text: sql })
+    });
+    const d = await res.json();
+    if (!res.ok || !d.ok) { toastError('保存失败: ' + (d.error || d.msg || res.status)); }
+    else { toastSuccess('SQL 已更新，风险已重算'); await showSqlAuditDetail(taskId); }
+  } catch (e) { toastError('保存失败: ' + e.message); }
 }
 
 async function bindSqlAuditInstance(taskId) {
@@ -19161,7 +21194,8 @@ async function loadHomeStats() {
 
       // 5.1 首屏 6 统计条（写入独立 hero-stat-*，不触碰原 home-baseline-num 等）
       const _stats = dataHome.stats || {};
-      const _dbTypeCount = dataDbTypes.length || 15; // /api/db_types 失败回退 15
+      // 按 _jdbc 后缀归一化计数（oracle_jdbc/oracle、sqlserver_jdbc/sqlserver 算同一种数据库），与官网口径一致
+      const _dbTypeCount = new Set(dataDbTypes.map(function(t){ return String(t && t.value || '').replace(/_jdbc$/, ''); })).size || 15; // /api/db_types 失败回退 15
       const _ds = Number(_stats.datasource_total != null ? _stats.datasource_total : (dataHome.datasource_total || 0)) || 0;
       const _insp = Number(_stats.inspection_total != null ? _stats.inspection_total : (dataHome.inspection_total || 0)) || 0;
       const _base = Number(_stats.baseline_total != null ? _stats.baseline_total : (sumOf(_stats.baseline_by_db) || dataHome.baseline_total || 0)) || 0;
@@ -19428,6 +21462,11 @@ function initMonitor() {
   try {
     if (typeof socket !== 'undefined') {
       socket.emit('join', { task_id: 'monitor' });
+      // 断线重连后服务端房间成员按连接计会全部丢失，必须在 connect 时重新 join，
+      // 否则一次网络抖动/服务重启后推送再度静默断流（图表又"不更新"）。
+      socket.on('connect', function () {
+        socket.emit('join', { task_id: 'monitor' });
+      });
       socket.on('metrics', function (data) {
         if (!data || !data.snapshots) return;
         data.snapshots.forEach(function (snap) { pushMonitorSnapshot(snap); });
@@ -20808,6 +22847,7 @@ function toggleAiChatPanel() {
     if (fab) fab.style.display = collapsed ? 'flex' : 'none';
     if (mainContent) mainContent.classList.toggle('ai-panel-collapsed', collapsed);
   }
+  if (typeof syncAutDrawerAiPanel === 'function') syncAutDrawerAiPanel();
   scheduleResizeAllCharts();
 }
 
@@ -20834,6 +22874,7 @@ function onShowAiAssistantChange() {
       if (fab) fab.style.display = 'none';
       if (mainContent) mainContent.classList.add('ai-panel-collapsed');
     }
+    if (typeof syncAutDrawerAiPanel === 'function') syncAutDrawerAiPanel();
     scheduleResizeAllCharts();
     toast(show ? '已显示 AI 巡检助手' : '已隐藏 AI 巡检助手');
   }).catch(function(e){ toastError('保存失败: ' + e.message); t.checked = !show; });
@@ -20842,22 +22883,16 @@ function onShowAiAssistantChange() {
 // 页面加载时同步「显示 AI 巡检助手」全局开关 + 面板初始状态
 function syncShowAiAssistant() {
   fetch('/api/config').then(function(r){ return r.json(); }).then(function(cfg){
-    const show = cfg.show_ai_assistant !== false; // 默认显示
+    const enabled = cfg.show_ai_assistant !== false; // 开关=false 表示彻底停用
     const t = document.getElementById('show-ai-assistant-toggle');
-    if (t) t.checked = show;
+    if (t) t.checked = enabled;
     const panel = document.getElementById('ai-chat-sidebar');
     const fab = document.getElementById('ai-chat-fab');
     const mainContent = document.querySelector('.main-content');
-    const isMobile = window.matchMedia('(max-width: 1100px)').matches;
-    if (show) {
-      if (panel) panel.classList.remove('collapsed');
-      if (fab) fab.style.display = isMobile ? 'flex' : 'none';
-      if (mainContent) mainContent.classList.remove('ai-panel-collapsed');
-    } else {
-      if (panel) panel.classList.add('collapsed');
-      if (fab) fab.style.display = 'none';
-      if (mainContent) mainContent.classList.add('ai-panel-collapsed');
-    }
+    // 默认隐藏（收起）：面板不占位，右下角浮动按钮可唤出
+    if (panel) panel.classList.add('collapsed');
+    if (fab) fab.style.display = enabled ? 'flex' : 'none';
+    if (mainContent) mainContent.classList.add('ai-panel-collapsed');
     scheduleResizeAllCharts();
   }).catch(function(){});
 }
@@ -21156,6 +23191,50 @@ function clearChatSession() {
 }
 
 // 发送带上下文的聊天消息（用于快捷按钮选择数据源）
+// 渲染「候选数据源确认」芯片按钮（AI 助手巡检确认，issue #59）
+// candidates: [{id, name, db_type, host, port}]，兼容旧版纯名称字符串数组。
+// 点选后携带 instance_id 回传，后端按 id 直取实例，不再依赖 LLM 二次解析名称。
+function renderChatCandidateButtons(candidates) {
+  const container = document.getElementById('chat-messages');
+  if (!container) return;
+  const wrapper = document.createElement('div');
+  wrapper.className = 'chat-msg ai';
+  wrapper.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;padding:2px 16px 10px;';
+  (candidates || []).forEach(function(c) {
+    if (typeof c === 'string') c = { name: c };
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.style.cssText =
+      'display:inline-flex;align-items:center;gap:7px;padding:7px 14px;border-radius:18px;'
+      + 'border:1px solid var(--border);background:var(--surface2);color:var(--text);'
+      + 'font-size:13px;line-height:1.4;cursor:pointer;transition:all var(--trans);text-align:left;';
+    btn.innerHTML =
+      '<span style="width:7px;height:7px;border-radius:50%;background:var(--accent);flex-shrink:0;"></span>'
+      + '<span>' + escapeHtml(c.name || '') + '</span>'
+      + (c.db_type
+          ? '<span style="font-size:11px;color:var(--text-muted);border:1px solid var(--border);'
+            + 'border-radius:10px;padding:1px 8px;background:var(--surface);white-space:nowrap;">'
+            + escapeHtml(c.db_type) + '</span>'
+          : '');
+    btn.onmouseenter = function() {
+      btn.style.borderColor = 'var(--accent)';
+      btn.style.background = 'var(--surface)';
+      btn.style.transform = 'translateY(-1px)';
+    };
+    btn.onmouseleave = function() {
+      btn.style.borderColor = 'var(--border)';
+      btn.style.background = 'var(--surface2)';
+      btn.style.transform = '';
+    };
+    btn.onclick = function() {
+      sendChatMessageWithContext('巡检 ' + (c.name || ''), { instance_id: c.id || '', db_name: c.name || '' });
+    };
+    wrapper.appendChild(btn);
+  });
+  container.appendChild(wrapper);
+  container.scrollTop = container.scrollHeight;
+}
+
 async function sendChatMessageWithContext(message, context) {
   if (!message) return;
   setInputEnabled(false);
@@ -21193,25 +23272,7 @@ async function sendChatMessageWithContext(message, context) {
     } else if (data.type === 'ask') {
       addChatMessage(data.message, 'ai', false);
       if (data.candidates && data.candidates.length > 0) {
-        const container = document.getElementById('chat-messages');
-        const wrapper = document.createElement('div');
-        wrapper.className = 'chat-msg ai';
-        wrapper.style.padding = '8px 16px';
-        data.candidates.forEach(function(name) {
-          const btn = document.createElement('button');
-          btn.className = 'btn btn-outline-primary btn-sm me-2 mb-2';
-          btn.style.borderRadius = '16px';
-          btn.style.fontSize = '13px';
-          btn.textContent = name;
-          btn.onclick = (function(n, dbType) {
-            return function() {
-              sendChatMessageWithContext('巡检 ' + n, {db_type: dbType, db_name: n});
-            };
-          })(name, data.db_type);
-          wrapper.appendChild(btn);
-        });
-        container.appendChild(wrapper);
-        container.scrollTop = container.scrollHeight;
+        renderChatCandidateButtons(data.candidates);
       }
     } else if (data.type === 'report') {
       setChatMode('inspect');
@@ -21343,6 +23404,17 @@ async function sendChatMessage() {
               const chatMessages = document.getElementById('chat-messages');
               chatMessages.scrollTop = chatMessages.scrollHeight;
 
+            } else if (data.type === 'qa') {
+              // 平台数据查询 / 智能诊断 / 工作流 等直接返回的答案（与 /api/chat fallback 对齐）
+              if (!aiMsgEl) aiMsgEl = addChatMessage('', 'ai', true);
+              let contentDiv = aiMsgEl.querySelector('.ai-content');
+              if (!contentDiv) {
+                contentDiv = document.createElement('div');
+                contentDiv.className = 'ai-content';
+                aiMsgEl.appendChild(contentDiv);
+              }
+              contentDiv.innerHTML = renderMarkdown(data.message);
+
             } else if (data.type === 'inspect_result') {
               // 巡检简单查询结果
               if (!aiMsgEl) aiMsgEl = addChatMessage('', 'ai', true);
@@ -21372,25 +23444,8 @@ async function sendChatMessage() {
             } else if (data.type === 'inspect_ask') {
               // 需要用户选择数据源
               if (!aiMsgEl) aiMsgEl = addChatMessage('', 'ai', false);
-              aiMsgEl.innerHTML = '<span style="color:var(--text-secondary)">' + data.message + '</span>';
-              // 显示选择按钮
-              const container = document.getElementById('chat-messages');
-              const wrapper = document.createElement('div');
-              wrapper.className = 'chat-msg ai';
-              wrapper.style.padding = '8px 16px';
-              (data.candidates || []).forEach(function(name) {
-                const btn = document.createElement('button');
-                btn.className = 'btn btn-outline-primary btn-sm me-2 mb-2';
-                btn.style.borderRadius = '16px';
-                btn.style.fontSize = '13px';
-                btn.textContent = name;
-                btn.onclick = function() {
-                  sendChatMessageWithContext('巡检 ' + name, {db_type: data.db_type, db_name: name});
-                };
-                wrapper.appendChild(btn);
-              });
-              container.appendChild(wrapper);
-              container.scrollTop = container.scrollHeight;
+              aiMsgEl.innerHTML = '<span style="color:var(--text-muted)">' + escapeHtml(data.message || '') + '</span>';
+              renderChatCandidateButtons(data.candidates);
               setInputEnabled(true);
               return;  // 不需要继续读取 SSE
 
@@ -21459,6 +23514,9 @@ async function sendChatMessage() {
         addChatMessage(data.message, 'ai', false);
       } else if (data.type === 'ask') {
         addChatMessage(data.message, 'ai', false);
+        if (data.candidates && data.candidates.length > 0) {
+          renderChatCandidateButtons(data.candidates);
+        }
       } else if (data.type === 'report') {
         setChatMode('inspect');
         addChatMessage(data.message, 'ai', false);
@@ -22375,7 +24433,7 @@ async function deleteBackupHistory(recordId) {
 </script>
 
 <!-- AI Chat Panel (v2.6.2: 固定右侧) -->
-<aside class="ai-chat-panel" id="ai-chat-sidebar" data-page-node-id="iiI6nPIa7A7FFElRiiLTyH">
+<aside class="ai-chat-panel collapsed" id="ai-chat-sidebar" data-page-node-id="iiI6nPIa7A7FFElRiiLTyH">
   <div class="chat-header" style="position:relative" data-page-node-id="lU6QLDalDEZrh6sAr6e0Yc">
     <span style="font-size:20px" data-page-node-id="5b4aY6PZBcTXUCetxLS4Jc">🤖</span>
     <span class="chat-title" data-i18n="webui.chat_title" data-page-node-id="Z5jM1u5eKxj9k6dK8HGnTB">AI 巡检助手</span>
@@ -22474,6 +24532,60 @@ async function deleteBackupHistory(recordId) {
       statusEl.textContent = '❌ 请求失败: ' + e.message;
       statusEl.style.color = 'var(--danger)';
     }
+  }
+
+  // ─── 运行日志（loghub）───
+  var _runLogCat = 'all';
+  var _runLogTimer = null;
+  var _RUNLOG_CAT_LABELS = {
+    inspection: '巡检', scheduled: '定时巡检', diagnosis: '智能诊断',
+    monitor: '监控', system: '系统'
+  };
+  function runLogSetCat(cat) {
+    _runLogCat = cat;
+    var chips = document.querySelectorAll('#run-log-filters .filter-chip');
+    chips.forEach(function(c){ c.classList.toggle('active', c.getAttribute('data-cat') === cat); });
+    runLogReload();
+  }
+  function runLogToggleAuto() {
+    var cb = document.getElementById('run-log-autorefresh');
+    if (cb && cb.checked) runLogStartTimer(); else runLogStopTimer();
+  }
+  function runLogStopTimer() { if (_runLogTimer) { clearTimeout(_runLogTimer); _runLogTimer = null; } }
+  function runLogStartTimer() { runLogStopTimer(); _runLogTimer = setTimeout(function(){ runLogReload(); }, 2000); }
+  function runLogClear() { var a = document.getElementById('run-log-area'); if (a) a.innerHTML = ''; }
+  function runLogReload() {
+    var area = document.getElementById('run-log-area'); if (!area) return;
+    var cat = (_runLogCat === 'all') ? '' : _runLogCat;
+    var q = (document.getElementById('run-log-search') || {}).value || '';
+    var url = '/api/loghub?limit=500'
+            + (cat ? '&categories=' + encodeURIComponent(cat) : '')
+            + (q ? '&search=' + encodeURIComponent(q) : '');
+    fetch(url).then(function(r){ return r.json(); }).then(function(data){
+      if (!data.ok) return;
+      var html = '';
+      (data.logs || []).forEach(function(l){
+        var cls = (l.level === 'ERROR') ? ' err' : ((l.level === 'WARNING') ? ' warn' : '');
+        var label = _RUNLOG_CAT_LABELS[l.category] || l.category;
+        html += '<div class="log-line' + cls + '">[' + l.time + '] [' + label + '] '
+              + (typeof escapeHtml === 'function' ? escapeHtml(l.msg) : l.msg) + '</div>';
+      });
+      area.innerHTML = html;
+      area.scrollTop = area.scrollHeight;
+      var meta = document.getElementById('run-log-meta');
+      if (meta) meta.textContent = '共 ' + (data.logs ? data.logs.length : 0) + ' 条';
+      var cb = document.getElementById('run-log-autorefresh');
+      if (cb && cb.checked) runLogStartTimer();
+    }).catch(function(){
+      var cb = document.getElementById('run-log-autorefresh');
+      if (cb && cb.checked) runLogStartTimer();
+    });
+  }
+  function loadRunLog() {
+    _runLogCat = 'all';
+    var chips = document.querySelectorAll('#run-log-filters .filter-chip');
+    chips.forEach(function(c){ c.classList.toggle('active', c.getAttribute('data-cat') === 'all'); });
+    runLogReload();
   }
 
   async function startServerInspect() {
@@ -25558,13 +27670,13 @@ function mkdirRemote() {
   // —— 真插件化：前端数据库类型映射表（端口/用户/图标/库名/标签/是否显示库字段）——
   // 统一从 /api/db_types 派生，避免每接入一种新库就改这里。内置类型用静态兜底确保
   // 即使接口慢/失败也不影响既有行为；新插件类型在 window.dbTypes 加载后自动追加。
-const STATIC_DB_ICONS = {mysql:'🐬', tdsqlc_mysql:'🐬', mariadb:'🐬', oceanbase:'🐋', pg:'🐘', oracle:'🔴', oracle_jdbc:'🔴', dm:'🟡', sqlserver:'🟠', tidb:'🟢', ivorysql:'🐘', kingbase:'🐘', gbase:'🟢', clickhouse:'🧊'};
+const STATIC_DB_ICONS = {mysql:'🐬', tdsqlc_mysql:'🐬', mariadb:'🐬', oceanbase:'🐋', pg:'🐘', oracle:'🔴', oracle_jdbc:'🔴', dm:'🟡', sqlserver:'🟠', tidb:'🟢', ivorysql:'🐘', kingbase:'🐘', gbase:'🟢', clickhouse:'🧊', halodb:'🌀', vastbase:'🌊'};
 const STATIC_PORT_MAP = {mysql:3306, tdsqlc_mysql:3306, mariadb:3306, oceanbase:2881, pg:5432, dm:5236, oracle:1521, oracle_jdbc:1521, sqlserver:1433, tidb:4000, ivorysql:5432, yashandb:1688, kingbase:54321, gbase:9088, db2:50000, redis:6379, 'redis-cluster':6379, clickhouse:8123};
 const STATIC_USER_MAP = {mysql:'root', tdsqlc_mysql:'root', mariadb:'root', oceanbase:'root@test', pg:'postgres', dm:'SYSDBA', oracle:'system', oracle_jdbc:'system', sqlserver:'sa', tidb:'root', ivorysql:'ivorysql', yashandb:'sys', kingbase:'kingbase', gbase:'gbasedbt', db2:'db2inst1', redis:'', 'redis-cluster':'', clickhouse:'default'};
   const STATIC_SHOW_DB_FIELD = {'pg':true,'ivorysql':true,'kingbase':true,'gbase':true,'oceanbase':true,'db2':true,'mysql':true,'tdsqlc_mysql':true,'mariadb':true,'tidb':true,'clickhouse':true};
 const STATIC_DEFAULT_DB_MAP = { pg: 'postgres', ivorysql: 'ivorysql', kingbase: 'kingbase', gbase: 'sysmaster', mongodb: 'admin', mysql: 'mysql', tdsqlc_mysql: 'mysql', mariadb: 'mysql', tidb: 'mysql', clickhouse: 'default' };
 const STATIC_LABEL_MAP = { pg: 'PostgreSQL', ivorysql: 'PostgreSQL', kingbase: 'KingbaseES', gbase: 'GBase 8s', mysql: 'MySQL', tdsqlc_mysql: 'TDSQL-C MySQL', mariadb: 'MariaDB', tidb: 'TiDB', clickhouse: 'ClickHouse' };
-const STATIC_DB_PH_MAP = {'pg':'postgres','ivorysql':'ivorysql','kingbase':'kingbase','gbase':'sysmaster','oceanbase':'oceanbase','mongodb':'admin','db2':'testdb','mysql':'mysql','mariadb':'mysql','tidb':'mysql','clickhouse':'default','uxdb':'uxdb'};
+const STATIC_DB_PH_MAP = {'pg':'postgres','ivorysql':'ivorysql','kingbase':'kingbase','gbase':'sysmaster','oceanbase':'oceanbase','mongodb':'admin','db2':'testdb','mysql':'mysql','mariadb':'mysql','tidb':'mysql','clickhouse':'default','uxdb':'uxdb','vastbase':'vastbase'};
 
   window.DB_ICONS = Object.assign({}, STATIC_DB_ICONS);
   window.PORT_MAP = Object.assign({}, STATIC_PORT_MAP);
@@ -25614,7 +27726,7 @@ const STATIC_DB_PH_MAP = {'pg':'postgres','ivorysql':'ivorysql','kingbase':'king
   const DB_GROUP_ORDER = ['MySQL 系', 'PostgreSQL 系', 'Oracle 系', 'SQL Server 系', '其他关系型', 'NoSQL', 'KV/缓存', 'OLAP/分析'];
   const DB_GROUP_MAP = {
     mysql: 'MySQL 系', mariadb: 'MySQL 系', oceanbase: 'MySQL 系', tidb: 'MySQL 系', tdsqlc_mysql: 'MySQL 系',
-    pg: 'PostgreSQL 系', ivorysql: 'PostgreSQL 系', kingbase: 'PostgreSQL 系', hgdb: 'PostgreSQL 系', uxdb: 'PostgreSQL 系',
+    pg: 'PostgreSQL 系', ivorysql: 'PostgreSQL 系', kingbase: 'PostgreSQL 系', hgdb: 'PostgreSQL 系', uxdb: 'PostgreSQL 系', vastbase: 'PostgreSQL 系',
     oracle: 'Oracle 系', oracle_jdbc: 'Oracle 系', dm: 'Oracle 系',
     sqlserver: 'SQL Server 系', sqlserver_jdbc: 'SQL Server 系',
     db2: '其他关系型', yashandb: '其他关系型', gbase: '其他关系型',
@@ -25884,7 +27996,21 @@ const STATIC_DB_PH_MAP = {'pg':'postgres','ivorysql':'ivorysql','kingbase':'king
         <span class="about-db-chip" data-page-node-id="68o3dMGpQ5oRGHjexxWrK7"><img src="/dm.png" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='inline'" style="width:16px;height:16px;object-fit:contain" data-page-node-id="SyMGYjNc67xleHroJxhiKG"><span class="db-emoji" style="display:none;" data-page-node-id="exuRI2hBGnTpDhLIkceUQ2">💎</span> DM 达梦</span>
         <span class="about-db-chip" data-page-node-id="tmjbAxZOWObSPasYfMVkUm"><img src="/tidb.png" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='inline'" style="width:16px;height:16px;object-fit:contain" data-page-node-id="NYCRJYODYnKA8fbZA2VEHP"><span class="db-emoji" style="display:none;" data-page-node-id="P8KnwmOriLHAbmiCKPvmOB">🌊</span> TiDB</span>
         <span class="about-db-chip" data-page-node-id="3c8dqLe4DD1P9H41zFFlsG"><img src="/ivorysql.png" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='inline'" style="width:16px;height:16px;object-fit:contain" data-page-node-id="E0GBLBwsxHUDCK5179CWQr"><span class="db-emoji" style="display:none;" data-page-node-id="Dc5Qoc75Z5WQ6Ti5qM5m27">🦣</span> IvorySQL</span>
+        <span class="about-db-chip" data-page-node-id="halodb-about-chip"><img src="/halodb.png" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='inline'" style="width:16px;height:16px;object-fit:contain" data-page-node-id="halodb-about-img"><span class="db-emoji" style="display:none;" data-page-node-id="halodb-about-emoji">🌀</span> HaloDB</span>
+        <span class="about-db-chip" data-page-node-id="vastbase-about-chip"><img src="/vastbase.png" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='inline'" style="width:16px;height:16px;object-fit:contain" data-page-node-id="vastbase-about-img"><span class="db-emoji" style="display:none;" data-page-node-id="vastbase-about-emoji">🌊</span> Vastbase</span>
         <span class="about-db-chip" data-page-node-id="1yAGODZXmQhdhEjAkpCk3T"><img src="/yashandb.png" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='inline'" style="width:16px;height:16px;object-fit:contain" data-page-node-id="Mkt8HsucYcmfHosHktMsFd"><span class="db-emoji" style="display:none;" data-page-node-id="a4V0Y6XRYkvRCzcv6a2Lvd">🗻</span> YashanDB</span>
+        <span class="about-db-chip" data-page-node-id="mariadb-about-chip"><img src="/mariadb.png" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='inline'" style="width:16px;height:16px;object-fit:contain" data-page-node-id="mariadb-about-img"><span class="db-emoji" style="display:none;" data-page-node-id="mariadb-about-emoji">🐬</span> MariaDB</span>
+        <span class="about-db-chip" data-page-node-id="kingbase-about-chip"><img src="/kingbase.png" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='inline'" style="width:16px;height:16px;object-fit:contain" data-page-node-id="kingbase-about-img"><span class="db-emoji" style="display:none;" data-page-node-id="kingbase-about-emoji">🐘</span> KingbaseES</span>
+        <span class="about-db-chip" data-page-node-id="gbase-about-chip"><img src="/gbase.png" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='inline'" style="width:16px;height:16px;object-fit:contain" data-page-node-id="gbase-about-img"><span class="db-emoji" style="display:none;" data-page-node-id="gbase-about-emoji">🟢</span> GBase 8s</span>
+        <span class="about-db-chip" data-page-node-id="mongodb-about-chip"><img src="/mongodb.png" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='inline'" style="width:16px;height:16px;object-fit:contain" data-page-node-id="mongodb-about-img"><span class="db-emoji" style="display:none;" data-page-node-id="mongodb-about-emoji">🍃</span> MongoDB</span>
+        <span class="about-db-chip" data-page-node-id="clickhouse-about-chip"><img src="/clickhouse.png" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='inline'" style="width:16px;height:16px;object-fit:contain" data-page-node-id="clickhouse-about-img"><span class="db-emoji" style="display:none;" data-page-node-id="clickhouse-about-emoji">🧊</span> ClickHouse</span>
+        <span class="about-db-chip" data-page-node-id="uxdb-about-chip"><img src="/uxdb.png" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='inline'" style="width:16px;height:16px;object-fit:contain" data-page-node-id="uxdb-about-img"><span class="db-emoji" style="display:none;" data-page-node-id="uxdb-about-emoji">🐘</span> 优炫 UXDB</span>
+        <span class="about-db-chip" data-page-node-id="hgdb-about-chip"><img src="/hgdb.png" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='inline'" style="width:16px;height:16px;object-fit:contain" data-page-node-id="hgdb-about-img"><span class="db-emoji" style="display:none;" data-page-node-id="hgdb-about-emoji">🐘</span> 瀚高 HGDB</span>
+        <span class="about-db-chip" data-page-node-id="tdsqlc-about-chip"><img src="/tdsqlc.png" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='inline'" style="width:16px;height:16px;object-fit:contain" data-page-node-id="tdsqlc-about-img"><span class="db-emoji" style="display:none;" data-page-node-id="tdsqlc-about-emoji">🐬</span> TDSQL-C MySQL</span>
+        <span class="about-db-chip" data-page-node-id="oceanbase-about-chip"><img src="/oceanbase.png" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='inline'" style="width:16px;height:16px;object-fit:contain" data-page-node-id="oceanbase-about-img"><span class="db-emoji" style="display:none;" data-page-node-id="oceanbase-about-emoji">🐋</span> OceanBase</span>
+        <span class="about-db-chip" data-page-node-id="redis-about-chip"><img src="/redis.png" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='inline'" style="width:16px;height:16px;object-fit:contain" data-page-node-id="redis-about-img"><span class="db-emoji" style="display:none;" data-page-node-id="redis-about-emoji">🔺</span> Redis</span>
+        <span class="about-db-chip" data-page-node-id="rediscluster-about-chip"><img src="/redis.png" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='inline'" style="width:16px;height:16px;object-fit:contain" data-page-node-id="rediscluster-about-img"><span class="db-emoji" style="display:none;" data-page-node-id="rediscluster-about-emoji">🔺</span> Redis Cluster</span>
+        <span class="about-db-chip" data-page-node-id="db2-about-chip"><img src="/db2.png" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='inline'" style="width:16px;height:16px;object-fit:contain" data-page-node-id="db2-about-img"><span class="db-emoji" style="display:none;" data-page-node-id="db2-about-emoji">🔵</span> DB2</span>
       </div>
 
       <!-- 君子协定（Base64 encoded to prevent static search） -->

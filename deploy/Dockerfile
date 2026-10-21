@@ -127,11 +127,27 @@ ENV FLASK_ENV=production
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONMEMORYLIMIT=2g
 
+# OpenBLAS/NumPy 线程池护栏（关键修复）：
+#   numpy 1.26（含 OpenBLAS 0.3.2x）在 import 时会按宿主机 CPU 数预建 BLAS 线程池，
+#   每建一个线程都要调 clone() 系统调用。在受限容器环境（企业安全容器 / 定制 seccomp /
+#   LXC 嵌套虚拟化 / K8s 带 pids 限制）里 clone() 被内核拒绝，导入即崩：
+#     "OpenBLAS blas_thread_init: pthread_create failed for thread N of M:
+#      Operation not permitted"  →  RLIMIT_NPROC 明明是 65535 也照样崩。
+#   这类拦截不是 ulimit 能放开的（加 --ulimit nproc=-1 / privileged 均无效），
+#   唯一根治方案是让 OpenBLAS 不建线程池 = 单线程模式（=1 时完全不调 clone()）。
+#   本项目 numpy 只用于 openpyxl/报表等轻量数值场景，单线程几乎无性能损失；
+#   CPU 密集用户可用 -e OPENBLAS_NUM_THREADS=4 覆盖本默认值。
+#   于 2026-09-23 由国网云桌面用户的 v26.10.11.0 部署故障确认并引入。
+ENV OPENBLAS_NUM_THREADS=1 \
+    OMP_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    NUMEXPR_NUM_THREADS=1
+
 # Create VERSION.txt (without v prefix, matches Docker tag format)
-# DBCHECK_VERSION 可在构建时覆盖: --build-arg DBCHECK_VERSION=v26.9.17.0
-# 注意：CI / build-multiarch.sh 传入的值带 v 前缀（如 v26.9.17.0），
+# DBCHECK_VERSION 可在构建时覆盖: --build-arg DBCHECK_VERSION=v26.10.11.0
+# 注意：CI / build-multiarch.sh 传入的值带 v 前缀（如 v26.10.11.0），
 # 这里用 ${DBCHECK_VERSION#v} 去掉前缀，保证镜像内 VERSION.txt 与标签一致。
-ARG DBCHECK_VERSION=26.9.17.0
+ARG DBCHECK_VERSION=26.10.11.0
 RUN echo "${DBCHECK_VERSION#v}" > /app/VERSION.txt
 
 # Ensure data and pro_data directories exist for volume mounts

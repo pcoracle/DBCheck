@@ -21,8 +21,11 @@ sys.__stdout__（原始 stdout fd）。
 import json
 import os
 import sys
+import time
+import atexit
 
 from modules.mcp_server.registry import get_tool_specs, get_spec, get_skill_specs
+from modules.mcp_server import telemetry, timeout as _timeout
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "dbcheck-mcp"
@@ -32,6 +35,24 @@ SERVER_VERSION = "0.2.0-phase1"
 def _log(msg: str) -> None:
     sys.stderr.write(f"[mcp-server] {msg}\n")
     sys.stderr.flush()
+
+
+def _ms(t0: float) -> float:
+    return round((time.monotonic() - t0) * 1000.0, 3)
+
+
+def _timeout_response(mid, name: str, to: float) -> dict:
+    """构造工具超时（MCP_TOOL_TIMEOUT）的结构化 JSON-RPC 响应。"""
+    payload = _timeout.mcp_timeout_error(name, to)
+    return {
+        "jsonrpc": "2.0",
+        "id": mid,
+        "result": {
+            "content": [{"type": "text", "text": json.dumps(
+                payload, ensure_ascii=True)}],
+            "isError": True,
+        },
+    }
 
 
 def build_tools() -> list:
@@ -132,10 +153,29 @@ def handle(msg: dict):
         name = params.get("name")
         args = params.get("arguments", {}) or {}
         principal, _enforced = _resolve_principal()
+        # 多租户作用域：用于 telemetry 按租户/用户维度聚合
+        scope = ("user" if (principal is not None) else
+                 ("tenant" if _enforced else "none"))
+        telemetry.inc_inflight(1)
+        t0 = time.monotonic()
         try:
-            res = dispatch_tool(name, args, principal)
+            res, timed_out = _timeout.run_with_timeout(
+                dispatch_tool, timeout=_timeout.get_timeout(),
+                args=(name, args, principal))
+            if timed_out:
+                telemetry.record_tool_call(
+                    name, _ms(t0), "timeout",
+                    error_code="MCP_TOOL_TIMEOUT", scope=scope)
+                return _timeout_response(mid, name, _timeout.get_timeout())
+            status = "ok" if res.get("ok", True) else "error"
+            ec = (res.get("error_code", "") if not res.get("ok", True) else "")
+            telemetry.record_tool_call(
+                name, _ms(t0), status, error_code=ec, scope=scope)
         except PermissionError as e:
             # 鉴权失败：显式返回错误，不静默降级为"全量放行"
+            telemetry.record_tool_call(
+                name, _ms(t0), "error",
+                error_code="MCP_AUTH_REQUIRED", scope=scope)
             _log(f"tools/call {name} denied: {e}")
             return {
                 "jsonrpc": "2.0",
@@ -149,6 +189,8 @@ def handle(msg: dict):
                 },
             }
         except Exception as e:
+            telemetry.record_tool_call(
+                name, _ms(t0), "error", error_code="TOOL_CRASH", scope=scope)
             _log(f"tools/call {name} crashed: {e}")
             return {
                 "jsonrpc": "2.0",
@@ -160,6 +202,8 @@ def handle(msg: dict):
                     "isError": True,
                 },
             }
+        finally:
+            telemetry.inc_inflight(-1)
         text = json.dumps(res, ensure_ascii=True, indent=2, default=str)
         return {
             "jsonrpc": "2.0",
@@ -179,13 +223,32 @@ def handle(msg: dict):
     return None
 
 
+def _shutdown_runtime() -> None:
+    """退出时优雅关闭连接池与 OTel 导出（未启用则为空操作）。"""
+    try:
+        from modules.mcp_server.subproc_pool import shutdown_pool
+        shutdown_pool()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        telemetry.shutdown()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def main() -> None:
     # 把所有散落 stdout 输出（迁移日志、巡检进度等）重定向到 stderr，
     # 保护 JSON-RPC 协议流。协议回复写原始 stdout fd。
     sys.stdout = sys.stderr
 
+    # 可观测性初始化（OTel 可选，缺失则进程内计数器兜底）
+    telemetry.init()
+
     from modules.mcp_server.bootstrap import bootstrap  # noqa: E402
     bootstrap()
+
+    # 退出时优雅关闭连接池与 OTel 导出（未启用则为空操作）
+    atexit.register(_shutdown_runtime)
 
     # 可选鉴权闸门（stdio 本地受信场景可关闭；HTTP transport 阶段再强制）
     # 开启后要求 Key 有效**且已绑定用户**：没有身份就等于无法判定数据可见性，
@@ -233,3 +296,5 @@ def main() -> None:
                 (json.dumps(resp, ensure_ascii=True, default=str) + "\n").encode("utf-8")
             )
             out.flush()
+    # stdin 关闭（EOF）：主循环退出，清理连接池 / OTel
+    _shutdown_runtime()

@@ -23,12 +23,18 @@ modules/monitor/jdbc_collect_cli.py — 监控大屏 JDBC 批量采集子进程
 入参 JSON 结构::
 
     {
-      "db_type": "gbase" | "db2" | "clickhouse",
-      "host": "...", "port": 9088, "user": "...", "password": "***",
+      "db_type": "gbase" | "db2" | "clickhouse" | "oracle_jdbc" | ...,
+      "host": "...", "port": 1521, "user": "...", "password": "***",
       "database": "...", "jdbc_url": "", "ssl": false,
+      "service_name": "...", "sid": "...", "use_sid": false, "sysdba": false,
       "driver_version": "", "gbase_server_name": "gbase01",
       "queries": ["SELECT ...", "SELECT ..."]   # 有序，结果按 q0/q1/... 回填
     }
+
+    Oracle（oracle_jdbc）必须透传 service_name / sid / use_sid / sysdba：
+    缺 service_name 时 build_jdbc_url 会回落到 database 字段（监控路径把真实
+    服务名放在此处），再回落硬编码默认 ORCLCDB；sys 用户需 sysdba=true 触发
+    internal_logon=sysdba，否则 ORA-28009。
 
 出参 JSON 结构（qN 与 queries 下标一一对应）::
 
@@ -88,7 +94,13 @@ def _collect(payload):
         driver_version=payload.get('driver_version') or '',
         jdbc_url=payload.get('jdbc_url') or None,
         database=payload.get('database') or None,
+        service_name=payload.get('service_name') or None,
+        sid=payload.get('sid') or None,
+        use_sid=bool(payload.get('use_sid', False)),
         gbase_server_name=payload.get('gbase_server_name') or None,
+        # sys 用户必须以 SYSDBA 身份登录（与插件 connect 行为一致），
+        # 漏传 internal_logon 会导致 ORA-28009 / 连不上。
+        properties={'internal_logon': 'sysdba'} if payload.get('sysdba') else None,
     )
     if conn is None:
         err = (meta or {}).get('error') or 'JDBC 连接失败'
@@ -102,10 +114,14 @@ def _collect(payload):
                     cur.execute(sql)
                     cols = None
                     try:
-                        # 列名强制 str：jaydebeapi/JPype 的 description 列名可能
-                        # 是 java.lang.String 包装对象，直接当 JSON dict 键会
-                        # TypeError（keys must be str ... not java.lang.String）。
-                        cols = [str(d[0]) for d in (cur.description or [])]
+                        # 列名强制 str 并统一小写：jaydebeapi/JPype 的 description
+                        # 列名可能是 java.lang.String 包装对象（直接当 JSON dict
+                        # 键会 TypeError），且 Oracle/JDBC 驱动返回大写列名
+                        # （USERNAME/STATE...），而原生驱动路径（engine.py:612）
+                        # 已统一转小写、下游 screen_metrics/前端均按小写键取值/
+                        # 动态渲染。此处不转小写会导致 JDBC 类型明细列名大写、
+                        # 与下游约定不一致，故强制 .lower()。
+                        cols = [str(d[0]).lower() for d in (cur.description or [])]
                     except Exception:
                         cols = None
                     raw = cur.fetchall()

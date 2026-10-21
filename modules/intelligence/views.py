@@ -451,7 +451,7 @@ def run_workflow_ep(wf_id: int):
 
 @intelligence_bp.route("/api/intelligence/workflow-nodes", methods=["GET"])
 def workflow_nodes_ep():
-    """返回 Builder 可用的节点 ref 清单：专家能力 + 写类技能。"""
+    """返回 Builder 可用的节点 ref 清单：专家能力 + 写类技能 + 巡检组件。"""
     try:
         hub = get_hub()
         specialists = hub.capabilities()
@@ -472,7 +472,354 @@ def workflow_nodes_ep():
                 })
         except Exception:
             skills = []
-        return jsonify({"ok": True, "specialists": specialists, "skills": skills})
+        components: List[Dict[str, Any]] = []
+        try:
+            from .inspect_components import list_components
+
+            components = list_components()
+        except Exception:
+            components = []
+        return jsonify({"ok": True, "specialists": specialists,
+                        "skills": skills, "components": components})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+# ── P1：工作流市场（导出 / 导入 / 内置模板） ─────────────────────────────
+
+@intelligence_bp.route("/api/intelligence/workflows/<int:wf_id>/export",
+                       methods=["GET"])
+def export_workflow_ep(wf_id: int):
+    """导出工作流为市场载荷（前端触发下载 JSON 文件）。"""
+    try:
+        from .workflow_store import export_workflow as _export
+
+        payload = _export(wf_id)
+        if not payload:
+            return jsonify({"ok": False, "msg": "workflow not found"}), 404
+        return jsonify({"ok": True, "payload": payload})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/workflows/import", methods=["POST"])
+def import_workflow_ep():
+    """导入市场载荷（单个 payload 或 {"templates": [...]} 批量）。"""
+    data = request.get_json(silent=True) or {}
+    payloads = data.get("templates") if isinstance(data.get("templates"), list) \
+        else [data.get("payload") or data]
+    from .workflow_store import import_workflow as _import
+
+    results = []
+    ok_n = 0
+    for p in payloads:
+        if not isinstance(p, dict):
+            results.append({"ok": False, "error": "载荷不是对象"})
+            continue
+        r = _import(p)
+        results.append(r)
+        ok_n += 1 if r.get("ok") else 0
+    return jsonify({"ok": ok_n > 0, "imported": ok_n, "results": results})
+
+
+@intelligence_bp.route("/api/intelligence/market/builtin", methods=["GET"])
+def market_builtin_ep():
+    """内置 runbook 模板清单（不落库，前端点「导入」才入库）。"""
+    try:
+        from .market_templates import builtin_templates
+
+        return jsonify({"ok": True, "templates": builtin_templates()})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/market/list", methods=["GET"])
+def market_list_ep():
+    """市场资产聚合列表（内置 + 已发布 + 可选远程源 ?remote=url）。"""
+    try:
+        from .workflow_store import market_list
+
+        remote = request.args.get("remote")
+        items = market_list(remote_url=remote)
+        return jsonify({"ok": True, "items": items})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/market/publish", methods=["POST"])
+def market_publish_ep():
+    """把本地工作流发布到市场（标记 published + 作者/版本元数据）。"""
+    data = request.get_json(silent=True) or {}
+    wf_id = data.get("workflow_id") or data.get("id")
+    if not wf_id:
+        return jsonify({"ok": False, "msg": "缺少 workflow_id"}), 400
+    try:
+        from .workflow_store import publish_workflow
+
+        r = publish_workflow(
+            int(wf_id), author=(data.get("author") or "").strip(),
+            version=data.get("version") or "1.0.0",
+            description=data.get("description") or "",
+            category=data.get("category") or "",
+            tags=data.get("tags") or [])
+        if not r.get("ok"):
+            return jsonify({"ok": False, "msg": r.get("error")}), 400
+        return jsonify(r)
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/market/install", methods=["POST"])
+def market_install_ep():
+    """从市场 listing 安装到本地（前端传完整 listing item）。"""
+    data = request.get_json(silent=True) or {}
+    item = data.get("item") or data
+    if not isinstance(item, dict) or not item.get("steps"):
+        return jsonify({"ok": False, "msg": "listing 缺少 steps"}), 400
+    try:
+        from .workflow_store import install_listing
+
+        r = install_listing(item)
+        if not r.get("ok"):
+            return jsonify({"ok": False, "msg": r.get("error")}), 400
+        return jsonify(r)
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/market/update", methods=["POST"])
+def market_update_ep():
+    """升级已安装的市场模板（用 listing 最新结构覆盖）。"""
+    data = request.get_json(silent=True) or {}
+    wf_id = data.get("workflow_id") or data.get("id")
+    item = data.get("item") or data.get("listing") or {}
+    if not wf_id:
+        return jsonify({"ok": False, "msg": "缺少 workflow_id"}), 400
+    try:
+        from .workflow_store import update_installed
+
+        r = update_installed(int(wf_id), item)
+        if not r.get("ok"):
+            return jsonify({"ok": False, "msg": r.get("error")}), 400
+        return jsonify(r)
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/market/rate", methods=["POST"])
+def market_rate_ep():
+    """对模板评分（1–5）。"""
+    data = request.get_json(silent=True) or {}
+    wf_id = data.get("workflow_id") or data.get("id")
+    score = data.get("score")
+    if not wf_id or score is None:
+        return jsonify({"ok": False, "msg": "缺少 workflow_id 或 score"}), 400
+    try:
+        from .workflow_store import rate_workflow
+
+        r = rate_workflow(int(wf_id), score)
+        if not r.get("ok"):
+            return jsonify({"ok": False, "msg": r.get("error")}), 400
+        return jsonify(r)
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+# ── 信创合规态势（P2） ───────────────────────────────────
+@intelligence_bp.route("/api/intelligence/compliance/overview", methods=["GET"])
+def compliance_overview_ep():
+    try:
+        from . import compliance
+
+        overview = compliance.build_overview()
+        return jsonify({"ok": True, "overview": overview})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/compliance/report", methods=["GET"])
+def compliance_report_ep():
+    try:
+        from . import compliance
+
+        fmt = (request.args.get("fmt") or "html").lower()
+        if fmt not in ("html", "json"):
+            fmt = "html"
+        overview = compliance.build_overview()
+        if fmt == "json":
+            return Response(
+                compliance.build_report(overview, "json"),
+                mimetype="application/json",
+                headers={"Content-Disposition": "attachment; filename=compliance_report.json"},
+            )
+        return Response(
+            compliance.build_report(overview, "html"),
+            mimetype="text/html",
+            headers={"Content-Disposition": "attachment; filename=compliance_report.html"},
+        )
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/compliance/xinchuang-map", methods=["GET"])
+def compliance_xinchuang_map_ep():
+    try:
+        from . import compliance
+        from modules.driver_registry import DB_TYPE_CATALOG, normalize_db_type
+
+        ov = compliance.get_override_map()
+        items = []
+        for d in DB_TYPE_CATALOG:
+            dt = d["key"]
+            overridden = dt in ov
+            eff = ov[dt] if overridden else bool(d.get("xinchuang", False))
+            items.append({
+                "db_type": dt, "name_zh": d["name_zh"], "name_en": d["name_en"],
+                "default_xinchuang": bool(d.get("xinchuang", False)),
+                "override": overridden, "effective_xinchuang": eff,
+                "certified": compliance.is_certified(dt),
+                "custom": False,
+            })
+        # 自定义库型（不在 catalog，来自 xinchuang_custom_types：含中文名 + 国产/国外 + 国测）
+        for ct in compliance.get_custom_types():
+            items.append({
+                "db_type": ct["db_type"], "name_zh": ct["name_zh"], "name_en": ct["name_zh"],
+                "default_xinchuang": ct["xinchuang"], "override": False,
+                "effective_xinchuang": ct["xinchuang"],
+                "certified": ct["certified"], "custom": True,
+            })
+        return jsonify({"ok": True, "items": items, "overrides": ov,
+                        "guoce_note": compliance.GUOCE_NOTE})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/compliance/xinchuang-override", methods=["POST"])
+def compliance_xinchuang_override_set_ep():
+    try:
+        from . import compliance
+
+        data = request.get_json(force=True, silent=True) or {}
+        db_type = data.get("db_type")
+        value = bool(data.get("value"))
+        if not db_type:
+            return jsonify({"ok": False, "msg": "db_type 必填"}), 400
+        r = compliance.set_override(db_type, value)
+        if not r.get("ok"):
+            return jsonify({"ok": False, "msg": r.get("error")}), 500
+        return jsonify(r)
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/compliance/xinchuang-override/<db_type>", methods=["DELETE"])
+def compliance_xinchuang_override_clear_ep(db_type):
+    try:
+        from . import compliance
+
+        r = compliance.clear_override(db_type)
+        if not r.get("ok"):
+            return jsonify({"ok": False, "msg": r.get("error")}), 500
+        return jsonify(r)
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/compliance/tag")
+def compliance_tag_ep():
+    """给单个 db_type 打信创合规标签（诊断中心联动）。"""
+    try:
+        from . import compliance
+
+        db_type = (request.args.get("db_type") or "").strip()
+        if not db_type:
+            return jsonify({"ok": False, "msg": "db_type 必填"}), 400
+        return jsonify({"ok": True, "data": compliance.tag_db_type(db_type)})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/compliance/guoce", methods=["POST"])
+def compliance_guoce_set_ep():
+    """设置某 db_type 是否通过国测（覆盖默认名单）。"""
+    try:
+        from . import compliance
+
+        data = request.get_json(force=True, silent=True) or {}
+        db_type = data.get("db_type")
+        value = bool(data.get("value"))
+        if not db_type:
+            return jsonify({"ok": False, "msg": "db_type 必填"}), 400
+        r = compliance.set_certified(db_type, value)
+        if not r.get("ok"):
+            return jsonify({"ok": False, "msg": r.get("error")}), 500
+        return jsonify(r)
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/compliance/guoce/<db_type>", methods=["DELETE"])
+def compliance_guoce_clear_ep(db_type):
+    """清除某 db_type 的国测覆盖，回退到默认名单。"""
+    try:
+        from . import compliance
+
+        r = compliance.clear_certified(db_type)
+        if not r.get("ok"):
+            return jsonify({"ok": False, "msg": r.get("error")}), 500
+        return jsonify(r)
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/compliance/custom", methods=["POST"])
+def compliance_custom_add_ep():
+    """添加 / 更新一个自定义库型（国产/国外 + 国测 + 中文名）。"""
+    try:
+        from . import compliance
+
+        data = request.get_json(force=True, silent=True) or {}
+        db_type = (data.get("db_type") or "").strip()
+        name_zh = (data.get("name_zh") or "").strip()
+        xinchuang = bool(data.get("xinchuang", True))
+        certified = bool(data.get("certified", False))
+        if not db_type:
+            return jsonify({"ok": False, "msg": "db_type 必填"}), 400
+        r = compliance.add_custom_type(db_type, name_zh, xinchuang, certified)
+        if not r.get("ok"):
+            err = r.get("error") or "添加失败"
+            return jsonify({"ok": False, "msg": err}), (400 if "已在内置" in err else 500)
+        return jsonify(r)
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/compliance/custom/<db_type>/certified", methods=["POST"])
+def compliance_custom_certified_ep(db_type):
+    """切换自定义库型的国测标记。"""
+    try:
+        from . import compliance
+
+        data = request.get_json(force=True, silent=True) or {}
+        value = bool(data.get("value"))
+        r = compliance.set_custom_certified(db_type, value)
+        if not r.get("ok"):
+            return jsonify({"ok": False, "msg": r.get("error")}), 500
+        return jsonify(r)
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/compliance/custom/<db_type>", methods=["DELETE"])
+def compliance_custom_clear_ep(db_type):
+    """删除一个自定义库型。"""
+    try:
+        from . import compliance
+
+        r = compliance.clear_custom_type(db_type)
+        if not r.get("ok"):
+            return jsonify({"ok": False, "msg": r.get("error")}), 500
+        return jsonify(r)
     except Exception as e:
         return jsonify({"ok": False, "msg": str(e)}), 500
 
@@ -829,3 +1176,292 @@ def bicqa_awr_analyze():
                         "meta": {k: meta.get(k, "") for k in ("db_name", "instance", "snap_range")}})
     except Exception as e:  # 兜底：任何意外都不击穿通道
         return jsonify({"ok": False, "error_code": "BICQA_ERROR", "error": str(e)})
+
+
+# ── 安全自治 DBA 闭环（P0-b：闭环编排器接口） ──────────────────────────────
+@intelligence_bp.route("/api/intelligence/autonomy/run", methods=["POST"])
+def autonomy_run_ep():
+    """触发一次自治闭环：感知 → 诊断 → 写类提案 → 落 SQL 审计 pending_approval。
+
+    入参：instance_id（必填）、severity_threshold（默认 warning）、max_iter、submitter。
+    P0 默认 human-in-the-loop：写类动作停在 pending_approval，需人工审批后由 execute 接口续跑。
+    受全局熔断开关约束：kill_switch=false 时拒绝新建闭环（返回 423）。
+    """
+    data = request.get_json(silent=True) or {}
+    instance_id = (data.get("instance_id") or "").strip()
+    if not instance_id:
+        return jsonify({"ok": False, "msg": "instance_id required"}), 400
+    # 全局熔断开关检查
+    try:
+        from .workflow_store import get_autonomy_config as _cfg
+        if not _cfg().get("kill_switch", True):
+            return jsonify({"ok": False, "msg": "自治闭环已被全局熔断开关关闭，无法新建闭环。",
+                            "error_code": "AUTONOMY_DISABLED"}), 423
+    except Exception:
+        pass  # 配置读取失败时默认可用，不阻断主流程
+    try:
+        from .autonomy import AutonomyLoop
+
+        loop = AutonomyLoop()
+        result = loop.run_for_instance(
+            instance_id,
+            severity_threshold=data.get("severity_threshold") or "warning",
+            max_iter=data.get("max_iter"),
+            submitter=data.get("submitter") or "autonomy-bot",
+        )
+        if not result.get("ok"):
+            return jsonify({"ok": False, "msg": result.get("detail") or result.get("error_code"),
+                            "run_id": result.get("run_id")}), 422
+        return jsonify({"ok": True, **result})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/autonomy/runs", methods=["GET"])
+def autonomy_runs_ep():
+    """列出自治闭环 run（可按 state / instance_id 过滤）。"""
+    try:
+        from .workflow_store import list_autonomy_runs as _list
+
+        state = (request.args.get("state") or "").strip() or None
+        instance_id = (request.args.get("instance_id") or "").strip() or None
+        runs = _list(status=state, instance_id=instance_id)
+        return jsonify({"ok": True, "runs": runs, "total": len(runs)})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/autonomy/runs/<int:run_id>", methods=["GET"])
+def autonomy_run_detail_ep(run_id: int):
+    """单条自治闭环详情（含种子发现、提案、审计任务、复检结论）。"""
+    try:
+        from .workflow_store import get_autonomy_run as _get
+
+        run = _get(run_id)
+        if not run:
+            return jsonify({"ok": False, "msg": "run not found"}), 404
+        return jsonify({"ok": True, "run": run})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/autonomy/runs/<int:run_id>/execute", methods=["POST"])
+def autonomy_run_execute_ep(run_id: int):
+    """续跑一条已审批（或待审批）的闭环：执行写类任务 → 复检 → 置 resolved/reopened。
+
+    入参：approver（必填，审批人）、reinspect（可选 bool，默认 false，是否先触发真实重巡检）。
+    """
+    data = request.get_json(silent=True) or {}
+    approver = (data.get("approver") or "").strip()
+    if not approver:
+        return jsonify({"ok": False, "msg": "approver required"}), 400
+    try:
+        from .autonomy import AutonomyLoop
+
+        loop = AutonomyLoop()
+        result = loop.execute_run(
+            run_id, approver,
+            reinspect=bool(data.get("reinspect")),
+            sql_overrides=data.get("sql_overrides") or None,
+        )
+        if not result.get("ok"):
+            return jsonify({"ok": False, "msg": result.get("detail") or result.get("error_code"),
+                            "state": result.get("state")}), 422
+        return jsonify({"ok": True, **result})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/autonomy/runs/<int:run_id>/reopen", methods=["POST"])
+def autonomy_run_reopen_ep(run_id: int):
+    """重新打开一条已驳回（rejected）的闭环：修订 SQL 后再次提交审批。
+
+    入参：approver（必填）、sql_overrides（可选，{task_id: sql_text}）。
+    """
+    data = request.get_json(silent=True) or {}
+    approver = (data.get("approver") or "").strip()
+    if not approver:
+        return jsonify({"ok": False, "msg": "approver required"}), 400
+    try:
+        from .autonomy import AutonomyLoop
+
+        loop = AutonomyLoop()
+        result = loop.reopen_run(run_id, approver, sql_overrides=data.get("sql_overrides") or None)
+        if not result.get("ok"):
+            return jsonify({"ok": False, "msg": result.get("detail") or result.get("error_code"),
+                            "state": result.get("state")}), 422
+        return jsonify({"ok": True, **result})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/autonomy/runs/<int:run_id>/reject", methods=["POST"])
+def autonomy_run_reject_ep(run_id: int):
+    """驳回一条待审批 / 已批准（未执行）的闭环。
+
+    入参：approver（必填）、comment（可选，驳回意见）。对每条仍可驳回的审计任务调用
+    WriteGate resolve(reject)，闭环置终态 rejected。
+    """
+    data = request.get_json(silent=True) or {}
+    approver = (data.get("approver") or "").strip()
+    if not approver:
+        return jsonify({"ok": False, "msg": "approver required"}), 400
+    try:
+        from .autonomy import AutonomyLoop
+
+        loop = AutonomyLoop()
+        result = loop.reject_run(run_id, approver, comment=(data.get("comment") or "").strip())
+        if not result.get("ok"):
+            return jsonify({"ok": False, "msg": result.get("detail") or result.get("error_code"),
+                            "state": result.get("state")}), 422
+        return jsonify({"ok": True, **result})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/autonomy/config", methods=["GET"])
+def autonomy_config_ep():
+    """读取安全自治闭环全局配置（含 kill_switch 熔断开关）。"""
+    try:
+        from .workflow_store import get_autonomy_config as _cfg
+        return jsonify(_cfg())
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/autonomy/config", methods=["POST"])
+def autonomy_config_set_ep():
+    """设置安全自治闭环全局开关（熔断）。kill_switch=false 即熔断，拒绝新建闭环。
+
+    入参：kill_switch（bool，必填）。
+    """
+    data = request.get_json(silent=True) or {}
+    if "kill_switch" not in data:
+        return jsonify({"ok": False, "msg": "kill_switch required"}), 400
+    try:
+        from .workflow_store import set_autonomy_config as _set
+        return jsonify(_set(bool(data["kill_switch"])))
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+# ── P1 舰队智能（Fleet Intelligence）───────────────────────────────────
+
+@intelligence_bp.route("/api/intelligence/fleet/overview", methods=["GET"])
+def fleet_overview_ep():
+    """舰队总览：各实例 基线状态 + 漂移摘要 + 容量风险 排行。"""
+    try:
+        from .fleet import fleet_overview
+
+        return jsonify(fleet_overview())
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/fleet/learn", methods=["POST"])
+def fleet_learn_ep():
+    """触发基线学习。入参 iid（可空=学习历史库中全部实例）、days（默认14）。"""
+    data = request.get_json(silent=True) or {}
+    days = int(data.get("days") or 14)
+    try:
+        from . import fleet
+
+        iid = (data.get("iid") or "").strip()
+        targets = [iid] if iid else [it["iid"] for it in fleet.list_instances()]
+        if not targets:
+            return jsonify({"ok": False, "msg": "监控历史库中暂无实例数据"}), 404
+        results = [fleet.learn_baseline(t, days=days) for t in targets]
+        ok_n = sum(1 for r in results if r.get("ok"))
+        return jsonify({"ok": ok_n > 0, "learned": ok_n, "total": len(results),
+                        "results": results})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/fleet/baseline/<iid>", methods=["GET"])
+def fleet_baseline_ep(iid: str):
+    """读取目标实例某指标的基线曲线（按小时桶）。入参 metric（必填）。"""
+    from .fleet import METRICS as _METRICS, get_baseline
+
+    metric = (request.args.get("metric") or "").strip()
+    if metric not in _METRICS:
+        return jsonify({"ok": False, "msg": f"未知指标: {metric}"}), 400
+    try:
+        return jsonify({"ok": True, "iid": iid, "metric": metric,
+                        "baseline": get_baseline(iid, metric)})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/fleet/drift/<iid>", methods=["GET"])
+def fleet_drift_ep(iid: str):
+    """对目标实例执行漂移检测（最近 30 分钟 vs 时段基线）。"""
+    try:
+        from .fleet import detect_drift
+
+        return jsonify(detect_drift(iid))
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/fleet/forecast/<iid>", methods=["GET"])
+def fleet_forecast_ep(iid: str):
+    """目标实例容量预测（线性外推触及阈值日期）。入参 horizon（默认30天）。"""
+    try:
+        from .fleet import forecast_capacity
+
+        horizon = request.args.get("horizon", type=int) or 30
+        return jsonify(forecast_capacity(iid, horizon_days=horizon))
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+# ── P2 拓扑孪生（DB Twin）──────────────────────────────────────────────
+
+@intelligence_bp.route("/api/intelligence/twin/topology", methods=["GET"])
+def twin_topology_ep():
+    """拓扑孪生快照：节点（实时状态+指标+漂移/容量叠加+健康分）+ 边 + 汇总。"""
+    try:
+        from .twin import topology_snapshot
+
+        return jsonify(topology_snapshot())
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/twin/replay", methods=["GET"])
+def twin_replay_ep():
+    """历史回放：按 hours_ago 重建各实例节点状态（漂移/容量不参与回放）。"""
+    try:
+        from .twin import replay
+
+        hours = request.args.get("hours_ago", type=float) or 1.0
+        return jsonify(replay(hours_ago=hours))
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/twin/links", methods=["POST"])
+def twin_add_link_ep():
+    """新增手动依赖连线。入参 {src, dst, kind, label}。"""
+    data = request.get_json(silent=True) or {}
+    try:
+        from .twin import add_link
+
+        return jsonify(add_link(
+            data.get("src") or "", data.get("dst") or "",
+            kind=data.get("kind") or "custom", label=data.get("label") or "",
+        ))
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@intelligence_bp.route("/api/intelligence/twin/links/<int:link_id>", methods=["DELETE"])
+def twin_remove_link_ep(link_id: int):
+    """删除手动依赖连线。"""
+    try:
+        from .twin import remove_link
+
+        return jsonify(remove_link(link_id))
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500

@@ -83,7 +83,7 @@ RESULT_PREFIX = "__DBCHECK_JDBC_TEST_RESULT__"
 # 与巡检子进程 JVM_INSPECTION_DB_TYPES / driver_registry.JDBC_PLUGIN_TO_CATALOG
 # 对齐为 8 类型（6 个 JDBC 插件 + 核心内置 dm/gbase）：
 #   hgdb / db2 / sqlserver_jdbc / oracle_jdbc / clickhouse / uxdb / dm / gbase
-SUPPORTED_DB_TYPES = ('hgdb', 'db2', 'sqlserver_jdbc', 'oracle_jdbc', 'clickhouse', 'uxdb', 'dm', 'gbase', 'ivorysql', 'pg', 'kingbase', 'yashandb', 'mysql', 'mariadb', 'tidb', 'oceanbase')
+SUPPORTED_DB_TYPES = ('hgdb', 'db2', 'sqlserver_jdbc', 'oracle_jdbc', 'clickhouse', 'uxdb', 'vastbase', 'dm', 'gbase', 'ivorysql', 'halodb', 'pg', 'kingbase', 'yashandb', 'mysql', 'mariadb', 'tidb', 'oceanbase')
 
 
 def _test_gbase_jdbc(payload):
@@ -371,6 +371,50 @@ def _test_ivorysql_jdbc(payload):
         return False, f'IvorySQL JDBC 连接失败：{e}'
 
 
+def _test_halodb_jdbc(payload):
+    """HaloDB（羲和）JDBC 连接测试——兼容 PostgreSQL 协议，复用 PG JDBC 驱动。
+
+    与 _test_ivorysql_jdbc 同一套路：统一连接层（open_jdbc_connection）+
+    drivers/postgresql/ 回退；JDBC 不可用时回退 psycopg2。
+    """
+    _host = payload.get('host')
+    try:
+        _port = int(payload.get('port') or 5432)
+    except (TypeError, ValueError):
+        _port = 5432
+    _user = payload.get('user') or ''
+    _pw = payload.get('password') or ''
+    _kw = payload.get('kwargs') or {}
+    _dv = _kw.get('driver_version') or ''
+    _db = _kw.get('database') or 'halo'
+
+    _err = _tcp_preflight(_host, _port)
+    if _err:
+        return False, _err
+
+    try:
+        from modules.jdbc_connector import open_jdbc_connection
+        _conn, _meta = open_jdbc_connection(
+            'halodb', _host, _port, _user, _pw,
+            database=_db,
+            driver_version=_dv,
+            fallback_dirs=[os.path.join(str(PROJECT_ROOT), 'drivers', 'postgresql')],
+        )
+        if _conn is None:
+            return False, (_meta or {}).get('error') or 'HaloDB JDBC 连接失败'
+        _cur = _conn.cursor()
+        try:
+            _cur.execute('SELECT 1')
+            _cur.fetchall()
+        finally:
+            _cur.close()
+            _conn.close()
+        return True, f'HaloDB 连接成功（JDBC 驱动：{(_meta or {}).get("driver")}）'
+    except Exception as e:  # noqa: BLE001
+        # JDBC 不可用/失败 → psycopg2 原生回退（PG 线协议直连）
+        return _pg_fallback('HaloDB', _host, _port, _user, _pw, _db, str(e))
+
+
 def _pg_fallback(kind, host, port, user, password, database, reason):
     """PG 系原生回退（psycopg2）：JDBC 不可用时的兜底路径。
 
@@ -571,6 +615,81 @@ def _mysql_fallback(kind, host, port, user, password, database, reason):
         return False, f'{kind} JDBC 失败: {reason}；pymysql 回退也失败: {e2}'
 
 
+def _oceanbase_native_fallback(host, port, user, password, database, reason):
+    """OceanBase 原生回退（pymysql）：JDBC 不可用时的兜底，并针对 OB 给出明确诊断。
+
+    OceanBase MySQL 租户的连接语义与 MySQL 不同：握手是 lazy 的，连接阶段不校验
+    租户/host 白名单，直到执行首个查询（如 SELECT VERSION()）时服务器才校验，
+    不通过即断开 → 表现为 pymysql 的 (2013, 'Lost connection to MySQL server
+    during query')。pymysql 回退无法像官方 JDBC 驱动那样完整解析集群/租户，
+    故在 OB 上稳定性弱于 JDBC；此处把这类错误翻译成可操作的诊断，而不是丢一个
+    裸的 (2013, ...) 让用户无从下手。
+    """
+    try:
+        import pymysql
+    except ImportError:
+        return False, (f'{reason}；且未安装 pymysql（pip install pymysql）。\n'
+                       f'建议到「数据库驱动管理」上传 OceanBase 官方 JDBC 驱动 jar'
+                       f'（com.oceanbase.jdbc.Driver），官方驱动对 OB 租户/集群解析最完整。')
+    try:
+        _kw = dict(host=host, port=int(port), user=user, password=password,
+                   connect_timeout=10, charset='utf8mb4', read_timeout=30)
+        if database:
+            _kw['database'] = database
+        _c = pymysql.connect(**_kw)
+        _cur = _c.cursor()
+        try:
+            _cur.execute('SELECT VERSION()')
+            _ver = _cur.fetchone()[0]
+            return True, f'OceanBase 连接成功（pymysql 回退）：{_ver}'
+        finally:
+            _cur.close()
+            _c.close()
+    except pymysql.err.OperationalError as e:
+        _code = e.args[0] if e.args else None
+        if _code in (2013, 2006):
+            # 区分「用户名未带租户」与「已带租户但仍被断」两种情形，避免误判：
+            # 当前 user 已含 @ 说明租户格式正确，应把排查重心移到远程授权 / JDBC 驱动。
+            _has_tenant = '@' in user
+            if _has_tenant:
+                _uname, _tenant = user.split('@', 1)[0], user.split('@', 1)[1]
+                _hint = (
+                    f'{reason}\n'
+                    f'【OceanBase 专属诊断】连接已建立，但执行首个查询时被 OceanBase 服务器断开'
+                    f'（错误 {_code}）。\n'
+                    f'当前 user={user!r} 已携带租户（租户名={_tenant!r}），租户格式正确，'
+                    f'可排除「用户名未带租户」这一项。\n'
+                    f'最可能为以下原因之一：\n'
+                    f'1) OB 用户未授权远程登录（最常见）：请在 OB 用 sys 租户执行\n'
+                    f"   CREATE USER '{_uname}'@'%' IDENTIFIED BY '密码';\n"
+                    f"   GRANT ALL PRIVILEGES ON *.* TO '{_uname}'@'%' WITH GRANT OPTION;\n"
+                    f"   （默认 '{_uname}'@'localhost' 仅允许本机登录，远程连接会在首个查询被断，"
+                    f"表现为 2013）。\n"
+                    f'2) 强烈建议到「数据库驱动管理」上传 OceanBase 官方 JDBC 驱动 jar'
+                    f'（com.oceanbase.jdbc.Driver）：官方驱动对 OB 租户/集群解析最完整，'
+                    f'pymysql 回退在部分 OB 版本上不稳定。\n'
+                    f'3) 若租户不在默认集群，用户名需写成 "user@tenant#cluster"。'
+                )
+            else:
+                _hint = (
+                    f'{reason}\n'
+                    f'【OceanBase 专属诊断】连接已建立，但执行首个查询时被 OceanBase 服务器断开'
+                    f'（错误 {_code}）。常见原因与对策：\n'
+                    f'1) 用户名必须携带租户：当前 user={user!r}，应为 "用户名@租户名"'
+                    f'（如 root@sys / root@test），否则 OB 无法定位租户。\n'
+                    f'2) OB 用户未授权远程登录：请在 OB 用 sys 租户执行 '
+                    f"GRANT ALL PRIVILEGES ON *.* TO '用户名'@'%' IDENTIFIED BY '密码'; "
+                    f"（默认 '用户名'@'localhost' 仅允许本机登录，远程连接会在首个查询被断）。\n"
+                    f'3) 强烈建议到「数据库驱动管理」上传 OceanBase 官方 JDBC 驱动 jar'
+                    f'（com.oceanbase.jdbc.Driver）：官方驱动对 OB 租户/集群解析最完整，'
+                    f'pymysql 回退在部分 OB 版本上不稳定。'
+                )
+            return False, _hint
+        return False, f'{reason}；pymysql 回退也失败: {e}'
+    except Exception as e2:  # noqa: BLE001
+        return False, f'{reason}；pymysql 回退也失败: {e2}'
+
+
 def _test_mysql_jdbc(payload):
     """MySQL JDBC 连接测试——统一连接层优先，回退 pymysql。"""
     _host = payload.get('host')
@@ -713,8 +832,8 @@ def _test_oceanbase_jdbc(payload):
             fallback_dirs=[os.path.join(str(PROJECT_ROOT), 'drivers', 'oceanbase')],
         )
         if _conn is None:
-            return _mysql_fallback('OceanBase', _host, _port, _user, _pw, _db,
-                                   (_meta or {}).get('error') or 'JDBC 连接失败')
+            return _oceanbase_native_fallback(_host, _port, _user, _pw, _db,
+                                             (_meta or {}).get('error') or 'JDBC 连接失败')
         _cur = _conn.cursor()
         try:
             _cur.execute('SELECT 1')
@@ -724,7 +843,7 @@ def _test_oceanbase_jdbc(payload):
             _conn.close()
         return True, f'OceanBase 连接成功（JDBC 驱动：{(_meta or {}).get("driver")}）'
     except Exception as e:  # noqa: BLE001
-        return _mysql_fallback('OceanBase', _host, _port, _user, _pw, _db, str(e))
+        return _oceanbase_native_fallback(_host, _port, _user, _pw, _db, str(e))
 
 
 def _test_dm_dmpython(payload, jdbc_reason=None):
@@ -787,10 +906,12 @@ def run_test(payload):
     # oracledb thin 模式与 gevent monkey-patch 不兼容（连接会挂死），且启用 Instant
     # Client 时的 thick/OCI 原生库同样会在被 patch 的主进程里钉死 hub。因此必须像
     # JVM 类 JDBC 数据源一样，在未被 patch 的干净子进程内执行。逻辑直接复用
-    # app._ct_oracle_pro（含 SSH 隧道 + thick 回退），避免重复实现。
+    # modules.oracle_conn_test._ct_oracle_pro（含 SSH 隧道 + thick 回退），避免重复实现。
     if db_type == 'oracle':
         try:
-            from modules.web.app import _ct_oracle_pro
+            # 从独立模块导入，避免子进程 import 整个 Flask 应用（连带 Redis /
+            # 调度器 / 控制台保活线程等副作用）。逻辑与 app._ct_oracle_pro 一致。
+            from modules.oracle_conn_test import _ct_oracle_pro
         except Exception as e:  # noqa: BLE001 - 子进程内导入失败要转成可读错误
             return False, f'Oracle 测试器不可用: {e}'
         _data = {
@@ -822,6 +943,10 @@ def run_test(payload):
     # IvorySQL（兼容 PG 协议）：统一 JDBC 连接层，复用 PostgreSQL 驱动
     if db_type == 'ivorysql':
         return _test_ivorysql_jdbc(payload)
+
+    # HaloDB（羲和，兼容 PG 协议）：统一 JDBC 连接层，复用 PostgreSQL 驱动
+    if db_type == 'halodb':
+        return _test_halodb_jdbc(payload)
 
     # PostgreSQL / KingbaseES / YashanDB（PG 系）：统一 JDBC 连接层，
     # JDBC 不可用时回退原生驱动（psycopg2 / yasdb）
@@ -922,16 +1047,27 @@ def main(argv=None):
 
 
 def _emit(obj):
-    """输出结果行并立即冲刷（子进程可能被强杀，必须即时落盘到管道）。"""
+    """输出结果行并立即冲刷（子进程可能被强杀，必须即时落盘到管道）。
+
+    编码安全：ensure_ascii=True 保证输出纯 ASCII（中文变 \\uXXXX，读侧
+    json.loads 自动还原），并用 buffer 直写绕开 TextIOWrapper——
+    PyInstaller 冻结版子进程不尊重 PYTHONIOENCODING，文本写会按
+    Windows ANSI(GBK) 落盘，主进程按 UTF-8 读即成乱码。
+    """
     try:
-        line = RESULT_PREFIX + json.dumps(obj, ensure_ascii=False)
+        line = RESULT_PREFIX + json.dumps(obj, ensure_ascii=True)
     except Exception:  # noqa: BLE001
         line = RESULT_PREFIX + '{"ok": false, "msg": "结果序列化失败"}'
-    sys.stdout.write('\n' + line + '\n')
+    text = '\n' + line + '\n'
     try:
-        sys.stdout.flush()
-    except Exception:
-        pass
+        sys.stdout.buffer.write(text.encode('utf-8'))
+        sys.stdout.buffer.flush()
+    except Exception:  # noqa: BLE001
+        try:
+            sys.stdout.write(text)
+            sys.stdout.flush()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':

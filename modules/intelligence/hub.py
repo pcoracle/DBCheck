@@ -282,6 +282,43 @@ class DiagnosticHub:
                     out.append(repr(n))
         return out
 
+    def _focus_filter(self, ctx: SharedContext):
+        """定向分析模式的结果过滤（只答所问）。
+
+        返回 (focus_meta, main_findings_dicts, side_findings_dicts)：
+          - 主结果只保留 定向分析结论 + 与主题相关的发现；
+          - 与主题无关的发现不丢弃，折叠进 side_findings（前端默认收起）。
+        """
+        from .planner import detect_focus_topic
+
+        topic = detect_focus_topic(ctx.goal or "") or {
+            "id": str(ctx.inputs.get("focus_topic") or "general"),
+            "label": "定向", "keywords": [],
+        }
+        kws = [k.lower() for k in topic.get("keywords", [])]
+        main: List[Dict[str, Any]] = []
+        side: List[Dict[str, Any]] = []
+        answer: Optional[Dict[str, Any]] = None
+        for f in ctx.findings:
+            d = f.to_dict()
+            if f.source == "focus_analyst":
+                main.append(d)
+                answer = answer or d
+                continue
+            text = ((f.title or "") + " " + (f.detail or "")).lower()
+            if any(k in text for k in kws):
+                main.append(d)
+            else:
+                side.append(d)
+        focus_meta = {
+            "topic": topic.get("id", "general"),
+            "topic_label": topic.get("label", "定向"),
+            "goal": ctx.goal,
+            "answer": answer,
+            "side_count": len(side),
+        }
+        return focus_meta, main, side
+
     def _finalize(self, ctx: SharedContext, plan) -> dict:
         ctx.finished_at = _now()
 
@@ -298,6 +335,14 @@ class DiagnosticHub:
 
         meta = ctx.inputs.get("target_meta") or {}
         spec_names = {c["id"]: c["name"] for c in self.capabilities()}
+
+        # 定向分析：主结果只保留与所问主题相关的内容，无关发现折叠进 side_findings
+        focus_meta = None
+        findings_dicts = [f.to_dict() for f in ctx.findings]
+        side_dicts: List[Dict[str, Any]] = []
+        if ctx.inputs.get("focus_mode"):
+            focus_meta, findings_dicts, side_dicts = self._focus_filter(ctx)
+
         return {
             "edition": EDITION,
             "goal": ctx.goal,
@@ -310,7 +355,10 @@ class DiagnosticHub:
                 "sequence": plan.sequence,
                 "order": plan.order,
             },
-            "findings": [f.to_dict() for f in ctx.findings],
+            "findings": findings_dicts,
+            # 定向分析折叠的与主题无关发现（前端默认收起，可展开查看）
+            "side_findings": side_dicts,
+            "focus": focus_meta,
             "plan": ctx.plan,
             "plan_validation": plan_validation,
             "notes": self._str_notes(ctx),
@@ -384,6 +432,30 @@ class DiagnosticHub:
                 "risk_flags": [],
                 "gate_decisions": [],
             }
+
+    def run_autonomous(self, seed_findings, instance_id: str, max_iter: int = None) -> dict:
+        """自治闭环入口：以机器对机器的巡检发现(seed_findings)为种子做协同诊断。
+
+        与 dispatch 的唯一差别：
+          * 输入是 Finding 列表（或 Finding 形状 dict），而非自然语言 goal；
+          * 非流式，专供 modules.intelligence.autonomy 编排闭环调用；
+          * 复用 _prepare / _run_iterative / _review / _finalize，零新建决策逻辑。
+
+        seed_findings 中的发现会被注入共享上下文 ctx.findings，使迭代重规划
+        （replan）能据此追加专项处置能力（如慢查询=high → 索引顾问）。
+        """
+        ctx, plan = self._prepare("基于巡检发现做自治处置", instance_id, {})
+        for f in (seed_findings or []):
+            if isinstance(f, Finding):
+                ctx.add(f)
+            elif isinstance(f, dict):
+                keys = ("source", "category", "severity", "title",
+                        "detail", "suggestion", "tags")
+                ctx.add(Finding(**{k: f.get(k) for k in keys}))
+        max_iter = self._resolve_max_iter(ctx, max_iter)
+        plan = self._run_iterative(ctx, plan, max_iter)
+        self._review(ctx)
+        return self._finalize(ctx, plan)
 
     def dispatch_stream(self, goal: str, instance_id: str, inputs: dict = None,
                         max_iter: int = None):

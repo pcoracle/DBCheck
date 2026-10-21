@@ -216,6 +216,23 @@ def bind_instance_route(task_id):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@bp.route("/tasks/<int:task_id>/update-sql", methods=["POST"])
+def update_task_sql_route(task_id):
+    """编辑已提交（未定稿）任务的 SQL（重拆语句 + 重算风险 + 替换 items）。
+
+    仅 ``analyzed`` / ``pending_approval`` 状态可编辑；请求体: {sql_text: str}
+    """
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        sql_text = (data.get("sql_text") or "").strip()
+        if not sql_text:
+            return jsonify({"ok": False, "error": "sql_text 不能为空"}), 400
+        task = service.update_task_sql(task_id, sql_text)
+        return jsonify({"ok": True, "task": task})
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @bp.route("/tasks/<int:task_id>/approve", methods=["POST"])
 def approve_task_route(task_id):
     """审批 SQL 审核任务（需 admin / operator 角色）。

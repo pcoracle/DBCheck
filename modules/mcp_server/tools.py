@@ -32,6 +32,22 @@ import sys
 _STATE: dict = {}
 
 
+def _pool_enabled() -> bool:
+    """连接池是否启用：环境变量最高优先级，否则读集中配置。"""
+    if os.environ.get("DBCHECK_MCP_SUBPROC_POOL") == "1":
+        return True
+    try:
+        from modules.mcp_server.config import MCP_CONFIG
+        return bool(MCP_CONFIG.get("subproc_pool_enabled"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _log(msg: str) -> None:
+    sys.stderr.write(f"[mcp-tools] {msg}\n")
+    sys.stderr.flush()
+
+
 def _ensure() -> dict:
     """懒加载并缓存底层 service 单例（首次调用时引导 sys.path + 迁移）。"""
     if "IM" in _STATE:
@@ -54,8 +70,31 @@ def _mask(row: dict) -> dict:
 
 
 # ── 子进程调度（DB 连接类分析共用） ────────────────────────────────────────────
-def _run_analysis_subprocess(analysis_type: str, instance_id, timeout: int = 600) -> dict:
-    """在干净子进程中跑 analysis_cli.py，返回其单行 JSON 结果。"""
+def _run_analysis_subprocess(analysis_type: str, instance_id, timeout: int = 600,
+                             lang: str = "zh", days_threshold: int = 90) -> dict:
+    """在干净子进程中跑 analysis_cli.py，返回其单行 JSON 结果。
+
+    连接池（opt-in）：配置开启（``mcp_server_config.json`` / ``dbc_config.json`` 的
+    ``mcp_server.subproc_pool_enabled`` / 环境变量 ``DBCHECK_MCP_SUBPROC_POOL=1``）
+    时优先走 ``subproc_pool`` 复用常驻 worker（省去冷启动）；池不可用/失败时自动
+    回退到原有的一次性子进程，行为与历史完全一致（零回归）。``lang`` /
+    ``days_threshold`` 仅池路径使用，一次性路径忽略（保持历史契约）。
+    """
+    if _pool_enabled():
+        try:
+            from modules.mcp_server.subproc_pool import get_pool
+            pool = get_pool()
+            if pool is not None:
+                return pool.run({
+                    "analysis_type": analysis_type,
+                    "instance_id": str(instance_id),
+                    "db_type": "",
+                    "lang": lang,
+                    "days_threshold": days_threshold,
+                }, timeout=timeout)
+        except Exception as e:  # noqa: BLE001
+            _log(f"连接池不可用，回退一次性子进程: {e}")
+    # 回退：一次性子进程（保持原有行为）
     py = sys.executable
     cli = os.path.join(os.path.dirname(os.path.abspath(__file__)), "analysis_cli.py")
     env = dict(os.environ)
@@ -63,7 +102,7 @@ def _run_analysis_subprocess(analysis_type: str, instance_id, timeout: int = 600
     try:
         proc = subprocess.run(
             [py, cli, analysis_type, str(instance_id), ""],
-            capture_output=True, text=True, timeout=timeout, env=env,
+            capture_output=True, encoding="utf-8", timeout=timeout, env=env,
         )
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": f"分析超时（>{timeout}s）"}
@@ -150,7 +189,7 @@ def slow_queries_tool(instance_id: str, top_n: int = 10, lang: str = "zh",
     deny = _assert_or_deny(principal, instance_id)
     if deny is not None:
         return deny
-    res = _run_analysis_subprocess("slow_query", instance_id)
+    res = _run_analysis_subprocess("slow_query", instance_id, lang=lang)
     _audit(principal, "mcp.slow_queries", instance_id,
            "allow" if res.get("ok") else "deny", detail=f"ok={res.get('ok')}")
     return res
@@ -171,7 +210,8 @@ def index_health_tool(instance_id: str, days_threshold: int = 90,
     deny = _assert_or_deny(principal, instance_id)
     if deny is not None:
         return deny
-    res = _run_analysis_subprocess("index_health", instance_id)
+    res = _run_analysis_subprocess("index_health", instance_id,
+                                   days_threshold=days_threshold)
     _audit(principal, "mcp.index_health", instance_id,
            "allow" if res.get("ok") else "deny", detail=f"ok={res.get('ok')}")
     return res

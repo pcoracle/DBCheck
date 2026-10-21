@@ -8,6 +8,18 @@
 import os
 import sys
 
+# ── OpenBLAS/NumPy 线程池护栏（必须在任何 numpy/openpyxl 导入之前）─────────
+# numpy 1.26（内置 OpenBLAS 0.3.2x）在 import 时按宿主机 CPU 数预建 BLAS 线程池，
+# 每建一个线程都要 clone() 系统调用。受限容器（企业安全容器 / 定制 seccomp / LXC
+# 嵌套虚拟化）里 clone() 被内核拒绝，导入即崩："OpenBLAS blas_thread_init:
+# pthread_create failed ... Operation not permitted"（ulimit nproc 放开也没用）。
+# =1 时 OpenBLAS 完全不建线程池，从根上绕开被拦的 clone()；本项目数值计算很轻，
+# 单线程几乎无损失。Dockerfile 已设同名 ENV，这里 setdefault 兜底非 Docker 环境；
+# 需要多线程 BLAS 的高级用户仍可在启动前自行 export 覆盖。
+for _blas_var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS",
+                  "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_blas_var, "1")
+del _blas_var
 
 # ── JDBC 连接测试隔离子进程入口（必须在单实例守卫之前）────────────────
 # HGDB / DB2 / SQL Server(JDBC) 依赖 JPype 在进程内启动 JVM。Web 主进程跑在

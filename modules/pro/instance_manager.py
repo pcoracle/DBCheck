@@ -16,7 +16,7 @@ import shutil
 import sqlite3
 from datetime import datetime
 from typing import Dict, List, Optional, Any
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, fields as dc_fields
 import hashlib
 import base64
 
@@ -525,6 +525,13 @@ class InstanceManager:
                 c.execute('ALTER TABLE instances ADD COLUMN "ssh_key_password" TEXT DEFAULT \'\'')
             except Exception:
                 pass
+            # 迁移：为旧表添加 jdbc_url 列（JDBC 完整连接串，Oracle JDBC 等优先于
+            # host/port/service_name；缺失会导致监控采集回退用车段字段重建 URL，
+            # 触发 issue #58 —— 大屏误报 Oracle 宕机）
+            try:
+                c.execute('ALTER TABLE instances ADD COLUMN "jdbc_url" TEXT DEFAULT \'\'')
+            except Exception:
+                pass
             # 确保表存在
             c.execute("""
                 CREATE TABLE IF NOT EXISTS instances (
@@ -544,7 +551,8 @@ class InstanceManager:
                     connection_mode TEXT DEFAULT 'odbc',
                     encrypt INTEGER DEFAULT 0,
                     trust_server_certificate INTEGER DEFAULT 1,
-                    driver_version TEXT DEFAULT '', use_sid INTEGER DEFAULT 0
+                    driver_version TEXT DEFAULT '', use_sid INTEGER DEFAULT 0,
+                    jdbc_url TEXT DEFAULT ''
                 )
             """)
             c.execute("DELETE FROM instances")
@@ -556,8 +564,8 @@ class InstanceManager:
                      connect_mode, auth_source, auth_mechanism, replica_set, tls, tls_ca_file, tls_cert_key_file, tls_allow_invalid_certs,
                      ssh_host, ssh_port, ssh_user, ssh_password, ssh_key_file, ssh_key_password, ssh_enabled,
                      tags, "group", enabled, description, created_at, updated_at, connection_mode,
-                     encrypt, trust_server_certificate, use_sid, driver_version)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     encrypt, trust_server_certificate, use_sid, driver_version, jdbc_url)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     d.get("id", ""), d.get("name", ""), d.get("db_type", ""),
                     d.get("host", ""), d.get("port", 0), d.get("user", ""),
@@ -586,7 +594,8 @@ class InstanceManager:
                     1 if d.get("encrypt") else 0,
                     1 if d.get("trust_server_certificate") else 0,
                     1 if d.get("use_sid") else 0,
-                    d.get("driver_version", "")
+                    d.get("driver_version", ""),
+                    d.get("jdbc_url", "")
                 ))
             conn.commit()
         except Exception as e:
@@ -704,6 +713,132 @@ class InstanceManager:
             }
             writer.writerow(row)
         return output.getvalue()
+
+    # ── JSON 全量导出/导入（升级迁移用） ──────────────────────────
+
+    EXPORT_SCHEMA = 'dbcheck.instances'
+    # 密码类字段：导出时解密/剥离，导入时由 add/update 自动重新加密
+    _SECRET_FIELDS = ('password', 'ssh_password', 'ssh_key_password')
+
+    def export_json(self, include_password: bool = True,
+                    ids: Optional[List[str]] = None) -> Dict[str, Any]:
+        """导出全部实例为可迁移 JSON。
+
+        升级/换机迁移场景：全保真导出所有连接参数（CSV 做不到——它不含密码、
+        也不含 SSH/MongoDB/Redis/TLS 等扩展字段）。
+
+        Args:
+            include_password: True 时导出**明文密码**（调用方必须警示用户妥善
+                保管文件）；False 时彻底剥离密码字段，导入后需重新录入。
+            ids: 只导出这些实例 id（None=全部）。路由层用它传"当前身份可见集合"，
+                避免越权带走他人数据源。
+
+        Returns:
+            dict: {schema, app, exported_at, with_password, groups, instances}
+        """
+        self._ensure_instances_fresh()
+        out = []
+        for iid, inst in self._instances.items():
+            if ids is not None and iid not in ids:
+                continue
+            d = dict(inst) if isinstance(inst, dict) else inst.to_dict()
+            if include_password:
+                for k in self._SECRET_FIELDS:
+                    if d.get(k):
+                        try:
+                            d[k] = _decrypt_pwd(d[k])
+                        except Exception:
+                            d[k] = ''  # 解密失败（db_key 变更）→ 留空由用户重录
+            else:
+                for k in self._SECRET_FIELDS:
+                    d.pop(k, None)
+            out.append(d)
+        return {
+            'schema': self.EXPORT_SCHEMA,
+            'app': 'RaccoonX/DBCheck',
+            'exported_at': datetime.now().isoformat(timespec='seconds'),
+            'with_password': bool(include_password),
+            'groups': [g.to_dict() for g in self.get_all_groups()],
+            'instances': out,
+        }
+
+    def import_json(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """导入 export_json 产出的 JSON（merge 模式，同 id 覆盖更新、新数据源新增）。
+
+        密码字段自动走 add_instance/update_instance 的加密链路重新加密，
+        与本机 .db_key 绑定，无需关心导出方使用的密钥。
+        未知字段自动忽略（向后/向前兼容），缺 name/db_type/host 的条目跳过。
+        """
+        if not isinstance(payload, dict):
+            return {'ok': False, 'message': '导入内容格式错误（应为 JSON 对象）'}
+        items = payload.get('instances')
+        if not isinstance(items, list) or not items:
+            return {'ok': False, 'message': '文件中没有 instances 数据（请确认是数据源导出文件）'}
+        valid_fields = {f.name for f in dc_fields(DatabaseInstance)}
+        added = updated = skipped = failed = 0
+        errors: List[str] = []
+
+        # 分组先落（导入数据源时组引用才不悬空）
+        existing_groups = {g.name for g in self.get_all_groups()}
+        for g in (payload.get('groups') or []):
+            try:
+                name = (g or {}).get('name')
+                if name and name not in existing_groups:
+                    self.add_group(InstanceGroup(
+                        name=name, description=g.get('description', ''),
+                        color=g.get('color', '#378ADD')))
+                    existing_groups.add(name)
+            except Exception as e:
+                errors.append('分组 %s 导入失败: %s' % (g.get('name'), e))
+
+        for idx, raw in enumerate(items):
+            label = '#%d' % (idx + 1)
+            try:
+                if not isinstance(raw, dict):
+                    skipped += 1
+                    errors.append(label + ' 条目不是对象')
+                    continue
+                data = {k: v for k, v in raw.items() if k in valid_fields}
+                data['db_type'] = str(data.get('db_type') or '').lower()
+                if not (data.get('name') and data.get('db_type') and data.get('host')):
+                    skipped += 1
+                    errors.append(label + ' 缺少 name/db_type/host，已跳过')
+                    continue
+                label = data['name']
+                iid = data.get('id') or ''
+                if iid and iid in self._instances:
+                    r = self.update_instance(iid, data)
+                    if r.get('ok'):
+                        updated += 1
+                    else:
+                        failed += 1
+                        errors.append('%s 更新失败: %s' % (label, r.get('message')))
+                    continue
+                inst = DatabaseInstance(**data)
+                r = self.add_instance(inst)
+                if r.get('ok'):
+                    added += 1
+                    continue
+                # id 冲突（跨机导入撞 id）：去掉 id 让引擎重新生成
+                inst.id = ''
+                r2 = self.add_instance(inst)
+                if r2.get('ok'):
+                    added += 1
+                else:
+                    failed += 1
+                    errors.append('%s 导入失败: %s' % (label, r2.get('message')))
+            except Exception as e:
+                failed += 1
+                errors.append('%s 异常: %s' % (label, e))
+
+        msg = '新增 %d，更新 %d' % (added, updated)
+        if skipped:
+            msg += '，跳过 %d' % skipped
+        if failed:
+            msg += '，失败 %d' % failed
+        return {'ok': failed == 0, 'added': added, 'updated': updated,
+                'skipped': skipped, 'failed': failed,
+                'errors': errors[:20], 'message': msg}
 
     def test_connection(self, instance_id: str) -> dict:
         """测试实例连接，返回 {'ok': bool, 'message': str}"""

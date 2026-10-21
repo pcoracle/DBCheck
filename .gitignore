@@ -177,6 +177,7 @@ _tmp_*.py
 _tmp_*.js
 data/drivers.db-shm
 data/drivers.db-wal
+data/monitor_history.db*
 docs/release/*.png
 /startDBCheck.sh
 /.venv/

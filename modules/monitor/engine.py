@@ -19,11 +19,16 @@ import os
 import sys
 import threading
 import json
+import logging
 from collections import deque
 from modules.pro.instance_manager import get_instance_manager
 from modules.core.paths import PROJECT_ROOT
 import modules.monitor.queries as mq
 from modules.monitor.screen_metrics import SCREEN_SQLS
+
+# 监控专属 logger：经 loghub 汇聚到「运行日志」页（category=monitor），且默认不写
+# 共享控制台（由 MonitorConsoleFilter 过滤），从根上避免污染巡检 / 控制台输出。
+_log = logging.getLogger('dbcheck.monitor')
 
 
 # ── JDBC 批量采集通道 ─────────────────────────────────────────
@@ -34,6 +39,21 @@ from modules.monitor.screen_metrics import SCREEN_SQLS
 JDBC_BATCH_DB_TYPES = frozenset(('gbase', 'db2', 'clickhouse'))
 JDBC_BATCH_TTL = 12.0        # 批量结果缓存时长（s），略短于采样间隔 15s
 JDBC_BATCH_TIMEOUT = 90      # 子进程硬超时（含 JVM 冷启动 4~10s）
+
+# ── JDBC 专属数据源（*_jdbc）─────────────────────────────────
+# 这些类型被用户配置成 *_jdbc 的原因就是「python 原生驱动连不上」（旧版
+# Oracle / TCPS / EZConnect / TNS 别名等），且 jdbc_url 优先于 host/port
+# （见 instance_manager 字段注释）；metrics_collector 侧早有约定
+# 「oracle_jdbc 一律走插件 JDBC，绝不走 oracledb」。监控引擎此前把它们
+# 归一成 oracle/pg 走 oracledb thin / psycopg2 直连 → 实时监控（pro collector，
+# 走 JDBC 插件）有数据、监控大屏（MonitorEngine）判宕机。
+# 修复：路由进 JDBC 批量子进程通道（主进程绝不起 JVM）；连接器用原始插件
+# id（oracle_jdbc/uxdb），采集 SQL 模板用归一键（oracle/pg）。
+JDBC_ONLY_TYPES = {
+    # raw db_type   → (JDBC 连接器 db_type, monitor 模板键)
+    'oracle_jdbc': ('oracle_jdbc', 'oracle'),
+    'uxdb_jdbc':   ('uxdb',        'pg'),
+}
 
 
 # ── 驱动异常 → 友好提示 ──────────────────────────────────────
@@ -109,7 +129,7 @@ class MonitorEngine:
             if self._running:
                 return
             self._running = True
-            self._thread = threading.Thread(target=self._background_loop, daemon=True)
+            self._thread = threading.Thread(target=self._background_loop, daemon=True, name='MonitorCollector')
             self._thread.start()
 
     def stop(self):
@@ -193,6 +213,9 @@ class MonitorEngine:
             # 但此处统一取明文，避免后续维护者误以为 mask_password=False 就是明文密码。
             all_instances = im.get_all_instances_decrypted()
             instances = [i for i in all_instances if i.get('enabled', True)]
+            # 明确标识：后台监控采集是独立后台任务，遍历全部已保存实例，
+            # 与用户手动发起的巡检无关，避免日志混流被误判为「巡检串库」。
+            _log.info("===== 后台监控采集任务（独立后台线程，遍历 %d 个实例，与手动巡检无关）=====", len(instances))
             if not instances:
                 return
 
@@ -204,7 +227,7 @@ class MonitorEngine:
             for inst in instances:
                 iid = inst['id']
                 if not inst.get('host'):
-                    print(f"[Monitor] 跳过空 host 实例: {iid}", flush=True)
+                    _log.info("跳过空 host 实例: %s", iid)
                     continue
                 db_type = mq.normalize_db_type(inst.get('db_type', ''))
                 label = f"{inst.get('name', iid)} ({inst.get('host', '?')}:{inst.get('port', '?')})"
@@ -214,7 +237,7 @@ class MonitorEngine:
                     sq = self._collect_slow(iid, db_type, label)
                     new_slow[iid] = sq
                 except Exception as e:
-                    print(f"[Monitor] 慢查询采集失败 {label}: {e}", flush=True)
+                    _log.warning("慢查询采集失败 %s: %s", label, e)
                     new_slow[iid] = {
                         'data': [], 'error': _friendly_db_error(e),
                         'ts': time.time(), 'db_type': db_type, 'label': label,
@@ -232,7 +255,7 @@ class MonitorEngine:
                         'db_type': db_type,
                     })
                 except Exception as e:
-                    print(f"[Monitor] 连接采集失败 {label}: {e}", flush=True)
+                    _log.warning("连接采集失败 %s: %s", label, e)
                     new_conn[iid] = {
                         'data': [], 'error': _friendly_db_error(e),
                         'ts': time.time(), 'total': 0, 'max_conn': 0,
@@ -249,7 +272,7 @@ class MonitorEngine:
                     'instances': conn_history_items,
                 })
         except Exception as e:
-            print(f"[Monitor] 采集失败: {e}", flush=True)
+            _log.error("采集失败: %s", e)
 
     # ═══════════════════════════════════════════════════════════
     #  采集实现
@@ -268,14 +291,18 @@ class MonitorEngine:
                 rows = self._connect_and_query(instance_id, sql)
             except Exception as e:
                 low = str(e).lower()
-                # 依赖对象缺失（如 pg_stat_statements / performance_schema 未安装）→
-                # 记忆化：首行错误摘要打印一次，后续轮直接 fallback，不再重复刷日志
-                if fallback_sql and ('does not exist' in low or "doesn't exist" in low):
+                # 依赖对象缺失（pg_stat_statements / performance_schema 未安装）
+                # 或列不存在（Oracle 11gR1 无 max_elapsed_time → ORA-00904
+                # invalid identifier，#63）→ 记忆化：首行错误摘要打印一次，
+                # 后续轮直接 fallback，不再重复刷日志
+                dep_missing = ('does not exist' in low or "doesn't exist" in low
+                               or 'ora-00904' in low or 'invalid identifier' in low)
+                if fallback_sql and dep_missing:
                     self._slow_prim_skip.add(instance_id)
-                    print(f"[Monitor] {label} 慢查询主 SQL 依赖缺失（{str(e).splitlines()[0][:100]}），"
-                          f"后续轮次直接使用 fallback", flush=True)
+                    _log.info("%s 慢查询主 SQL 依赖缺失（%s），后续轮次直接使用 fallback",
+                              label, str(e).splitlines()[0][:100])
                 else:
-                    print(f"[Monitor] 慢查询 SQL 失败 {label}: {e}", flush=True)
+                    _log.warning("慢查询 SQL 失败 %s: %s", label, e)
                 if not fallback_sql:
                     return {'data': [], 'error': _friendly_db_error(e),
                             'ts': time.time(), 'db_type': db_type, 'label': label}
@@ -284,9 +311,9 @@ class MonitorEngine:
             try:
                 rows = self._connect_and_query(instance_id, fallback_sql)
                 if instance_id not in self._slow_prim_skip:
-                    print(f"[Monitor] {label} 使用 fallback 慢查询 SQL", flush=True)
+                    _log.info("%s 使用 fallback 慢查询 SQL", label)
             except Exception as fb:
-                print(f"[Monitor] 慢查询 fallback 亦失败 {label}: {fb}", flush=True)
+                _log.warning("慢查询 fallback 亦失败 %s: %s", label, fb)
                 return {'data': [], 'error': _friendly_db_error(fb),
                         'ts': time.time(), 'db_type': db_type, 'label': label}
 
@@ -310,7 +337,7 @@ class MonitorEngine:
         try:
             rows = self._connect_and_query(instance_id, conn_sql)
         except Exception as e:
-            print(f"[Monitor] 连接 SQL 失败 {label}: {e}", flush=True)
+            _log.warning("连接 SQL 失败 %s: %s", label, e)
             return {'data': [], 'error': _friendly_db_error(e),
                     'ts': time.time(), 'total': 0, 'max_conn': mq.MAX_CONNECTION_DEFAULTS.get(db_type, 100),
                     'connections': {'active': 0, 'idle': 0, 'blocked': 0}, 'usage_pct': 0,
@@ -385,12 +412,14 @@ class MonitorEngine:
             _add(s)
         return sqls
 
-    def _jdbc_query(self, inst, db_type, sql, timeout=None):
+    def _jdbc_query(self, inst, db_type, sql, timeout=None, template_key=None):
         """JDBC 批量通道查询单条 SQL：结果来自每轮一次的子进程批量采集缓存。
 
         首个调用方（引擎采集线程或大屏采样线程）触发一次子进程批量执行，
         同轮内其余查询（含另一侧线程的 run_query）直接读缓存，避免每条 SQL
         都冷启动一次 JVM（4~10s）。inst 为已解密实例 dict。
+        ``template_key``：采集 SQL 模板键（oracle/pg 等），缺省同 db_type；
+        *_jdbc 专属类型的连接器 id 与模板键不同（oracle_jdbc vs oracle）。
         """
         instance_id = inst.get('id')
         cache = self._jdbc_cache.get(instance_id)
@@ -402,7 +431,8 @@ class MonitorEngine:
             cache = self._jdbc_cache.get(instance_id)
             if cache and time.time() - cache['ts'] <= JDBC_BATCH_TTL:
                 return self._jdbc_pick(cache['res'], sql)
-            res = self._jdbc_run_batch(inst, db_type, timeout)
+            res = self._jdbc_run_batch(inst, db_type, timeout,
+                                       template_key=template_key)
             self._jdbc_cache[instance_id] = {'ts': time.time(), 'res': res,
                                              'lock': lock}
             return self._jdbc_pick(res, sql)
@@ -417,11 +447,13 @@ class MonitorEngine:
             raise RuntimeError(entry[1])
         return entry
 
-    def _jdbc_run_batch(self, inst, db_type, timeout=None):
+    def _jdbc_run_batch(self, inst, db_type, timeout=None, template_key=None):
         """spawn 隔离子进程，一次跑完该实例本轮全部采集 SQL。
 
         参数经 stdin 临时文件传入（密码不进进程列表），结果取 stdout 中
         最后一个以 { 开头的行（与 jdbc_test_cli / jdbc_metrics_cli 同源约定）。
+        ``db_type`` 传给 JDBC 连接器（原始插件 id，如 oracle_jdbc/uxdb）；
+        ``template_key`` 决定采集 SQL 模板集合（oracle/pg 等），缺省同 db_type。
         """
         import subprocess as _sp
         import tempfile as _tf
@@ -432,7 +464,7 @@ class MonitorEngine:
             cmd = [sys.executable, os.path.join(
                 str(PROJECT_ROOT), 'modules', 'monitor', 'jdbc_collect_cli.py')]
 
-        sqls = self._jdbc_batch_sqls(db_type)
+        sqls = self._jdbc_batch_sqls(template_key or db_type)
         payload = {
             'db_type': db_type,
             'host': inst.get('host'),
@@ -440,6 +472,15 @@ class MonitorEngine:
             'user': inst.get('user') or '',
             'password': inst.get('password') or '',
             'database': inst.get('database') or inst.get('service_name') or '',
+            # Oracle 专属字段必须透传：监控子进程此前漏传 service_name/sid/
+            # use_sid/sysdba，导致 build_jdbc_url 对 oracle_jdbc 落到硬编码默认
+            # 'ORCLCDB'（或旧 SID 格式默认 'ORCL'），连错服务名 → ORA-12514 →
+            # 大屏误判宕机；而测试连接（插件 test_connection）正确传 service_name
+            # → 测试过、监控挂。sys 用户必须以 SYSDBA 登录，漏传则同样连不上。
+            'service_name': inst.get('service_name') or '',
+            'sid': inst.get('sid') or '',
+            'use_sid': bool(inst.get('use_sid', False)),
+            'sysdba': bool(inst.get('sysdba', False)),
             'jdbc_url': inst.get('jdbc_url') or '',
             'ssl': bool(inst.get('ssl', False)),
             'driver_version': inst.get('driver_version') or '',
@@ -536,7 +577,15 @@ class MonitorEngine:
         # 归一到模板键（oracle_jdbc→oracle、tdsqlc_mysql→mysql 等）再分派：
         # _create_connection 的 python 驱动分支按协议族分派（TDSQL-C 兼容 MySQL
         # 协议、oracle_jdbc 实例字段与 oracle 相同），与 jdbc 插件 id 无关。
-        db_type = mq.normalize_db_type(inst['db_type'])
+        raw_type = (inst.get('db_type') or '').strip().lower()
+        db_type = mq.normalize_db_type(raw_type)
+
+        # *_jdbc 专属数据源：必须走 JDBC 子进程通道，绝不能被归一成
+        # oracle/pg 后用 python 原生驱动直连（否则实时监控有数据、大屏判宕机）
+        if raw_type in JDBC_ONLY_TYPES:
+            conn_type, tmpl_key = JDBC_ONLY_TYPES[raw_type]
+            return self._jdbc_query(inst, conn_type, sql, timeout=timeout,
+                                    template_key=tmpl_key)
 
         # gbase/db2/clickhouse：JDBC 批量子进程通道（主进程绝不起 JVM）
         if db_type in JDBC_BATCH_DB_TYPES:
@@ -587,7 +636,7 @@ class MonitorEngine:
         port = int(inst['port'])
         user = inst['user']
 
-        if db_type in ('mysql', 'mariadb', 'oceanbase'):
+        if db_type in ('mysql', 'mariadb', 'oceanbase', 'starrocks', 'doris'):
             # MariaDB / OceanBase MySQL 租户与 MySQL 协议/参数高度兼容，复用同款 pymysql 连接逻辑。
             # OceanBase MySQL 租户的 database 即租户名，默认 sys。
             import pymysql
@@ -602,16 +651,24 @@ class MonitorEngine:
                 charset='utf8mb4', connect_timeout=timeout, read_timeout=timeout,
             )
 
-        elif db_type in ('postgresql', 'pg', 'hgdb', 'kingbase', 'uxdb', 'vastbase'):
-            # 国产 PG 系（瀚高/人大金仓/优炫/Vastbase）走 PG 线协议，psycopg2 直连。
-            # ⚠️ 本分支收到的是归一后 db_type（hgdb/kingbase 等已归一为 pg），
+        elif db_type in ('postgresql', 'pg', 'hgdb', 'kingbase', 'uxdb', 'vastbase',
+                         'highgo', 'halodb', 'opengauss', 'greenplum'):
+            # 国产 PG 线协议系：瀚高/人大金仓/优炫/羲和直连 PG；Vastbase（海量 G100）
+            # 基于 openGauss 内核（openGauss 源自 PG 9.2 分支），仍保留 PG 兼容层，
+            # 故同一 psycopg2 + pg 系统视图路径即可覆盖，无需分叉。
+            # ⚠️ 本分支收到的是归一后 db_type（hgdb/kingbase/vastbase 等已归一为 pg），
             # default_db 映射必须用实例的原始 db_type 查，否则键全部落空、
             # 库名空缺时一律回落 postgres（瀚高无 postgres 库 → FATAL 报错）。
             # 兜底回落「用户名同名库」（PG 惯例：默认库与用户同名，与 JDBC
             # 数据源测试不指定库名时同口径）。
             raw_type = (inst.get('db_type') or '').lower()
             default_db = {'hgdb': 'highgo', 'kingbase': 'kingbase',
-                          'uxdb': 'uxdb', 'vastbase': 'vastbase'}.get(raw_type)
+                          'uxdb': 'uxdb',
+                          # Vastbase 基于 openGauss 内核，openGauss/Vastbase 均保留 PG
+                          # 兼容层且默认库为 postgres，故与 opengauss/greenplum 同取 postgres。
+                          'vastbase': 'postgres', 'highgo': 'highgo',
+                          'halodb': 'halo',
+                          'opengauss': 'postgres', 'greenplum': 'postgres'}.get(raw_type)
             import psycopg2
             return psycopg2.connect(
                 host=host, port=port, user=user, password=password,

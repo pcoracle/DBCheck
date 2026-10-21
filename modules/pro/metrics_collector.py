@@ -52,8 +52,8 @@ COUNTER_KEYS = {
               'slow_queries', 'aborted_connects', 'threads_created'},
     'tidb': {'queries', 'bytes_received', 'bytes_sent', 'connections',
              'slow_queries', 'aborted_connects', 'threads_created'},
-    'oceanbase': {'queries', 'bytes_received', 'bytes_sent', 'connections',
-                  'slow_queries', 'aborted_connects', 'threads_created'},
+    'oceanbase': {'queries', 'ob_qps', 'ob_tps', 'bytes_received', 'bytes_sent',
+                  'connections', 'slow_queries', 'aborted_connects', 'threads_created'},
     'postgresql': {'xact_commit', 'xact_rollback', 'blks_read', 'blks_hit',
                    'deadlocks', 'conflicts', 'tup_returned', 'tup_fetched',
                    'tup_inserted', 'tup_updated', 'tup_deleted'},
@@ -61,6 +61,10 @@ COUNTER_KEYS = {
            'deadlocks', 'conflicts'},
     'ivorysql': {'xact_commit', 'xact_rollback', 'blks_read', 'blks_hit', 'deadlocks'},
     'kingbase': {'xact_commit', 'xact_rollback', 'blks_read', 'blks_hit', 'deadlocks'},
+    # Vastbase G100（海量，openGauss/PG 内核）：pg_stat_database 系视图实测全通
+    'vastbase': {'xact_commit', 'xact_rollback', 'blks_read', 'blks_hit', 'deadlocks'},
+    # HaloDB（羲和）为 PG14 内核血统，统计视图同 PG
+    'halodb': {'xact_commit', 'xact_rollback', 'blks_read', 'blks_hit', 'deadlocks'},
     'uxdb': {'xact_commit', 'xact_rollback', 'blks_read', 'blks_hit',
              'deadlocks', 'conflicts', 'numbackends'},
     'uxdb_jdbc': {'xact_commit', 'xact_rollback', 'blks_read', 'blks_hit',
@@ -71,8 +75,13 @@ COUNTER_KEYS = {
     'oracle_jdbc': {'ora_user_commits', 'ora_physical_reads', 'ora_redo_size',
                     'ora_user_calls', 'ora_session_logical_reads',
                     'ora_db_block_gets', 'ora_consistent_gets'},
-    'sqlserver': {'io_read_count', 'io_write_count', 'io_read_bytes', 'io_write_bytes'},
-    'mssql':   {'io_read_count', 'io_write_count', 'io_read_bytes', 'io_write_bytes'},
+    'sqlserver': {'io_read_count', 'io_write_count', 'io_read_bytes', 'io_write_bytes',
+                  'mssql_batch_requests', 'mssql_transactions'},
+    'mssql':   {'io_read_count', 'io_write_count', 'io_read_bytes', 'io_write_bytes',
+                'mssql_batch_requests', 'mssql_transactions'},
+    # sqlserver_jdbc 与 sqlserver 同协议同指标口径（pyodbc 直连，见 _connect）
+    'sqlserver_jdbc': {'io_read_count', 'io_write_count', 'io_read_bytes', 'io_write_bytes',
+                       'mssql_batch_requests', 'mssql_transactions'},
     # MongoDB 计数器（来自 serverStatus）：opcounters / 连接 / 网络 / 全局锁
     'mongodb': {
         'mongodb_opcounters_insert', 'mongodb_opcounters_query',
@@ -323,9 +332,11 @@ class MetricsCollector:
                                    password=password, database=db_name,
                                    connect_timeout=CONNECT_TIMEOUT,
                                    read_timeout=t, write_timeout=t)
-        if db_type in ('postgresql', 'pg', 'ivorysql', 'kingbase'):
+        if db_type in ('postgresql', 'pg', 'ivorysql', 'kingbase', 'halodb', 'vastbase'):
             import psycopg2
-            dbname = inst.get('database') or ('kingbase' if db_type == 'kingbase' else 'postgres')
+            dbname = inst.get('database') or (
+                'kingbase' if db_type == 'kingbase'
+                else ('halo' if db_type == 'halodb' else 'postgres'))
             return psycopg2.connect(host=host, port=port, user=user,
                                     password=password, dbname=dbname,
                                     connect_timeout=CONNECT_TIMEOUT,
@@ -376,7 +387,9 @@ class MetricsCollector:
         if db_type == 'dm':
             import dmPython
             return dmPython.connect(user=user, password=password, server='%s:%d' % (host, port))
-        if db_type in ('sqlserver', 'mssql'):
+        if db_type in ('sqlserver', 'mssql', 'sqlserver_jdbc'):
+            # sqlserver_jdbc（插件标识）与 sqlserver 同为 TDS 线协议，pyodbc 直连
+            # （与监控大屏 _create_connection 同口径：绝不走 JDBC 插件起 JVM）。
             import pyodbc
             # 支持 DSN 或 host/port 直连
             conn_str = inst.get('connection_string') or ''
@@ -663,7 +676,7 @@ class MetricsCollector:
                 return self._collect_mysql(conn)
             if db_type == 'oceanbase':
                 return self._collect_oceanbase(conn)
-            if db_type in ('postgresql', 'pg', 'ivorysql', 'kingbase'):
+            if db_type in ('postgresql', 'pg', 'ivorysql', 'kingbase', 'halodb', 'vastbase'):
                 return self._collect_postgres(conn)
             if db_type in ('uxdb', 'uxdb_jdbc'):
                 return self._collect_uxdb(conn)
@@ -671,7 +684,7 @@ class MetricsCollector:
                 return self._collect_oracle(conn)
             if db_type == 'dm':
                 return self._collect_dm(conn)
-            if db_type in ('sqlserver', 'mssql'):
+            if db_type in ('sqlserver', 'mssql', 'sqlserver_jdbc'):
                 return self._collect_sqlserver(conn)
             if db_type == 'mongodb':
                 return self._collect_mongodb(conn)
@@ -766,6 +779,42 @@ class MetricsCollector:
             m['sysstat'] = sysstat
         except Exception:
             m['sysstat'] = {}
+
+        # ── 4b) OB 原生 QPS/TPS/缓存命中计数器（stat_id 跨版本稳定，口径同 OCP）──
+        # OB 的 SHOW GLOBAL STATUS 不提供 Queries/Com_commit/Com_rollback，
+        # 速率图（rate_*）必须以 v$sysstat 计数器为源：
+        #   ob_qps = 40000 select + 40002 insert + 40004 replace + 40006 update
+        #            + 40008 delete；ob_tps = 30005 transaction_count；
+        #   buffer_cache_hit_pct = 50008 hit / (50008 + 50009 miss)
+        try:
+            _OB_STAT_IDS = '40000,40002,40004,40006,40008,30005,50008,50009'
+            try:
+                cur.execute(
+                    "SELECT stat_id, SUM(value) FROM gv$sysstat "
+                    "WHERE stat_id IN (%s) AND class < 1000 GROUP BY stat_id" % _OB_STAT_IDS)
+            except Exception:
+                cur.execute(
+                    "SELECT stat_id, SUM(value) FROM v$sysstat "
+                    "WHERE stat_id IN (%s) AND class < 1000 GROUP BY stat_id" % _OB_STAT_IDS)
+            st = {}
+            for row in cur.fetchall():
+                if row and len(row) >= 2:
+                    try:
+                        st[int(_to_num(row[0]))] = _to_num(row[1])
+                    except (TypeError, ValueError):
+                        continue
+            if st:
+                m['ob_qps'] = sum(st.get(i, 0) for i in (40000, 40002, 40004, 40006, 40008))
+                m['ob_tps'] = st.get(30005, 0)
+                c_hit, c_miss = st.get(50008), st.get(50009)
+                if c_hit is not None and c_miss is not None and (c_hit + c_miss) > 0:
+                    m['buffer_cache_hit_pct'] = round(c_hit / (c_hit + c_miss) * 100.0, 1)
+                # SHOW GLOBAL STATUS 缺 queries 时用 OB 原生 SQL 计数兜底，
+                # 保证 rate_queries（吞吐图主序列）在 OB 上可用
+                if not m.get('queries'):
+                    m['queries'] = m['ob_qps']
+        except Exception:
+            pass
 
         # ── 5) memstore_water_level：GV$OB_MEMSTORE 水位百分比 ──
         try:
@@ -911,19 +960,30 @@ class MetricsCollector:
                 m['total_sessions'] = m.get('total_sessions', 0) + int(row[1])
         except Exception:
             pass
-        # 批处理请求/秒 等计数器（sys.dm_os_performance_counters）
+        # 吞吐计数器（sys.dm_os_performance_counters）
+        #   Batch Requests/sec → mssql_batch_requests（QPS 近似，全局单值）
+        #   Transactions/sec   → mssql_transactions（TPS 近似，按库多行，需求和为实例级）
+        # 计数器名随服务器语言本地化（中文实例为「批请求/秒」「事务数/秒」），英中名都匹配；
+        # Transactions/sec 属 'Transactions' 对象而非 'SQL Statistics'，故去掉
+        # object_name 过滤、直接按 counter_name IN 取，否则 TPS 计数器会被漏采。
         try:
             cur.execute("""
-                SELECT object_name, counter_name, cntr_value
+                SELECT counter_name, cntr_value
                 FROM sys.dm_os_performance_counters
-                WHERE object_name LIKE '%SQL Statistics%'
-                  AND counter_name IN ('SQL Compilations/sec', 'SQL Re-Compilations/sec',
-                                       'Batch Requests/sec')
+                WHERE counter_name IN ('Batch Requests/sec', N'批请求/秒',
+                                       'Transactions/sec', N'事务数/秒',
+                                       'SQL Compilations/sec', 'SQL Re-Compilations/sec')
             """)
             for row in cur.fetchall():
-                cname = str(row[1]).lower().replace('/sec','').replace(' ','_')
-                key = 'mssql_' + cname
-                m[key] = _to_num(row[2])
+                cname = (str(row[0]).strip().lower()
+                         .replace('/sec', '').replace('/秒', '').replace(' ', '_'))
+                val = _to_num(row[1]) or 0
+                if cname in ('batch_requests', '批请求'):
+                    m['mssql_batch_requests'] = val
+                elif cname in ('transactions', '事务数'):
+                    m['mssql_transactions'] = m.get('mssql_transactions', 0) + val
+                else:
+                    m['mssql_' + cname] = val
         except Exception:
             pass
         # 数据库级 I/O

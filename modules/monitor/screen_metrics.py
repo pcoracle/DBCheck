@@ -49,6 +49,7 @@ _DB_FAMILY = {
     'oracle': 'oracle',
     'sqlserver': 'sqlserver', 'mssql': 'sqlserver',
     'dm': 'dm', 'kingbase': 'pg', 'hgdb': 'pg', 'uxdb': 'pg', 'vastbase': 'pg',
+    'halodb': 'pg',
     'gbase': 'gbase', 'db2': 'db2', 'clickhouse': 'clickhouse',
 }
 
@@ -81,6 +82,37 @@ MYSQL_TBS_SQL = (
 MYSQL_REPL_SQL = "SHOW SLAVE STATUS"
 MYSQL_REPL_SQL8 = "SHOW REPLICA STATUS"
 
+# ── OceanBase（MySQL 租户）专属 ──
+# OB 的 SHOW GLOBAL STATUS 不提供 Queries / Com_commit / Com_rollback / Innodb_*
+# 计数器，QPS/TPS/缓存命中必须走 OB 原生 v$sysstat。stat_id 跨版本稳定，
+# 口径与 OCP 官方监控指标一致：
+#   QPS = 40000 select + 40002 insert + 40004 replace + 40006 update + 40008 delete
+#   TPS = 30005 transaction_count
+#   缓存命中 = 50008 block cache hit / 50009 block cache miss
+OB_QPS_STAT_IDS = (40000, 40002, 40004, 40006, 40008)
+OB_TPS_STAT_ID = 30005
+OB_CACHE_HIT_STAT_ID = 50008
+OB_CACHE_MISS_STAT_ID = 50009
+OB_STAT_SQL = (
+    "SELECT stat_id, SUM(value) AS value FROM gv$sysstat "
+    "WHERE stat_id IN (40000,40002,40004,40006,40008,30005,50008,50009) "
+    "AND class < 1000 GROUP BY stat_id"
+)
+# gv$ 不可达（低权限/老版本）时退回本机 v$：仅统计当前 observer，口径略窄但可用
+OB_STAT_SQL_LOCAL = (
+    "SELECT stat_id, SUM(value) AS value FROM v$sysstat "
+    "WHERE stat_id IN (40000,40002,40004,40006,40008,30005,50008,50009) "
+    "AND class < 1000 GROUP BY stat_id"
+)
+# OB 租户 information_schema.tables 的 data_length/index_length 在未 ANALYZE 前
+# 常为 NULL，SUM 全 NULL 会把 total_mb 变 None（前端显示 0），COALESCE 加固
+OB_TBS_SQL = (
+    "SELECT table_schema AS name, "
+    "ROUND(SUM(COALESCE(data_length, 0) + COALESCE(index_length, 0)) / 1048576, 1) AS total_mb "
+    "FROM information_schema.tables GROUP BY table_schema "
+    "ORDER BY total_mb DESC LIMIT 10"
+)
+
 PG_STAT_SQL = (
     "SELECT "
     "(SELECT COALESCE(SUM(xact_commit), 0) FROM pg_stat_database) AS xact_commit, "
@@ -112,6 +144,10 @@ ORACLE_STAT_SQL = (
 ORACLE_TBS_SQL = (
     "SELECT df.tablespace_name AS name, "
     "ROUND(SUM(df.bytes) / 1048576, 1) AS total_mb, "
+    # 最大可用容量：AUTOEXTEND 数据文件取 MAXBYTES 上限（无上限/未开启取当前 bytes），
+    # 剩余率按「最大可用」口径计算，避免可扩展表空间误告警（#61）
+    "ROUND(SUM(CASE WHEN df.autoextensible = 'YES' "
+    "            THEN GREATEST(df.maxbytes, df.bytes) ELSE df.bytes END) / 1048576, 1) AS max_mb, "
     "ROUND(NVL(SUM(fr.free_bytes), 0) / 1048576, 1) AS free_mb "
     "FROM dba_data_files df "
     "LEFT JOIN (SELECT tablespace_name, SUM(bytes) AS free_bytes "
@@ -126,10 +162,37 @@ ORACLE_REPL_SQL = (
 
 ORACLE_LOCKS_SQL = "SELECT count(*) AS n FROM v$session WHERE blocking_session IS NOT NULL"
 
+# ── RAC / ADG 身份与配对（监控用户权限要求不高于现有 v$sysstat / v$dataguard_stats）──
+# v$database：角色（PRIMARY / PHYSICAL STANDBY…）+ 集群唯一名（RAC 各实例相同）+ open_mode
+ORACLE_IDENTITY_SQL = (
+    "SELECT database_role, db_unique_name, name, open_mode FROM v$database"
+)
+# v$instance：RAC 实例身份（单机也返回一行：instance_number=1）
+ORACLE_INSTANCE_SQL = (
+    "SELECT instance_name, instance_number, host_name FROM v$instance"
+)
+# 主库侧归档目的地：声明往哪些 db_unique_name 送 redo → 前端自动画主备配对线
+ORACLE_DEST_SQL = (
+    "SELECT db_unique_name, status FROM v$archive_dest "
+    "WHERE status = 'VALID' AND destination IS NOT NULL"
+)
+
+# SQL Server 性能计数器名随服务器语言本地化：中文实例的 sys.dm_os_performance_counters
+# 返回「批请求/秒」「事务数/秒」等而非英文名，只匹配英文名在中文实例上查 0 行
+# → 大屏 QPS/TPS 恒空（连接数正常、sa 权限正常却无吞吐的典型症状）。
+# 匹配表收录英/中命名 → 统一指标键；SQLSERVER_STAT_SQL 的 IN 清单由表键派生，保证两边同步。
+SQLSERVER_COUNTER_MAP = {
+    'batch requests/sec': 'batch_req', '批请求/秒': 'batch_req',
+    'transactions/sec': 'trans', '事务数/秒': 'trans',
+    'buffer cache hit ratio': 'hit', '缓冲区高速缓存命中率': 'hit',
+    'buffer cache hit ratio base': 'hit_base', '缓冲区高速缓存命中率基': 'hit_base',
+}
+
 SQLSERVER_STAT_SQL = (
     "SELECT counter_name, cntr_value FROM sys.dm_os_performance_counters "
-    "WHERE counter_name IN ('Batch Requests/sec','Transactions/sec',"
-    "'Buffer cache hit ratio','Buffer cache hit ratio base')"
+    "WHERE counter_name IN (%s)" % ",".join(
+        ("N'%s'" if any(ord(c) > 127 for c in k) else "'%s'") % k.replace("'", "''")
+        for k in SQLSERVER_COUNTER_MAP)
 )
 
 SQLSERVER_LOCKS_SQL = (
@@ -151,6 +214,9 @@ DM_STAT_SQL = (
 DM_TBS_SQL = (
     "SELECT df.tablespace_name AS name, "
     "ROUND(SUM(df.bytes) / 1048576, 1) AS total_mb, "
+    # 同 ORACLE_TBS_SQL：按 AUTOEXTEND 上限计算最大可用容量，剩余率防误告警（#61）
+    "ROUND(SUM(CASE WHEN df.autoextensible = 'YES' "
+    "            THEN GREATEST(df.maxbytes, df.bytes) ELSE df.bytes END) / 1048576, 1) AS max_mb, "
     "ROUND(NVL(SUM(fr.free_bytes), 0) / 1048576, 1) AS free_mb "
     "FROM dba_data_files df "
     "LEFT JOIN (SELECT tablespace_name, SUM(bytes) AS free_bytes "
@@ -255,7 +321,8 @@ SCREEN_SQLS = {
     'pg': {'stat': PG_STAT_SQL, 'tbs': PG_TBS_SQL, 'repl': PG_REPL_SQL,
            'locks': PG_LOCKS_SQL},
     'oracle': {'stat': ORACLE_STAT_SQL, 'tbs': ORACLE_TBS_SQL, 'repl': ORACLE_REPL_SQL,
-               'locks': ORACLE_LOCKS_SQL},
+               'locks': ORACLE_LOCKS_SQL, 'identity': ORACLE_IDENTITY_SQL,
+               'inst': ORACLE_INSTANCE_SQL, 'dest': ORACLE_DEST_SQL},
     'sqlserver': {'stat': SQLSERVER_STAT_SQL, 'tbs': SQLSERVER_TBS_SQL,
                   'locks': SQLSERVER_LOCKS_SQL},
     'dm': {'stat': DM_STAT_SQL, 'tbs': DM_TBS_SQL, 'repl': DM_REPL_SQL,
@@ -287,6 +354,22 @@ def _sum_or_none(*vals):
     if any(v is None for v in vals):
         return None
     return sum(_num(v) for v in vals)
+
+
+def _tbs_free_pct(total_mb, max_mb, free_mb):
+    """表空间剩余率：优先按「最大可用容量」(含 datafile AUTOEXTEND 上限 MAXBYTES) 计算，
+    避免 autoextend 表空间因未计入可扩展空间而误告警（#61）；
+    无 autoextend / 取不到上限时退化为「当前分配容量」口径，行为不变。"""
+    total_mb = _num(total_mb)
+    max_mb = _num(max_mb)
+    free_mb = _num(free_mb)
+    if max_mb and max_mb > 0:
+        used = (total_mb or 0) - free_mb
+        free_max = max_mb - used
+        return round(free_max / max_mb * 100, 1)
+    if total_mb and total_mb > 0:
+        return round(free_mb / total_mb * 100, 1)
+    return None
 
 
 def _find_key(row, *keywords):
@@ -391,7 +474,16 @@ def collect_extra(engine, instance_id, db_type):
     """
     fam = db_family(db_type)
     sqls = SCREEN_SQLS.get(fam) if fam else None
-    counters, extras = {}, {'tbs': None, 'repl_lag_s': None, 'lock_waits': None}
+    if sqls and normalize_db_type(db_type) == 'oceanbase':
+        # OceanBase（MySQL 租户）：计数器换 OB 原生 v$sysstat，容量查询 COALESCE 加固
+        sqls = dict(sqls, ob_stat=OB_STAT_SQL, ob_stat_local=OB_STAT_SQL_LOCAL,
+                    tbs=OB_TBS_SQL)
+    counters, extras = {}, {'tbs': None, 'repl_lag_s': None, 'lock_waits': None,
+                            # RAC / ADG 身份与配对（仅 oracle family 填充，其余保持 None）
+                            'role': None, 'db_unique_name': None, 'db_name': None,
+                            'open_mode': None, 'instance_name': None,
+                            'instance_number': None, 'dests': None,
+                            'transport_lag_s': None, 'apply_lag_s': None}
     if not sqls:
         return counters, extras
 
@@ -411,24 +503,50 @@ def collect_extra(engine, instance_id, db_type):
             return None
 
     if fam == 'mysql':
-        rows = q('stat')
-        st = {}
-        for r in rows or []:
-            k = _find_key(r, 'variable_name')
-            v = _find_key(r, 'value')
-            if k is not None:
-                st[str(k).lower()] = _num(v)
-        counters = {
-            'questions': st.get('questions'),
-            'com_commit': st.get('com_commit'),
-            'com_rollback': st.get('com_rollback'),
-            'buf_reads': st.get('innodb_buffer_pool_read_requests'),
-            'buf_disk': st.get('innodb_buffer_pool_reads'),
-        }
+        if normalize_db_type(db_type) == 'oceanbase':
+            # ── OceanBase：SHOW GLOBAL STATUS 在 OB 上无 Queries/Com_* 计数器，
+            # QPS/TPS/缓存命中走 OB 原生 v$sysstat（stat_id 口径同 OCP 官方）。
+            # counters 键名复用 _rate 的既有组合：
+            #   QPS ← 'questions'；TPS ← 'com_commit'+'com_rollback'；
+            #   缓存命中 ← 'hit'/'hit_base'（_commit_snap 直接算百分比）
+            rows = q('ob_stat') or q('ob_stat_local')
+            st = {}
+            for r in rows or []:
+                sid = int(_num(_find_key(r, 'stat_id'), -1))
+                if sid >= 0:
+                    st[sid] = _num(_find_key(r, 'value'))
+            ob_qps = sum((st.get(i) or 0) for i in OB_QPS_STAT_IDS) if st else None
+            ob_tps = st.get(OB_TPS_STAT_ID)
+            c_hit = st.get(OB_CACHE_HIT_STAT_ID)
+            c_miss = st.get(OB_CACHE_MISS_STAT_ID)
+            counters = {}
+            if ob_qps:
+                counters['questions'] = ob_qps
+            if ob_tps is not None:
+                counters['com_commit'] = ob_tps
+                counters['com_rollback'] = 0
+            if c_hit is not None and c_miss is not None and (c_hit + c_miss) > 0:
+                counters['hit'] = c_hit
+                counters['hit_base'] = c_hit + c_miss
+        else:
+            rows = q('stat')
+            st = {}
+            for r in rows or []:
+                k = _find_key(r, 'variable_name')
+                v = _find_key(r, 'value')
+                if k is not None:
+                    st[str(k).lower()] = _num(v)
+            counters = {
+                'questions': st.get('questions'),
+                'com_commit': st.get('com_commit'),
+                'com_rollback': st.get('com_rollback'),
+                'buf_reads': st.get('innodb_buffer_pool_read_requests'),
+                'buf_disk': st.get('innodb_buffer_pool_reads'),
+            }
         tbs = q('tbs')
         if tbs:
             extras['tbs'] = [
-                {'name': r.get('name'), 'total_mb': _num(r.get('total_mb')),
+                {'name': _find_key(r, 'name'), 'total_mb': _num(_find_key(r, 'total_mb')),
                  'free_mb': None, 'free_pct': None} for r in tbs]
         repl = q('repl8') or q('repl')
         if repl:
@@ -448,7 +566,7 @@ def collect_extra(engine, instance_id, db_type):
         tbs = q('tbs')
         if tbs:
             extras['tbs'] = [
-                {'name': r.get('name'), 'total_mb': _num(r.get('total_mb')),
+                {'name': _find_key(r, 'name'), 'total_mb': _num(_find_key(r, 'total_mb')),
                  'free_mb': None, 'free_pct': None} for r in tbs]
         repl = q('repl')
         if repl:
@@ -475,17 +593,52 @@ def collect_extra(engine, instance_id, db_type):
         tbs = q('tbs')
         if tbs:
             extras['tbs'] = [
-                {'name': r.get('name'), 'total_mb': _num(r.get('total_mb')),
-                 'free_mb': _num(r.get('free_mb')),
-                 'free_pct': (round(_num(r.get('free_mb')) / _num(r.get('total_mb')) * 100, 1)
-                              if _num(r.get('total_mb')) > 0 else None)}
+                {'name': _find_key(r, 'name'), 'total_mb': _num(_find_key(r, 'total_mb')),
+                 'max_mb': _num(_find_key(r, 'max_mb')),
+                 'free_mb': _num(_find_key(r, 'free_mb')),
+                 'free_pct': _tbs_free_pct(_find_key(r, 'total_mb'), _find_key(r, 'max_mb'), _find_key(r, 'free_mb'))}
                 for r in tbs]
         repl = q('repl')
         if repl:
-            lags = [_parse_dg_lag(_find_key(r, 'value')) for r in repl]
-            lags = [l for l in lags if l is not None]
+            # transport lag / apply lag 分开保留（ADG 传输线分开标注），repl_lag_s 取最差
+            for r in repl:
+                nm = str(_find_key(r, 'name') or '').lower()
+                lag = _parse_dg_lag(_find_key(r, 'value'))
+                if lag is None:
+                    continue
+                if 'transport' in nm:
+                    extras['transport_lag_s'] = lag
+                elif 'apply' in nm:
+                    extras['apply_lag_s'] = lag
+            lags = [l for l in (extras['transport_lag_s'], extras['apply_lag_s'])
+                    if l is not None]
             if lags:
                 extras['repl_lag_s'] = max(lags)
+        # RAC / ADG 身份（低权限/单机/查询失败均优雅降级为 None，不影响其它指标）
+        ident = q('identity')
+        if ident:
+            m = {str(k).lower(): v for k, v in (ident[0] or {}).items()}
+            # 精确小写列名取值（_find_key 模糊匹配会被 db_unique_name 含 'name' 干扰）
+            extras['role'] = (str(m.get('database_role') or '').strip() or None)
+            extras['db_unique_name'] = (str(m.get('db_unique_name') or '').strip() or None)
+            extras['db_name'] = (str(m.get('name') or '').strip() or None)
+            extras['open_mode'] = (str(m.get('open_mode') or '').strip() or None)
+        inst_rows = q('inst')
+        if inst_rows:
+            m2 = {str(k).lower(): v for k, v in (inst_rows[0] or {}).items()}
+            inum = _num(m2.get('instance_number'), 0)
+            extras['instance_name'] = (str(m2.get('instance_name') or '').strip() or None)
+            extras['instance_number'] = int(inum) if inum else None
+        dest_rows = q('dest')
+        if dest_rows:
+            dests = []
+            for r in dest_rows:
+                m3 = {str(k).lower(): v for k, v in (r or {}).items()}
+                dn = str(m3.get('db_unique_name') or '').strip()
+                if dn and dn not in dests:
+                    dests.append(dn)
+            if dests:
+                extras['dests'] = dests
         locks = q('locks')
         if locks:
             extras['lock_waits'] = int(_num(_scalar(locks)))
@@ -507,10 +660,10 @@ def collect_extra(engine, instance_id, db_type):
         tbs = q('tbs')
         if tbs:
             extras['tbs'] = [
-                {'name': r.get('name'), 'total_mb': _num(r.get('total_mb')),
-                 'free_mb': _num(r.get('free_mb')),
-                 'free_pct': (round(_num(r.get('free_mb')) / _num(r.get('total_mb')) * 100, 1)
-                              if _num(r.get('total_mb')) > 0 else None)}
+                {'name': _find_key(r, 'name'), 'total_mb': _num(_find_key(r, 'total_mb')),
+                 'max_mb': _num(_find_key(r, 'max_mb')),
+                 'free_mb': _num(_find_key(r, 'free_mb')),
+                 'free_pct': _tbs_free_pct(_find_key(r, 'total_mb'), _find_key(r, 'max_mb'), _find_key(r, 'free_mb'))}
                 for r in tbs]
         repl = q('repl')
         if repl:
@@ -527,18 +680,22 @@ def collect_extra(engine, instance_id, db_type):
         st = {}
         for r in rows or []:
             k = _find_key(r, 'counter_name')
-            if k is not None:
-                st[str(k).lower()] = _num(_find_key(r, 'cntr_value'))
+            if k is None:
+                continue
+            ck = SQLSERVER_COUNTER_MAP.get(str(k).strip().lower())
+            if ck:
+                # 同计数器多行（如 Transactions/sec 按库一行）累加，得实例级总值
+                st[ck] = st.get(ck, 0) + _num(_find_key(r, 'cntr_value'))
         counters = {
-            'batch_req': st.get('batch requests/sec'),
-            'trans': st.get('transactions/sec'),
-            'hit': st.get('buffer cache hit ratio'),
-            'hit_base': st.get('buffer cache hit ratio base'),
+            'batch_req': st.get('batch_req'),
+            'trans': st.get('trans'),
+            'hit': st.get('hit'),
+            'hit_base': st.get('hit_base'),
         }
         tbs = q('tbs')
         if tbs:
             extras['tbs'] = [
-                {'name': r.get('name'), 'total_mb': _num(r.get('total_mb')),
+                {'name': _find_key(r, 'name'), 'total_mb': _num(_find_key(r, 'total_mb')),
                  'free_mb': None, 'free_pct': None} for r in tbs]
         locks = q('locks')
         if locks:
@@ -561,7 +718,7 @@ def collect_extra(engine, instance_id, db_type):
         tbs = q('tbs')
         if tbs:
             extras['tbs'] = [
-                {'name': r.get('name'), 'total_mb': _num(r.get('total_mb')),
+                {'name': _find_key(r, 'name'), 'total_mb': _num(_find_key(r, 'total_mb')),
                  'free_mb': None, 'free_pct': None} for r in tbs]
         repl = q('repl')
         if repl:
@@ -592,10 +749,10 @@ def collect_extra(engine, instance_id, db_type):
         tbs = q('tbs')
         if tbs:
             extras['tbs'] = [
-                {'name': r.get('name'), 'total_mb': _num(r.get('total_mb')),
-                 'free_mb': _num(r.get('free_mb')),
-                 'free_pct': (round(_num(r.get('free_mb')) / _num(r.get('total_mb')) * 100, 1)
-                              if _num(r.get('total_mb')) > 0 else None)}
+                {'name': _find_key(r, 'name'), 'total_mb': _num(_find_key(r, 'total_mb')),
+                 'free_mb': _num(_find_key(r, 'free_mb')),
+                 'free_pct': (round(_num(_find_key(r, 'free_mb')) / _num(_find_key(r, 'total_mb')) * 100, 1)
+                              if _num(_find_key(r, 'total_mb')) > 0 else None)}
                 for r in tbs]
         repl = q('repl')
         if repl:
@@ -623,7 +780,7 @@ def collect_extra(engine, instance_id, db_type):
         tbs = q('tbs')
         if tbs:
             extras['tbs'] = [
-                {'name': r.get('name'), 'total_mb': _num(r.get('total_mb')),
+                {'name': _find_key(r, 'name'), 'total_mb': _num(_find_key(r, 'total_mb')),
                  'free_mb': None, 'free_pct': None} for r in tbs]
         repl = q('repl')
         if repl:
@@ -649,6 +806,9 @@ class ScreenCollector:
     HISTORY = 60           # 每实例保留采样点数（15s × 60 ≈ 15 分钟）
     TREND_POINTS = 60      # 全库 QPS 趋势点数
     MAX_WORKERS = 8        # 单轮并发采集线程数
+    # 速率防噪（#63）：计数器类指标做差求速率时，异常样本不得污染大屏
+    DT_MIN_RATIO = 0.3     # 实际时间差低于「采样间隔 × 此系数」视为抖动样本，丢弃
+    QPS_SPIKE_MAX = 100000 # 单实例 QPS 物理不可能阈值，超出记为采样异常、不进 KPI
 
     # 阈值（与设计文档一致）
     WARN_CONN_UTIL, CRIT_CONN_UTIL = 80.0, 95.0
@@ -873,6 +1033,10 @@ class ScreenCollector:
         （如 MySQL TPS = Com_commit + Com_rollback）。
         pg 家族无语句级计数（除非装 pg_stat_statements），以事务率
         （xact_commit + xact_rollback）作为 QPS 近似与 TPS。
+
+        增量为负说明计数器被重置（实例重启 / PMU 归零 / 跨实例切换），
+        此时速率无意义，返回 None 由调用方标记 reset——不再用 0 兜底
+        造成"突然掉零"的假谷（#63）。
         """
         if kind == 'qps':
             combos = (('questions',), ('exec_count',), ('batch_req',),
@@ -883,7 +1047,9 @@ class ScreenCollector:
         for combo in combos:
             if all(prev_c.get(k) is not None for k in combo):
                 dv = sum((cur_c.get(k) or 0) - (prev_c.get(k) or 0) for k in combo)
-                return max(dv / dt, 0.0)
+                if dv < 0:
+                    return None
+                return dv / dt
         return None
 
     def _collect_one(self, engine, inst, conn_data, slow_data):
@@ -900,6 +1066,9 @@ class ScreenCollector:
             'ts': time.time(),
             'conn': None, 'slowq': 0, 'qps': None, 'tps': None,
             'cache_hit_pct': None, 'lock_waits': None, 'repl_lag_s': None,
+            'role': None, 'db_unique_name': None, 'db_name': None, 'open_mode': None,
+            'instance_name': None, 'instance_number': None, 'dests': None,
+            'transport_lag_s': None, 'apply_lag_s': None,
             'tbs': None, 'err': None, 'status': 'ok', 'counters': {},
             'stat_hint': None,
             # 下钻明细：连接/会话 与 慢查询 逐行（截顶脱敏，详见 _sanitize_rows）
@@ -927,6 +1096,11 @@ class ScreenCollector:
             snap['repl_lag_s'] = nd.get('repl_lag_s')
             snap['lock_waits'] = nd.get('lock_waits')
             snap['slowq'] = nd.get('slowq') or 0
+            # NoSQL 原生通道的逐行明细（Redis CLIENT LIST / SLOWLOG 等）：
+            # 经脱敏投影（剔除凭据列、截顶、值截断）后填入下钻 tab，与 SQL 通道同口径。
+            snap['conn_rows'] = _sanitize_rows(nd.get('conn_rows'))
+            snap['slow_rows'] = _sanitize_rows(nd.get('slow_rows'))
+            snap['conn_err'] = None
             snap['status'] = self._derive_status(snap)
             return snap
 
@@ -950,12 +1124,28 @@ class ScreenCollector:
                 'blocked': (cd.get('connections') or {}).get('blocked', 0),
             }
         else:
-            snap['err'] = '监控引擎暂无该实例数据'
+            # 引擎本轮尚未采到该实例（启动竞态/新加实例/引擎未就绪）：
+            # 不能凭空判 ok（假绿误导），也不能判 down（误触发告警），
+            # 保持 pending（连接中），等下一轮真实采集结果再落定状态；
+            # 不设 err，避免卡片右上角出现「有错误」角标。
+            snap['status'] = 'pending'
         sd = slow_data.get(iid)
         snap['slowq'] = len(sd.get('data') or []) if sd and not sd.get('error') else 0
         # 下钻明细：连接/会话 与 慢查询 逐行（复用 engine 本轮采集结果，不引入新 SQL）
         snap['conn_rows'] = _sanitize_rows(cd.get('data') if (cd and not cd.get('error')) else None)
         snap['slow_rows'] = _sanitize_rows(sd.get('data') if (sd and not sd.get('error')) else None)
+        # 连接采集真实失败（排除「不支持的类型」这种能力缺失）→ 透传前端，
+        # 避免连接会话 tab 一律显示误导性的「可能不支持连接采集」，让用户看到
+        # 真实 ORA 错误（如 ORA-00942 权限、JDBC 连接失败、service_name 落空等）。
+        if cd and cd.get('error') and '不支持的类型' not in str(cd['error']):
+            snap['conn_err'] = str(cd['error'])
+        else:
+            snap['conn_err'] = None
+        # 「已连接但无其它活跃会话」：连接/SQL 均成功，仅因实例上当前只有监控
+        # 自身一个连接（连接 SQL 排除自身后 0 行）。属正常空状态，绝不能回落为
+        # 「不支持连接采集」，否则会误导用户以为该类型不支持。前端据此显示中性文案。
+        if cd and not cd.get('error') and not cd.get('data'):
+            snap['conn_no_sessions'] = True
         if sd and sd.get('error') and not snap['err']:
             # 慢查询模板缺失同属能力缺失，不得作为 err 标红；
             # 但真实 SQL 失败仍要判 down（即便连接采集不支持、慢查失败是实打实的探活失败）。
@@ -971,6 +1161,12 @@ class ScreenCollector:
             snap['tbs'] = extras.get('tbs')
             snap['repl_lag_s'] = extras.get('repl_lag_s')
             snap['lock_waits'] = extras.get('lock_waits')
+            # RAC / ADG 身份与配对（oracle 专属；None 不覆盖保持快照结构稳定）
+            for k in ('role', 'db_unique_name', 'db_name', 'open_mode',
+                      'instance_name', 'instance_number', 'dests',
+                      'transport_lag_s', 'apply_lag_s'):
+                if extras.get(k) is not None:
+                    snap[k] = extras[k]
             # 性能计数一条都没拿到时，把失败原因（权限提示码）透传给大屏
             if extras.get('stat_hint') and not any(
                     v is not None for v in (counters or {}).values()):
@@ -978,8 +1174,10 @@ class ScreenCollector:
         except Exception as e:
             print('[screen] extra 采集失败 %s: %s' % (snap['label'], e), flush=True)
 
-        # 3) 状态判定
-        if snap['status'] != 'down':
+        # 3) 状态判定（pending = 本轮未探活成功，不参与阈值派生，留给下一轮落定）
+        # unsupported（无采集模板的能力缺失）同样不得进入阈值派生——
+        # conn/tbs 全空会被 _derive_status 派生成 ok 假绿（OB 漏注册模板期间实测）。
+        if snap['status'] not in ('down', 'pending', 'unsupported'):
             snap['status'] = self._derive_status(snap)
         return snap
 
@@ -1018,6 +1216,9 @@ class ScreenCollector:
             'ts': ts,
             'conn': None, 'slowq': 0, 'qps': None, 'tps': None,
             'cache_hit_pct': None, 'lock_waits': None, 'repl_lag_s': None,
+            'role': None, 'db_unique_name': None, 'db_name': None, 'open_mode': None,
+            'instance_name': None, 'instance_number': None, 'dests': None,
+            'transport_lag_s': None, 'apply_lag_s': None,
             'tbs': None, 'err': err, 'status': 'pending', 'counters': {},
             'stat_hint': None, 'pending': True,
             'conn_rows': [], 'slow_rows': [],
@@ -1031,7 +1232,17 @@ class ScreenCollector:
 
     def _commit_snap(self, snap):
         """单实例快照增量提交：计算速率（有 prev 时）+ 写入 _snap/_prev/_spark。
-        由 _round 的 as_completed 循环逐条调用，做到「谁先采完谁先显示」。"""
+        由 _round 的 as_completed 循环逐条调用，做到「谁先采完谁先显示」。
+
+        速率防噪三层（#63 Oracle QPS 偶发冲高）：
+        ① 采样身份一致性——计数器是实例级口径，RAC / 负载均衡下两次采样
+           若落在不同实例（instance_number / db_unique_name 变化），做差
+           得到的值毫无意义，本轮直接作废；
+        ② 时间差有效性——实际间隔远小于采样周期说明调度抖动，放大会把
+           正常增量算成尖峰，抖动样本丢弃；
+        ③ 尖峰封顶——超出物理阈值记为采样异常（保留原值供排查），
+           但不进 KPI 与迷你趋势，避免误导。
+        """
         if not snap or 'id' not in snap:
             return
         iid = snap['id']
@@ -1039,16 +1250,35 @@ class ScreenCollector:
         with self._lock:
             prev = self._prev.get(iid)
             if prev and snap.get('counters'):
-                dt = max(ts - prev['ts'], 0.001)
-                qps = self._rate(prev['counters'], snap['counters'], dt, 'qps')
-                tps = self._rate(prev['counters'], snap['counters'], dt, 'tps')
-                snap['qps'] = round(qps, 1) if qps is not None else None
-                snap['tps'] = round(tps, 1) if tps is not None else None
-                if snap.get('counters', {}).get('hit_base'):
-                    h = snap['counters'].get('hit') or 0
-                    b = snap['counters']['hit_base']
-                    snap['cache_hit_pct'] = round(h / b * 100, 1) if b else None
-            self._prev[iid] = {'ts': ts, 'counters': dict(snap.get('counters') or {})}
+                cur_id = (snap.get('instance_number'), snap.get('db_unique_name'))
+                prev_id = (prev.get('inum'), prev.get('dbname'))
+                id_mismatch = (cur_id[0] is not None and prev_id[0] is not None
+                               and cur_id[0] != prev_id[0])
+                dt = ts - prev['ts']
+                dt_valid = dt >= self.INTERVAL * self.DT_MIN_RATIO
+                if id_mismatch:
+                    snap['rate_note'] = 'instance_changed'
+                elif not dt_valid:
+                    snap['rate_note'] = 'dt_too_small'
+                else:
+                    dt = max(dt, 0.001)
+                    qps = self._rate(prev['counters'], snap['counters'], dt, 'qps')
+                    tps = self._rate(prev['counters'], snap['counters'], dt, 'tps')
+                    if qps is not None and qps > self.QPS_SPIKE_MAX:
+                        snap['qps_raw'] = round(qps, 1)
+                        snap['rate_note'] = 'spike'
+                        qps = None
+                    snap['qps'] = round(qps, 1) if qps is not None else None
+                    snap['tps'] = round(tps, 1) if tps is not None else None
+                    if qps is None:
+                        snap['rate_note'] = snap.get('rate_note') or 'counter_reset'
+                    if snap.get('counters', {}).get('hit_base'):
+                        h = snap['counters'].get('hit') or 0
+                        b = snap['counters']['hit_base']
+                        snap['cache_hit_pct'] = round(h / b * 100, 1) if b else None
+            self._prev[iid] = {'ts': ts, 'counters': dict(snap.get('counters') or {}),
+                               'inum': snap.get('instance_number'),
+                               'dbname': snap.get('db_unique_name')}
             self._snap[iid] = {k: v for k, v in snap.items() if k != 'counters'}
             if snap.get('qps') is not None:
                 sp = self._spark.setdefault(iid, deque(maxlen=self.HISTORY))
@@ -1095,6 +1325,11 @@ def _build_nodes(snap):
             'qps': s.get('qps'), 'tps': s.get('tps'),
             'cache_hit_pct': s.get('cache_hit_pct'),
             'lock_waits': s.get('lock_waits'), 'repl_lag_s': s.get('repl_lag_s'),
+            'role': s.get('role'), 'db_unique_name': s.get('db_unique_name'),
+            'db_name': s.get('db_name'), 'open_mode': s.get('open_mode'),
+            'instance_name': s.get('instance_name'), 'instance_number': s.get('instance_number'),
+            'dests': s.get('dests'),
+            'transport_lag_s': s.get('transport_lag_s'), 'apply_lag_s': s.get('apply_lag_s'),
             'tbs': s.get('tbs'), 'tbs_free_pct': worst_tbs,
             'spark': s.get('spark') or [],
             'stat_hint': s.get('stat_hint'),
@@ -1139,13 +1374,23 @@ def assemble_overview(nodes, collector, trend=None):
                                        (n.get('conn') or {}).get('max_conn', 0))}
                  for n in nodes if n.get('conn')]
     tbs_list = []
+    tbs_used_list = []
     for n in nodes:
         for t in (n.get('tbs') or []):
-            if t.get('free_pct') is not None:
+            fp = t.get('free_pct')
+            if fp is not None:
                 tbs_list.append({'id': n['id'], 'name': '%s · %s' % (n['name'], t['name']),
-                                 'db_type': n['db_type'], 'value': t['free_pct'],
-                                 'total_mb': t.get('total_mb')})
+                                 'db_type': n['db_type'], 'value': fp,
+                                 'total_mb': t.get('total_mb'), 'unit': '%', 'kind': 'free'})
+            elif t.get('total_mb') is not None:
+                # MySQL/PG/SQLServer/GBase/ClickHouse 等只能采到「已用大小」，
+                # 无 free 列 → free_pct 恒为 None；退而求其次按已用 MB 排名，
+                # 让表空间图对这类库也有数据（标题与单位随 kind 自适应）。
+                tbs_used_list.append({'id': n['id'], 'name': '%s · %s' % (n['name'], t['name']),
+                                      'db_type': n['db_type'], 'value': t['total_mb'],
+                                      'total_mb': t.get('total_mb'), 'unit': 'MB', 'kind': 'used'})
     tbs_worst = sorted(tbs_list, key=lambda x: x['value'])[:10]
+    tbs_used = sorted(tbs_used_list, key=lambda x: x['value'], reverse=True)[:10]
     repl_list = [{'id': n['id'], 'name': n['name'], 'db_type': n['db_type'],
                   'value': n.get('repl_lag_s')} for n in nodes if n.get('repl_lag_s') is not None]
     lock_list = [{'id': n['id'], 'name': n['name'], 'db_type': n['db_type'],
@@ -1167,6 +1412,7 @@ def assemble_overview(nodes, collector, trend=None):
         'slowq': _topn([{'id': n['id'], 'name': n['name'], 'db_type': n['db_type'],
                          'value': n['slowq']} for n in nodes], 'value'),
         'tbs_worst': tbs_worst,
+        'tbs_used': tbs_used,
         'repl_lag': _topn(repl_list, 'value'),
         'lock_wait': _topn(lock_list, 'value'),
     }
@@ -1210,6 +1456,9 @@ def assemble_overview(nodes, collector, trend=None):
         'trend': [{'ts': t['ts'], 'qps': t['qps']} for t in trend],
         'alerts': alerts[:50],
         'nodes': nodes,
+        # OceanBase 表空间统计取自 information_schema，需 ANALYZE TABLE 后才准确；
+        # 拓扑中存在 OceanBase 实例时，前端在表空间面板常驻一条弱提示。
+        'tbs_analyze_hint': any(normalize_db_type(n.get('db_type')) == 'oceanbase' for n in nodes),
     }
 
 
@@ -1294,97 +1543,6 @@ def build_history_overview(from_ts, to_ts, at_ts):
     trend = [{'ts': t, 'qps': round(agg[t], 1)} for t in sorted(agg)]
 
     return assemble_overview(nodes, collector, trend=trend)
-
-
-    # 分组（数据源自带 group 字段）
-    groups = {}
-    for n in nodes:
-        g = groups.setdefault(n['group'], {'name': n['group'], 'total': 0,
-                                           'ok': 0, 'warn': 0, 'crit': 0, 'down': 0})
-        g['total'] += 1
-        g[n['status']] = g.get(n['status'], 0) + 1
-
-    # TopN（危险优先：tbs_worst 按 free_pct 升序）
-    conn_list = [{'id': n['id'], 'name': n['name'], 'db_type': n['db_type'],
-                  'value': (n.get('conn') or {}).get('usage_pct') or 0,
-                  'detail': '%s/%s' % ((n.get('conn') or {}).get('total', 0),
-                                       (n.get('conn') or {}).get('max_conn', 0))}
-                 for n in nodes if n.get('conn')]
-    tbs_list = []
-    for n in nodes:
-        for t in (snap[n['id']].get('tbs') or []):
-            if t.get('free_pct') is not None:
-                tbs_list.append({'id': n['id'], 'name': '%s · %s' % (n['name'], t['name']),
-                                 'db_type': n['db_type'], 'value': t['free_pct'],
-                                 'total_mb': t.get('total_mb')})
-    tbs_worst = sorted(tbs_list, key=lambda x: x['value'])[:10]
-    repl_list = [{'id': n['id'], 'name': n['name'], 'db_type': n['db_type'],
-                  'value': n['repl_lag_s']} for n in nodes if n.get('repl_lag_s') is not None]
-    lock_list = [{'id': n['id'], 'name': n['name'], 'db_type': n['db_type'],
-                  'value': n['lock_waits']} for n in nodes if n.get('lock_waits') is not None]
-    # 连接数 / 活跃会话 TopN（连接数为主排序，会话数按实例名对齐展示）
-    conn_total_list = [{'id': n['id'], 'name': n['name'], 'db_type': n['db_type'],
-                        'value': (n.get('conn') or {}).get('total') or 0}
-                       for n in nodes if n.get('conn')]
-    sess_list = [{'id': n['id'], 'name': n['name'], 'db_type': n['db_type'],
-                  'value': (n.get('conn') or {}).get('active') or 0}
-                 for n in nodes if n.get('conn')]
-
-    topn = {
-        'qps': _topn([{'id': n['id'], 'name': n['name'], 'db_type': n['db_type'],
-                       'value': n['qps']} for n in nodes], 'value'),
-        'conn_util': _topn(conn_list, 'value'),
-        'conn_total': _topn(conn_total_list, 'value'),
-        'sess_active': _topn(sess_list, 'value'),
-        'slowq': _topn([{'id': n['id'], 'name': n['name'], 'db_type': n['db_type'],
-                         'value': n['slowq']} for n in nodes], 'value'),
-        'tbs_worst': tbs_worst,
-        'repl_lag': _topn(repl_list, 'value'),
-        'lock_wait': _topn(lock_list, 'value'),
-    }
-
-    # 告警滚动（crit 在前，最新在前）
-    alerts = []
-    for n in nodes:
-        if n['status'] == 'down':
-            alerts.append({'level': 'crit', 'id': n['id'], 'name': n['name'],
-                           'msg': '实例探活失败' + (('：' + n['err']) if n.get('err') else ''),
-                           'ts': n.get('ts') or ts})
-            continue
-        cu = (n.get('conn') or {}).get('usage_pct') or 0
-        if n.get('tbs_free_pct') is not None and n['tbs_free_pct'] <= collector.CRIT_TBS_FREE:
-            alerts.append({'level': 'crit', 'id': n['id'], 'name': n['name'],
-                           'msg': '表空间剩余 %.1f%%' % n['tbs_free_pct'], 'ts': ts})
-        elif n.get('tbs_free_pct') is not None and n['tbs_free_pct'] <= collector.WARN_TBS_FREE:
-            alerts.append({'level': 'warn', 'id': n['id'], 'name': n['name'],
-                           'msg': '表空间剩余 %.1f%%' % n['tbs_free_pct'], 'ts': ts})
-        if cu >= collector.CRIT_CONN_UTIL:
-            alerts.append({'level': 'crit', 'id': n['id'], 'name': n['name'],
-                           'msg': '连接利用率 %.0f%%' % cu, 'ts': ts})
-        elif cu >= collector.WARN_CONN_UTIL:
-            alerts.append({'level': 'warn', 'id': n['id'], 'name': n['name'],
-                           'msg': '连接利用率 %.0f%%' % cu, 'ts': ts})
-        lag = n.get('repl_lag_s')
-        if lag is not None and lag >= collector.WARN_REPL_LAG:
-            alerts.append({'level': 'crit' if lag >= collector.CRIT_REPL_LAG else 'warn',
-                           'id': n['id'], 'name': n['name'],
-                           'msg': '复制延迟 %ds' % lag, 'ts': ts})
-        if (n.get('lock_waits') or 0) >= collector.WARN_LOCKS:
-            alerts.append({'level': 'warn', 'id': n['id'], 'name': n['name'],
-                           'msg': '锁等待 %d' % n['lock_waits'], 'ts': ts})
-    lvl_rank = {'crit': 0, 'warn': 1}
-    alerts.sort(key=lambda a: (lvl_rank.get(a['level'], 9), -a['ts']))
-
-    return {
-        'ok': True, 'ts': ts,
-        'kpis': kpis,
-        'groups': list(groups.values()),
-        'topn': topn,
-        'trend': [{'ts': t['ts'], 'qps': t['qps']} for t in trend],
-        'alerts': alerts[:50],
-        'nodes': nodes,
-    }
-
 
 # ═══════════════════════════════════════════════════════════
 #  全局单例

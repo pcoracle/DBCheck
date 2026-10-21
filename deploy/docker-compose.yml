@@ -6,7 +6,7 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
       # 自定义版本号可在此传参（不传则使用 Dockerfile 内 ARG DBCHECK_VERSION 默认值）：
-      # args: { DBCHECK_VERSION: "v26.9.17.0" }
+      # args: { DBCHECK_VERSION: "v26.10.11.0" }
     image: jackge12345/dbcheck:latest
     container_name: dbcheck
     restart: unless-stopped
@@ -25,6 +25,14 @@ services:
       - TZ=Asia/Shanghai
       - FLASK_ENV=production
       - PYTHONUNBUFFERED=1
+      # OpenBLAS 线程池护栏：受限容器（安全容器/定制 seccomp/LXC）里 clone() 被拦，
+      # numpy 导入时 OpenBLAS 建 BLAS 线程会报 "pthread_create failed ...
+      # Operation not permitted" 而崩溃。镜像内已默认 =1，此处显式声明便于按需调高
+      # （如 CPU 空闲且无安全限制时可改 4）。
+      - OPENBLAS_NUM_THREADS=1
+      - OMP_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - NUMEXPR_NUM_THREADS=1
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5003/api/v1/health"]
       interval: 30s
