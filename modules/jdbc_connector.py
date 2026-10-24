@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from modules.driver_registry import JDBC_PLUGIN_TO_CATALOG, resolve_jdbc_driver_jars
@@ -605,10 +607,158 @@ def resolve_driver_jars(db_type: str, driver_version: str = '', *,
     return None
 
 
+# ── JDBC 单元格取值 ──────────────────────────────────────────────
+# 单格 LOB 预览上限：一篇 CLOB 可能几十 MB，结果页一次 200 行不可能全带回。
+JDBC_LOB_PREVIEW_CHARS = 32768
+
+
+def _format_lob_size(total: Any) -> str:
+    try:
+        return format(int(total), ',')
+    except Exception:
+        return str(total)
+
+
+def convert_jdbc_lob(obj: Any, limit: int = JDBC_LOB_PREVIEW_CHARS) -> Optional[str]:
+    """把 JDBC 的 CLOB/BLOB 读成可展示文本；不是 LOB 返回 None。
+
+    [WARN] 不能对 LOB 直接 ``str()``：只会得到 ``oracle.sql.CLOB@1a2b3c`` 这种对象地址 ——
+    SQL 编辑器结果窗口里「CLOB 显示异常」就是它。这里用驱动的
+    ``getSubString``/``length`` 读内容；超过 ``limit`` 截断并在末尾标注，
+    BLOB 不往回带二进制，只报字节数。
+    """
+    if obj is None:
+        return None
+    read_substring = getattr(obj, 'getSubString', None)
+    if callable(read_substring):
+        try:
+            total = None
+            length_function = getattr(obj, 'length', None)
+            if callable(length_function):
+                total = int(length_function())
+            amount = limit if total is None else min(total, limit)
+            text = read_substring(1, amount) if amount > 0 else ''
+            text = '' if text is None else str(text)
+            if total is not None and total > amount:
+                text += '\n…[CLOB 已截断：共 %s 字符]' % _format_lob_size(total)
+            return text
+        except Exception:
+            return None
+    read_bytes = getattr(obj, 'getBytes', None)
+    # [WARN] 不能凭 getBytes + length 判 BLOB：java.lang.String 也有这两个方法，
+    # 判错会把**所有字符串列**转成「<BLOB n 字节>」。真正的 java.sql.Blob 才有
+    # getBinaryStream，用它做判定。
+    if callable(read_bytes) and callable(getattr(obj, 'length', None)) \
+            and callable(getattr(obj, 'getBinaryStream', None)):
+        try:
+            return '<BLOB %s 字节>' % _format_lob_size(obj.length())
+        except Exception:
+            return None
+    return None
+
+
+def java_class_name(obj: Any) -> str:
+    """取 Java 对象的类名（不是 Java 对象就返回空串）。"""
+    try:
+        get_class = getattr(obj, 'getClass', None)
+        if callable(get_class):
+            return str(get_class().getName())
+    except Exception:
+        pass
+    return ''
+
+
+def coerce_jdbc_number(obj: Any) -> Tuple[bool, Any]:
+    """Java 数字 → ``(True, python 数字)``；不是数字返回 ``(False, None)``。
+
+    [WARN] 不能一律先取 ``intValue()``：``java.math.BigDecimal`` 也有 intValue，
+    先取它会**把小数截断**（123.45 → 123，SQL Server 的 DECIMAL 列就踩过这个坑）。
+    这里按 Java 类型名分流：整型走 int/long，浮点/Decimal 走 double。
+    """
+    if obj is None:
+        return False, None
+    if isinstance(obj, bool):
+        return False, None                     # 布尔交给各插件自己的逻辑
+    if isinstance(obj, (int, float)):
+        return True, obj
+    class_name = java_class_name(obj)
+    try:
+        if class_name:
+            if any(token in class_name for token in
+                   ('Integer', 'Short', 'Byte', 'AtomicInteger')):
+                return True, obj.intValue()
+            if any(token in class_name for token in
+                   ('Long', 'BigInteger', 'AtomicLong')):
+                return True, obj.longValue()
+            if any(token in class_name for token in
+                   ('Double', 'Float', 'BigDecimal')):
+                return True, obj.doubleValue()
+        double_value = getattr(obj, 'doubleValue', None)
+        int_value = getattr(obj, 'intValue', None)
+        if callable(double_value) and callable(int_value):
+            return True, obj.doubleValue()     # 未知数字类型：保精度优先
+        if callable(int_value):
+            return True, obj.intValue()
+        long_value = getattr(obj, 'longValue', None)
+        if callable(long_value):
+            return True, obj.longValue()
+    except Exception:
+        return False, None
+    return False, None
+
+
+def convert_jdbc_value(obj: Any, lob_limit: int = JDBC_LOB_PREVIEW_CHARS) -> Any:
+    """JDBC 单元格 → Python 值（LOB / 日期包装 / 数字 / 字符串）。
+
+    各插件的 ``JdbcCursorWrapper._convert_java_obj`` 统一调这里：
+    LOB 读正文、``oracle.sql.TIMESTAMP(TZ)`` 取 timestampValue、数字按类型分流，
+    其余按文本展示 —— 绝不把对象地址（``oracle.sql.CLOB@1a2b``）塞给前端。
+    """
+    if obj is None:
+        return None
+    # JPype 有时已把基本类型转成 Python 原生值：原样返回，不要再 str() 成文本
+    if isinstance(obj, (bool, int, float, str)):
+        return obj
+    lob_text = convert_jdbc_lob(obj, lob_limit)
+    if lob_text is not None:
+        return lob_text
+
+    class_name = java_class_name(obj)
+    if class_name.startswith('oracle.sql.'):
+        # TIMESTAMP / TIMESTAMPTZ / DATE 这类包装对象：toString 是对象地址，
+        # 真实值要从 timestampValue()/dateValue() 取。
+        for method_name in ('timestampValue', 'dateValue'):
+            converter = getattr(obj, method_name, None)
+            if callable(converter):
+                try:
+                    converted = converter()
+                    return str(converted) if converted is not None else None
+                except Exception:
+                    continue
+        if 'RAW' in class_name and callable(getattr(obj, 'getBytes', None)):
+            try:
+                return '0x' + bytes(obj.getBytes()).hex()
+            except Exception:
+                pass
+
+    is_number, number_value = coerce_jdbc_number(obj)
+    if is_number:
+        return number_value
+    try:
+        return str(obj)
+    except Exception:
+        return repr(obj)
+
+
 # 最近一次 JVM 启动失败原因（_start_jvm 记录，供建连层透传给用户；
 # JPype 默认的 "Attempt to create Java package java without jvm" 会完全
 # 掩盖根因——如找不到 libjvm / JDK 版本不兼容 / 内存不足等）。
 _JVM_LAST_ERROR: Optional[str] = None
+# JVM 只能起一次：并发调用 startJVM 会让 JPype 内部锁互等，实测会把 Web 主进程
+# 的 gevent hub 一起钉死（所有页面无响应，只能重启）。这里用一把不走锁等值的
+# 单飞锁：拿不到锁的调用方立刻返回「正在启动」，绝不阻塞调用线程。
+_JVM_START_LOCK = threading.Lock()
+_JVM_START_STARTED_AT: Optional[float] = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -689,22 +839,64 @@ def _is_jvm_started() -> bool:
         return False
 
 
-def _start_jvm(jars: List[str]) -> None:
-    """启动 JVM：classpath 直接作为 startJVM 参数（标准做法）；已启动则补 classpath。
+def _add_jvm_classpath(jars: List[str]) -> None:
+    """JVM 已启动后补挂驱动 jar（幂等，重复 jar 由 JPype 自己去重）。"""
+    global _JVM_LAST_ERROR
+    import jpype
+    try:
+        for _jar in jars:
+            jpype.addClassPath(_jar)
+    except Exception as e:  # noqa: BLE001
+        _JVM_LAST_ERROR = f'{type(e).__name__}: {e}'
 
-    JVM 启动失败**不再静默吞掉**：真实原因记录到 _JVM_LAST_ERROR，
+
+def _apply_jdbc_login_timeout(seconds: int = 10) -> None:
+    """限制 JDBC 建连等待：连不上的库要尽快报错，不能把调用线程（gevent hub）挂住。"""
+    try:
+        import jpype
+        jpype.JClass('java.sql.DriverManager').setLoginTimeout(int(seconds))
+    except Exception:  # noqa: BLE001 - 老驱动不支持就算了，不影响正常建连
+        pass
+
+
+def _start_jvm(jars: List[str]) -> None:
+    """启动 JVM（**单飞**，拿不到启动权立刻返回，绝不等锁）。
+
+    [WARN] 为什么不能等锁：Web 主进程跑在 gevent 协作式服务器上，`startJVM`
+    期间整个 hub 不工作。实测并发触发两次启动（后台采集线程 + 请求线程）会让
+    JPype 内部互等，界面所有请求一起卡死、只能重启进程。所以：
+
+    * 拿不到启动权的调用方只记录「正在启动，请稍后重试」，让上层给一条可重试
+      的错误（前端有「重试」按钮），而不是把界面钉住；
+    * 正常路径由启动时的后台预热（:func:`prestart_jvm`）先把 JVM 起好，
+      请求路径只走 `isJVMStarted()` 的快分支 + 补 classpath。
+
+    JVM 启动失败**不静默吞掉**：真实原因记录到 _JVM_LAST_ERROR，
     由 _open_jpype_connection / jaydebeapi 分支在 JVM 未就绪时透传给用户，
     便于定位（如 JAVA_HOME 缺失、libjvm 找不到、JDK 与驱动版本不兼容）。
     """
-    global _JVM_LAST_ERROR
+    global _JVM_LAST_ERROR, _JVM_START_STARTED_AT
     import jpype
     setup_jvm_env()
-    if not jpype.isJVMStarted():
+    if jpype.isJVMStarted():
+        _add_jvm_classpath(jars)
+        return
+    if not _JVM_START_LOCK.acquire(blocking=False):
+        _waited = time.time() - (_JVM_START_STARTED_AT or time.time())
+        _JVM_LAST_ERROR = ('JVM 正在启动（已等待 %d 秒），请稍后重试；'
+                           '若长时间如此，检查 JAVA_HOME 与 jpype/JDK 版本是否匹配' % int(_waited))
+        return
+    try:
+        _JVM_START_STARTED_AT = time.time()
+        if jpype.isJVMStarted():                    # 双检：等锁期间别的线程已起好
+            _add_jvm_classpath(jars)
+            return
         try:
             # 先注入旧版 TLS 兼容参数（老 SQL Server 仅支持 TLSv1/1.1），
             # 再启动 JVM——JVM 起来后无法再追加系统属性。
             jpype.startJVM(*_jvm_tls_args(), classpath=list(jars))
             _JVM_LAST_ERROR = None
+            _apply_jdbc_login_timeout()
         except Exception as e:  # noqa: BLE001 - 记录真实原因，不吞
             _reason = f'{type(e).__name__}: {e}'
             # jpype 1.6+ 放弃 Java 8（requirements 已锁 <1.6，双保险）：
@@ -715,12 +907,33 @@ def _start_jvm(jars: List[str]) -> None:
                            f'① 降级 JPype1 到 1.5.x（pip install "JPype1>=1.5,<1.6"）；'
                            f'② 改用 JDK 11/17 并确保 JAVA_HOME 指向它。')
             _JVM_LAST_ERROR = _reason
-    else:
+    finally:
+        _JVM_START_STARTED_AT = None
+        _JVM_START_LOCK.release()
+
+
+def prestart_jvm(db_types) -> bool:
+    """按数据源类型预热 JVM（起 JVM + 挂驱动 jar），不建任何数据库连接。
+
+    [WARN] 必须在**主线程、Web 服务开跑之前**调用：
+
+    * 放到后台线程启动，解释器退出会卡在 ``jpype._JTerminate``（实测退不出去）；
+    * 放到请求线程启动，JVM 启动期间会把 gevent hub 钉死（所有页面无响应）。
+
+    没有 JDBC 数据源（*_jdbc）时什么都不做；失败只记录，不影响服务启动。
+    """
+    started = False
+    for db_type in (db_types or []):
         try:
-            for _jar in jars:
-                jpype.addClassPath(_jar)
-        except Exception as e:  # noqa: BLE001
-            _JVM_LAST_ERROR = f'{type(e).__name__}: {e}'
+            jars = resolve_driver_jars(str(db_type), '')
+            if not jars:
+                continue
+            _start_jvm(jars)
+            if _is_jvm_started():
+                started = True
+        except Exception as e:  # noqa: BLE001 - 预热失败不影响启动，首个请求会再试
+            print('[jvm] 预热 %s 失败: %s' % (db_type, e), flush=True)
+    return started
 
 
 # ═══════════════════════════════════════════════════════════════════════════

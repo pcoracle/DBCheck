@@ -161,21 +161,13 @@ class JdbcCursorWrapper:
         return getattr(self, '_rowcount', -1)
 
     def _convert_java_obj(self, obj):
-        """将 Java 对象转换为 Python 对象"""
-        if obj is None:
-            return None
-        try:
-            if hasattr(obj, 'intValue'):
-                return obj.intValue()
-            if hasattr(obj, 'longValue'):
-                return obj.longValue()
-            if hasattr(obj, 'doubleValue'):
-                return obj.doubleValue()
-            if hasattr(obj, 'booleanValue'):
-                return bool(obj.booleanValue())
-            return str(obj)
-        except Exception:
-            return str(obj)
+        """Java 对象 -> Python 值（LOB 读成文本，绝不返回 CLOB@xxxx 这类对象地址）。
+
+        具体规则统一在 modules.jdbc_connector.convert_jdbc_value：数字/字符串沿用原有
+        判定，CLOB/BLOB 由驱动按上限读取并标出截断。
+        """
+        from modules.jdbc_connector import convert_jdbc_value
+        return convert_jdbc_value(obj)
 
     def close(self):
         """关闭游标"""

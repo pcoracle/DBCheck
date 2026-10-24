@@ -167,27 +167,23 @@ class JdbcCursorWrapper:
         """
         if obj is None:
             return None
+        # CLOB / BLOB 先交给统一转换：直接 str(TEXT 列) 只会得到对象地址
+        from modules.jdbc_connector import convert_jdbc_lob
+        lob_text = convert_jdbc_lob(obj)
+        if lob_text is not None:
+            return lob_text
         # 数字 / 布尔（优先于 str/hasattr 判别，避免误转）
         try:
             if hasattr(obj, 'booleanValue') and callable(obj.booleanValue):
                 return bool(obj.booleanValue())
         except Exception:
             pass
-        try:
-            if hasattr(obj, 'intValue') and callable(obj.intValue) and not hasattr(obj, 'getYear'):
-                return obj.intValue()
-        except Exception:
-            pass
-        try:
-            if hasattr(obj, 'longValue') and callable(obj.longValue) and not hasattr(obj, 'getYear'):
-                return obj.longValue()
-        except Exception:
-            pass
-        try:
-            if hasattr(obj, 'doubleValue') and callable(obj.doubleValue):
-                return obj.doubleValue()
-        except Exception:
-            pass
+        # 数字统一按 Java 类型分流：BigDecimal 走 double（先取 intValue 会把
+        # DECIMAL 列的小数截断），Integer/Long 保持整型。
+        from modules.jdbc_connector import coerce_jdbc_number
+        is_number, number_value = coerce_jdbc_number(obj)
+        if is_number:
+            return number_value
         # java.sql.Timestamp / Date / Time（has getTime + getYear）
         try:
             if hasattr(obj, 'getTime') and hasattr(obj, 'getYear'):

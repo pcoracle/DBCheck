@@ -51,7 +51,7 @@ class JdbcCursorWrapper:
         meta = self.rs.getMetaData()
         col_count = meta.getColumnCount()
         while self.rs.next():
-            row = tuple(self._convert_java_obj(self.rs.getObject(i+1)) for i in range(col_count))
+            row = tuple(self._read_cell(i+1) for i in range(col_count))
             rows.append(row)
         return rows
     
@@ -62,27 +62,39 @@ class JdbcCursorWrapper:
         if self.rs.next():
             meta = self.rs.getMetaData()
             col_count = meta.getColumnCount()
-            return tuple(self._convert_java_obj(self.rs.getObject(i+1)) for i in range(col_count))
+            return tuple(self._read_cell(i+1) for i in range(col_count))
         return None
     
-    def _convert_java_obj(self, obj):
-        """将 Java 对象转换为 Python 对象"""
+    def _read_cell(self, column_index):
+        """按列读取并转换一个单元格。
+
+        oracle.sql.TIMESTAMP / TIMESTAMPTZ / DATE 这类包装对象在部分 ojdbc 版本里
+        ``timestampValue()`` / ``stringValue()`` 会抛 "Conversion to Timestamp failed"，
+        最后 ``str()`` 只剩对象地址。让驱动按会话时区格式化成字符串最稳。
+        """
+        obj = self.rs.getObject(column_index)
         if obj is None:
             return None
-        # 尝试转换为 Python 类型
         try:
-            # 数字类型
-            if hasattr(obj, 'intValue'):
-                return obj.intValue()
-            if hasattr(obj, 'longValue'):
-                return obj.longValue()
-            if hasattr(obj, 'doubleValue'):
-                return obj.doubleValue()
-            # 字符串类型
-            return str(obj)
-        except:
-            return str(obj)
-    
+            class_name = obj.getClass().getName()
+        except Exception:
+            class_name = ''
+        if class_name in ('oracle.sql.TIMESTAMP', 'oracle.sql.TIMESTAMPTZ', 'oracle.sql.DATE'):
+            try:
+                return self.rs.getString(column_index)
+            except Exception:
+                pass
+        return self._convert_java_obj(obj)
+
+    def _convert_java_obj(self, obj):
+        """Java 对象 -> Python 值（LOB 读成文本，绝不返回 CLOB@xxxx 这类对象地址）。
+
+        具体规则统一在 modules.jdbc_connector.convert_jdbc_value：数字/字符串沿用原有
+        判定，CLOB/BLOB 由驱动按上限读取并标出截断。
+        """
+        from modules.jdbc_connector import convert_jdbc_value
+        return convert_jdbc_value(obj)
+
     def close(self):
         """关闭游标"""
         if self.rs:

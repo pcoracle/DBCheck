@@ -1,0 +1,1196 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
+ * Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
+ *
+ * Fusion page: SQL editor (object tree + multi-window editor + result tabs).
+ * Base layout kept from the RaccoonX inline styles; tabs / target selectors /
+ * object-aware completion / tree context menu / table-property dialog ported
+ * from DBCheck v2.6 (MIT License, Copyright (c) 2025-2026 fiyo (Jack Ge)),
+ * rewritten for the RaccoonX theme variables.
+ */
+
+/* ─── SQL 编辑器 ─── */
+/* 当 main 处于 sql-editor 模式时，整个 flex 链切换为精确高度约束 */
+.main.sql-editor-active {
+  height: 100vh;
+  min-height: 100vh;
+  overflow: hidden;
+}
+.main.sql-editor-active .content {
+  overflow: hidden;
+  padding: 20px 24px;
+}
+#page-sql-editor {
+  height: 100%;
+  overflow: hidden;
+}
+#page-sql-editor .sql-editor-wrap {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.sql-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.sql-toolbar-left { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sql-toolbar-right { display: flex; align-items: center; gap: 8px; }
+.sql-select {
+  background: var(--surface2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 13px;
+  min-width: 200px;
+}
+.sql-hint { font-size: 11px; color: var(--text-muted); }
+.sql-status { font-size: 12px; color: var(--success); }
+.sql-status.error { color: var(--danger); }
+
+.sql-editor-main {
+  display: flex;
+  flex-direction: row;
+  flex: 1;
+  gap: 6px;
+  min-height: 0;
+  overflow: hidden;
+}
+/* ─── 左侧树面板 ─── */
+.sql-tree-panel {
+  width: 280px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.sql-tree-toolbar {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.sql-tree-toolbar .sql-tree-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.sql-tree-body {
+  flex: 1;
+  overflow: auto;
+  padding: 6px 0;
+  font-size: 13px;
+}
+/* 树节点 */
+.sql-tree-node {
+  padding: 4px 8px 4px 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text);
+  transition: background 0.1s;
+  user-select: none;
+}
+.sql-tree-node:hover {
+  background: var(--surface2);
+}
+.sql-tree-node.selected {
+  background: rgba(56,139,253,0.18);
+  color: var(--accent);
+}
+.sql-tree-node .tree-toggle {
+  display: inline-block;
+  width: 16px;
+  text-align: center;
+  font-size: 10px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  transition: transform 0.15s;
+}
+.sql-tree-node .tree-toggle.expanded {
+  transform: rotate(90deg);
+}
+.sql-tree-node .tree-toggle.leaf {
+  visibility: hidden;
+}
+.sql-tree-node .tree-icon {
+  flex-shrink: 0;
+  font-size: 14px;
+}
+.sql-tree-node .tree-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 树子节点缩进：按容器嵌套自动缩进（目录可以任意层级，不再写死两级） */
+.sql-tree-children {
+  display: none;
+  margin-left: 14px;
+}
+.sql-tree-children.expanded {
+  display: block;
+}
+/* 目录节点：只做分组，不连库；视觉上比数据源弱一档 */
+.sql-tree-node.sql-tree-dir {
+  color: var(--text-muted);
+  font-weight: 600;
+  letter-spacing: .2px;
+}
+.sql-tree-node.sql-tree-dir .tree-icon {
+  font-size: 12px;
+  opacity: .85;
+}
+.sql-tree-node.sql-tree-dir:hover {
+  color: var(--text);
+}
+.sql-tree-loading {
+  padding: 4px 8px 4px 28px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+/* ─── 垂直分割条 ─── */
+.sql-splitter-v {
+  width: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  cursor: col-resize;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+.sql-splitter-v:hover,
+.sql-splitter-v.active {
+  background: var(--accent);
+}
+/* ─── 右侧面板 ─── */
+.sql-right-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+.sql-splitter {
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  cursor: row-resize;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+.sql-splitter:hover,
+.sql-splitter.active {
+  background: var(--accent);
+}
+.sql-editor-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 60px;
+  min-width: 0;
+  overflow: hidden;
+}
+.sql-result-pane {
+  flex: 1.2;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 60px;
+  min-width: 0;
+  overflow: hidden;
+}
+.sql-editor-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sql-raw-textarea {
+  flex: 1;
+  width: 100%;
+  background: #1e1e2e;
+  color: #a6e3a1;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  font-size: 13px;
+  line-height: 1.7;
+  resize: none;
+  outline: none;
+  tab-size: 4;
+}
+.sql-raw-textarea:focus { border-color: var(--accent); }
+/* CodeMirror 替换 textarea 后占满父容器 */
+.sql-editor-pane .CodeMirror {
+  flex: 1;
+  width: 100%;
+  height: auto !important;
+  min-height: 0;
+  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace !important;
+  font-size: 13px !important;
+  background: #282a36 !important;
+}
+.sql-editor-pane .CodeMirror-wrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+.sql-editor-pane .CodeMirror-scroll {
+  flex: 1;
+  min-height: 0;
+}
+.sql-editor-pane .CodeMirror-gutters {
+  background: #21222c !important;
+  border-right: 1px solid #44475a !important;
+}
+.sql-shortcut-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-align: right;
+}
+.sql-result-table-wrap {
+  flex: 1;
+  overflow: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0;
+  min-width: 0;
+}
+.sql-no-result {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.sql-result-table-wrap table {
+  border-collapse: collapse;
+  font-size: 12px;
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+}
+.sql-result-table-wrap th {
+  position: sticky;
+  top: 0;
+  background: var(--surface2);
+  color: var(--accent);
+  padding: 6px 10px;
+  text-align: left;
+  border-bottom: 2px solid var(--border);
+  white-space: nowrap;
+}
+.sql-result-table-wrap td {
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.sql-result-table-wrap {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  min-height: 120px;
+  max-height: 55vh;
+}
+.sql-result-table-wrap tr:hover td { background: var(--surface2); }
+
+/* ─── CLOB / BLOB 单元格：只在格子里显示 <CLOB> 标记（PL/SQL Developer 做法），
+       正文藏在隐藏节点里，双击打开查看窗口 ─── */
+.sql-result-table-wrap td.sql-lob-cell { cursor: zoom-in; }
+.sql-lob-marker {
+  color: var(--accent);
+  font-weight: 600;
+  letter-spacing: .2px;
+  user-select: none;
+}
+.sql-lob-raw { display: none; }
+/* 查看窗口：挂到 <body> 下，z-index 压过应用内其它浮层（抽屉 10002 / 弹窗 9999） */
+#sql-lob-modal { z-index: 100010; }
+.sql-lob-box { max-width: 920px; width: min(920px, 92vw); }
+.sql-lob-content {
+  max-height: 60vh;
+  overflow: auto;
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: 'Cascadia Code', 'Fira Code', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+}
+.sql-lob-foot { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.sql-lob-meta { margin-right: auto; font-size: 11px; color: var(--text-muted); }
+
+/* 滚动加载提示 */
+.sql-scroll-loading, .sql-scroll-done {
+  text-align: center;
+  padding: 8px 0 6px 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  display: none;
+}
+.sql-scroll-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: sqlSpin 0.7s linear infinite;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+@keyframes sqlSpin {
+  to { transform: rotate(360deg); }
+}
+/* SQL 结果表格行号列 */
+.sql-rn-col {
+  width: 42px;
+  min-width: 42px;
+  max-width: 60px;
+  text-align: center !important;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--surface2) !important;
+  border-right: 1px solid var(--border);
+  user-select: none;
+}
+.sql-rn {
+  text-align: center !important;
+  color: var(--text-muted);
+  font-size: 12px;
+  background: var(--surface2) !important;
+  border-right: 1px solid var(--border);
+  user-select: none;
+  white-space: nowrap;
+}
+/* ══ 以下为 DBCheck v2.6 SQL 编辑器组件样式（页签 / 目标选择器 / 智能提示 / 右键菜单 / 表属性弹窗）══ */
+.sql-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.sql-toolbar-left { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sql-toolbar-right { display: flex; align-items: center; gap: 8px; }
+.sql-select {
+  background: var(--surface2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 13px;
+  min-width: 200px;
+}
+.sql-hint { font-size: 11px; color: var(--text-muted); }
+/* ─── 执行目标选择器（每个执行窗口各一份；按库类型区别显示）───
+   ⚠️ 全局有 `select { width: 100% }`，flex 工具栏里的下拉必须显式 width:auto + flex:0 0 auto，
+      否则会被撑成整行、每个控件各占一行。 */
+.sql-target {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface2);
+}
+.sql-target-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.sql-target-select {
+  width: auto;
+  max-width: 190px;
+  min-width: 84px;
+  flex: 0 0 auto;
+  background: var(--surface-solid, var(--surface2));
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-size: 12px;
+  outline: none;
+}
+.sql-target-select:focus { border-color: var(--accent); }
+.sql-target-select:disabled { opacity: .6; }
+/* icon-only 工具按钮（内联 SVG + tooltip，无文字） */
+.sql-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 7px;
+  line-height: 1;
+}
+.sql-icon-btn svg { display: block; }
+/* 开/关态：默认 ghost 弱化，开启时用主色点亮（icon-only 的开关反馈） */
+.sql-icon-btn.is-on { color: var(--accent); }
+.sql-meta-status { margin-left: 8px; color: var(--text-muted); }
+.sql-meta-status:empty { display: none; }
+
+/* 切结果页签时，编辑器里短暂高亮「产生这条结果的那条 SQL」 */
+.sql-locate-flash {
+  background: rgba(0, 200, 160, 0.22);
+  border-radius: 2px;
+}
+
+/* ── SQL 智能提示下拉（覆盖 show-hint 默认白底白字，跟随项目主题变量）── */
+.CodeMirror-hints {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+  font-family: 'JetBrains Mono', Consolas, Monaco, monospace;
+  font-size: 12px;
+  padding: 4px;
+  max-height: 19em;
+  z-index: 60;
+}
+.CodeMirror-hint {
+  color: var(--text);
+  padding: 2px 8px;
+  border-radius: 4px;
+  line-height: 1.5;
+}
+li.CodeMirror-hint-active {
+  background: var(--accent);
+  color: #08131f;
+}
+/* 候选分类着色：表 / 视图 / 列 / 关键字 / 函数 */
+.CodeMirror-hints .CodeMirror-hint-table    { color: #4a9eff; }
+.CodeMirror-hints .CodeMirror-hint-view     { color: #22b8a6; }
+.CodeMirror-hints .CodeMirror-hint-column   { color: #2fa36b; }
+.CodeMirror-hints .CodeMirror-hint-keyword  { color: #8250df; }
+.CodeMirror-hints .CodeMirror-hint-function { color: #b7791f; }
+/* 按需拉取列时的占位行（不可插入，纯反馈） */
+.CodeMirror-hints .CodeMirror-hint-loading { color: var(--text-muted); font-style: italic; }
+li.CodeMirror-hint-active,
+li.CodeMirror-hint-active.CodeMirror-hint-table,
+li.CodeMirror-hint-active.CodeMirror-hint-view,
+li.CodeMirror-hint-active.CodeMirror-hint-column,
+li.CodeMirror-hint-active.CodeMirror-hint-keyword,
+li.CodeMirror-hint-active.CodeMirror-hint-function { color: #fff; }
+/* 结果页签联动：查询窗口中被激活结果对应的语句（markText 高亮，不依赖编辑器聚焦） */
+.sql-stmt-highlight {
+  background: rgba(137, 180, 250, 0.22);
+  box-shadow: inset 0 -1px 0 rgba(137, 180, 250, 0.62);
+  border-radius: 2px;
+}
+.sql-status { font-size: 12px; color: var(--success); }
+.sql-status.error { color: var(--danger); }
+
+.sql-ctx-menu {
+  position: fixed;
+  z-index: 10000;
+  min-width: 176px;
+  min-height: 40px;
+  max-width: 92vw;
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-solid, var(--surface2));   /* 深色主题下 --surface 是半透明的 → 必须用 solid */
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.50), 0 2px 6px rgba(0,0,0,0.35);
+  padding: 5px;
+  font-size: 13px;
+  overflow: hidden;
+  cursor: move;                        /* 空白 / 分隔线处按住即可拖动 */
+  user-select: none;
+  animation: fadeIn 0.12s ease;
+}
+[data-theme="light"] .sql-ctx-menu {
+  box-shadow: 0 10px 28px rgba(15,23,42,0.16), 0 2px 6px rgba(15,23,42,0.08);
+}
+.sql-ctx-menu.dragging { cursor: move; }
+.sql-ctx-menu .sql-ctx-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;                      /* 缩放后内容超出可滚动 */
+  overscroll-behavior: contain;
+}
+.sql-ctx-menu .sql-ctx-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text);
+  user-select: none;
+  white-space: nowrap;
+}
+.sql-ctx-menu .sql-ctx-item:hover { background: rgba(56,139,253,0.15); }
+.sql-ctx-menu .sql-ctx-item .sql-ctx-ico {
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  color: var(--text-muted);
+}
+.sql-ctx-menu .sql-ctx-item .sql-ctx-ico svg { width: 14px; height: 14px; display: block; }
+.sql-ctx-menu .sql-ctx-item:hover .sql-ctx-ico { color: var(--accent); }
+.sql-ctx-menu .sql-ctx-sep { height: 1px; background: var(--border); margin: 4px 6px; }
+/* 右下角缩放手柄 */
+.sql-ctx-menu .sql-ctx-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  color: var(--text-muted);
+  opacity: 0.7;
+  cursor: nwse-resize;
+  z-index: 3;
+  touch-action: none;
+}
+.sql-ctx-menu .sql-ctx-resize:hover { opacity: 1; color: var(--accent); }
+.sql-ctx-menu .sql-ctx-resize svg { width: 100%; height: 100%; display: block; }
+/* ─── 表属性弹窗内容 ─── */
+.ti-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px 12px;
+  margin-bottom: 4px;
+}
+.ti-grid .ti-item {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  min-width: 0;
+}
+.ti-grid .ti-item.ti-wide { grid-column: 1 / -1; }
+.ti-grid .ti-item .ti-label { font-size: 11px; color: var(--text-muted); margin-bottom: 3px; }
+.ti-grid .ti-item .ti-value { font-size: 13px; word-break: break-all; }
+.ti-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 16px 0 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ti-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.ti-table th {
+  text-align: left;
+  padding: 6px 8px;
+  background: var(--surface2);
+  color: var(--text-muted);
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.ti-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  font-family: 'Cascadia Code', 'Fira Code', Consolas, monospace;
+  font-size: 12px;
+}
+.ti-table td.ti-plain { font-family: inherit; }
+.ti-table tr:hover td { background: var(--surface2); }
+.ti-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 9px;
+  font-size: 11px;
+  background: rgba(56,139,253,0.18);
+  color: var(--accent);
+  font-family: inherit;
+}
+.ti-badge.pri { background: rgba(166,227,161,0.15); color: var(--success); }
+.ti-err { color: var(--danger); font-size: 12px; margin-top: 8px; line-height: 1.6; }
+/* ─── 垂直分割条 ─── */
+.sql-splitter-v {
+  width: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  cursor: col-resize;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+.sql-splitter-v:hover,
+.sql-splitter-v.active {
+  background: var(--accent);
+}
+/* ─── 执行窗口页签栏 ─── */
+.sql-tabs-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  padding: 8px 4px 0;
+  flex-shrink: 0;
+  min-height: 34px;
+}
+.sql-tabs-list {
+  flex: 1;
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  overflow-x: auto;
+  min-height: 30px;
+}
+.sql-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 170px;
+  padding: 5px 6px 5px 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background 0.12s, color 0.12s;
+}
+.sql-tab:hover {
+  color: var(--text);
+  background: var(--surface2);
+}
+.sql-tab.active {
+  color: var(--text);
+  background: var(--surface2);
+  border-color: var(--border);
+  font-weight: 600;
+}
+.sql-tab .sql-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+}
+.sql-tab .sql-tab-close {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.sql-tab .sql-tab-close:hover {
+  color: var(--danger);
+  background: rgba(243,139,168,0.18);
+}
+.sql-tab-add {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 4px 10px;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+.sql-tab-add:hover {
+  color: var(--accent);
+  background: var(--surface2);
+}
+/* 页签编辑器容器（同一时刻只显示一个页签） */
+#sql-editors-host {
+  flex: 1;
+  position: relative;
+  min-height: 0;
+}
+.sql-tab-editor {
+  position: absolute;
+  inset: 0;
+  display: none;
+  flex-direction: column;
+  min-height: 0;
+}
+.sql-tab-editor.active {
+  display: flex;
+}
+/* ─── 右侧面板 ─── */
+.sql-right-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+.sql-splitter {
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  cursor: row-resize;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+.sql-splitter:hover,
+.sql-splitter.active {
+  background: var(--accent);
+}
+.sql-editor-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 60px;
+  min-width: 0;
+  overflow: hidden;
+}
+.sql-result-pane {
+  flex: 1.2;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 60px;
+  min-width: 0;
+  overflow: hidden;
+}
+.sql-editor-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* ─── 查询结果：多结果页签（一条语句 = 一个结果，可单独关闭）─── */
+.sql-result-multi-hint {
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0 7px;
+  line-height: 17px;
+}
+.sql-result-close-all,
+.sql-result-max {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex: 0 0 auto;
+  transition: background .15s, color .15s;
+}
+/* margin-left:auto 只给第一个 → 两个按钮作为一组靠右 */
+.sql-result-close-all { margin-left: auto; }
+.sql-result-close-all svg,
+.sql-result-max svg { width: 15px; height: 15px; display: block; }
+.sql-result-close-all:hover { color: var(--danger); background: rgba(248,81,73,0.14); }
+.sql-result-max:hover { color: var(--accent); background: rgba(56,139,253,0.14); }
+/* ─── 结果区整屏查看 ──────────────────────────────────────────────
+   最大化时 JS 会把 #sql-pane-result 挂到 <body> 下（见 sql_editor.js）：
+   本页有 container-type: inline-size，它同时是 fixed 后代的包含块，
+   节点留在页内时 inset:0 只铺满「内容区」，顶栏/侧栏仍占着，看着就像没全屏。
+   z-index 取 2000：高于顶栏(50)/侧栏(100)，低于弹窗(9999)与右键菜单(10000)。 */
+body.sql-result-fullscreen { overflow: hidden; }
+.sql-result-pane.is-maximized {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  margin: 0;
+  padding: 12px 16px 10px;
+  border-radius: 0;
+  background: var(--bg);
+  gap: 6px;
+  min-height: 0;
+  overflow: hidden;
+}
+.sql-result-pane.is-maximized .sql-pane-head { flex-shrink: 0; }
+.sql-result-pane.is-maximized .sql-result-table-wrap {
+  max-height: none;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+.sql-result-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  flex-shrink: 0;
+  padding-bottom: 2px;
+  scrollbar-width: thin;
+}
+.sql-result-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 5px 3px 9px;
+  font-size: 12px;
+  color: var(--text-muted);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background .12s, color .12s, border-color .12s;
+}
+.sql-result-tab:hover { color: var(--text); border-color: var(--border); }
+.sql-result-tab.active {
+  color: var(--text);
+  font-weight: 600;
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface-solid, var(--surface)));
+}
+.sql-result-tab.is-error { color: var(--danger); }
+.sql-result-tab.is-error.active {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 14%, var(--surface-solid, var(--surface)));
+}
+.sql-result-tab .sql-result-tab-kind {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .3px;
+  line-height: 15px;
+  padding: 0 5px;
+  border-radius: 4px;
+  color: var(--text-muted);
+  background: var(--bg);
+}
+.sql-result-tab.active .sql-result-tab-kind { color: var(--accent); }
+.sql-result-tab.is-error .sql-result-tab-kind { color: var(--danger); }
+.sql-result-tab .sql-result-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.sql-result-tab .sql-result-tab-close svg { width: 11px; height: 11px; display: block; }
+.sql-result-tab .sql-result-tab-close:hover { color: var(--danger); background: rgba(248,81,73,0.18); }
+
+/* ── 这次页面新增的四个构件（树搜索框 / 树脚提示 / 标签右侧执行范围提示 / 只读说明）──
+   来源 CSS 里没有这几条，缺了会出现「有 DOM 没样式」的裸元素。 */
+.sql-tree-search {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 3px 8px;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.sql-tree-search:focus { border-color: var(--accent); outline: none; }
+.sql-tree-foot {
+  flex-shrink: 0;
+  padding: 6px 10px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+.sql-editor-label-hint {
+  margin-left: 8px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+.sql-readonly-hint {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   本轮布局整理：三区（操作栏 / 主体 / 状态栏）+ 窄屏收口
+   —— 之前所有控件挤在一条 toolbar 里，长说明在窄屏被挤成竖排字，
+      而且 --surface-solid 在本仓库未定义，右键菜单背景失效透出背面的文字。
+   ══════════════════════════════════════════════════════════════ */
+
+/* 全站 .content 的 36/40 内边距对编辑器是纯浪费：本页紧贴容器边缘 */
+body:has(#page-sql-editor.active) > .app-layout .content { padding: 6px 8px 8px; }
+
+#page-sql-editor {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  /* 容器查询的判定基准：本页真正的可用宽度（侧栏收起/展开会改变它，视口宽度不会） */
+  container-type: inline-size;
+  container-name: sqx;
+}
+#page-sql-editor .sql-editor-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ── 操作栏：两组控件，左「在哪跑」右「怎么跑」，不放说明文字 ── */
+#page-sql-editor .sql-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px 18px;
+  flex-wrap: wrap;
+  padding: 7px 10px;
+  flex: 0 0 auto;
+}
+.sql-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.sql-toolbar-group + .sql-toolbar-group {
+  padding-left: 18px;
+  border-left: 1px solid var(--border);
+}
+.sql-crumb {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  max-width: 34vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sql-tool-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+  flex: 0 0 auto;
+}
+.sql-scope-select { max-width: 210px; }
+.sql-scope-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.sql-scope-hint:empty { display: none; }
+
+/* ── 主体三栏：树 / 编辑器 + 结果，全部给最小高度，窄屏改纵向堆叠 ── */
+#page-sql-editor .sql-editor-main {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+#page-sql-editor .sql-tree-panel {
+  /* flex-basis 必须是 auto：写死 0 0 262px 时，拖拽设置的 width 会被 flex 基础尺寸顶掉，
+     表现就是「这条栏拖不动」 */
+  flex: 0 0 auto;
+  width: 262px;
+  min-width: 180px;
+  max-width: 600px;
+  min-height: 0;
+}
+#page-sql-editor .sql-right-panel { min-width: 0; min-height: 0; }
+#page-sql-editor .sql-editor-pane {
+  min-height: 120px;
+  gap: 0;
+}
+#page-sql-editor #sql-editors-host { min-height: 0; }
+#page-sql-editor .sql-result-pane { min-height: 120px; }
+#page-sql-editor .sql-editor-pane .CodeMirror { min-height: 0; }
+
+/* 结果区标题行：标题 + 行数 + 动作，单行不换行 */
+.sql-pane-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  min-height: 26px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.sql-pane-title { white-space: nowrap; }
+.sql-pane-count {
+  font-weight: 400;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.sql-pane-count:empty { display: none; }
+.sql-pane-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+/* ── 状态栏：说明 / 元数据 / 快捷键 / 执行结果，一律单行省略号 ── */
+.sql-statusbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 5px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+}
+.sql-statusbar-item {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sql-statusbar-sep {
+  width: 1px;
+  height: 12px;
+  background: var(--border);
+  flex: 0 0 auto;
+}
+.sql-statusbar-spacer { flex: 1 1 auto; min-width: 6px; }
+.sql-statusbar .sql-status { font-size: 11px; }
+.sql-statusbar .sql-meta-status { margin-left: 0; }
+.sql-readonly-hint { flex: 0 0 auto; cursor: help; }
+.sql-keys-hint { flex: 0 1 auto; opacity: .85; }
+
+/* ── 响应式：窄屏把树收到 200px，再窄就纵向堆叠 ── */
+@container sqx (max-width: 1280px) {
+  /* 只收窄默认宽度，flex-basis 仍留 auto —— 否则这条栏在窄容器下又拖不动了 */
+  #page-sql-editor .sql-tree-panel { flex: 0 0 auto; width: 210px; }
+  .sql-crumb { max-width: 26em; }
+}
+@container sqx (max-width: 900px) {
+  #page-sql-editor .sql-editor-main { flex-direction: column; overflow: auto; }
+  #page-sql-editor .sql-tree-panel {
+    flex: 0 0 auto;
+    width: auto;
+    max-width: none;
+    max-height: 190px;
+  }
+  #page-sql-editor .sql-splitter-v { display: none; }
+  #page-sql-editor .sql-editor-pane { min-height: 160px; }
+  #page-sql-editor .sql-result-pane { min-height: 160px; }
+  .sql-toolbar-group + .sql-toolbar-group { padding-left: 0; border-left: none; }
+  .sql-crumb { max-width: 22em; }
+  .sql-keys-hint { display: none; }
+}
+
+/* ── 图标按钮：内联 SVG 只有 viewBox 时会被算成 0x0（实测图标完全看不见），
+      必须显式给宽高；按钮也统一成 28x28 方角，避免和文字按钮高低不齐 ── */
+#page-sql-editor .sql-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+#page-sql-editor .sql-icon-btn svg {
+  width: 15px;
+  height: 15px;
+  display: block;
+}
+#page-sql-editor .sql-icon-btn:hover { color: var(--accent); border-color: var(--accent); }
+#page-sql-editor .sql-icon-btn.is-on { color: var(--accent); border-color: var(--accent); }
+#page-sql-editor .sql-pane-actions .sql-icon-btn { border-color: transparent; }
+
+/* ── 工具栏在窄屏按「两行」收口，而不是每个控件各占一行 ── */
+#page-sql-editor .sql-toolbar {
+  align-items: center;
+  row-gap: 6px;
+}
+#page-sql-editor .sql-toolbar-group { gap: 6px; flex-wrap: nowrap; }
+#page-sql-editor .sql-target { flex: 0 1 auto; min-width: 0; flex-wrap: wrap; }
+#page-sql-editor .sql-target-select { min-width: 92px; max-width: 210px; flex: 0 1 auto; }
+#page-sql-editor .sql-crumb { flex: 0 1 auto; }
+
+@container sqx (max-width: 1100px) {
+  /* display:contents 把两个分组摊平，控件按网格排：一行能放几个放几个，
+     放不下的整齐换到下一行，而不是各自占一行、高低参差 */
+  #page-sql-editor .sql-toolbar {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px 8px;
+    align-items: center;
+  }
+  #page-sql-editor .sql-toolbar-group { display: contents; }
+  #page-sql-editor .sql-crumb { grid-column: 1 / -1; max-width: none; }
+  #page-sql-editor .sql-tool-sep { display: none; }
+  #page-sql-editor .sql-scope-hint { display: none; }
+  #page-sql-editor .sql-target { flex: 1 1 auto; }
+  #page-sql-editor .sql-target-select { width: 100%; max-width: none; }
+  /* 文字按钮铺满格子；图标按钮保持 28x28，否则被拉成一条空框 */
+  #page-sql-editor .sql-toolbar .btn:not(.sql-icon-btn) { width: 100%; justify-content: center; }
+  /* 页签关闭按钮：内联 SVG 没有尺寸时盒子是 0x0，看起来就是「关不掉执行窗口」 */
+  #page-sql-editor .sql-tab-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+  }
+  #page-sql-editor .sql-tab-close svg { width: 11px; height: 11px; display: block; }
+  #page-sql-editor .sql-tool-icons {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    justify-content: flex-end;
+  }
+}
+
+/* 树加载失败 / 超时：说明原因 + 给重试入口 */
+.sql-tree-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--danger);
+}
+.sql-tree-error-msg { line-height: 1.5; word-break: break-all; }

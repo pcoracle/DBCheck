@@ -1,0 +1,193 @@
+<!--
+  SPDX-License-Identifier: Apache-2.0
+  Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
+  Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
+
+  Fusion page: SQL editor (object tree + multi-window editor + result tabs).
+  Layout and interaction habits ported from DBCheck v2.6 (MIT License,
+  Copyright (c) 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>),
+  rewritten for the RaccoonX module layout and API shape.
+  分三区：操作栏（只放动作）/ 主体（树 + 编辑器 + 结果）/ 状态栏（说明、元数据、耗时）。
+  长文案一律进状态栏并省略号收口，避免在窄屏被挤成一列竖排字。
+-->
+<div class="page" id="page-sql-editor">
+  <div class="sql-editor-wrap">
+
+    <!-- ── 操作栏：只放动作与选择器，不放说明文字 ── -->
+    <div class="sql-toolbar">
+      <div class="sql-toolbar-group">
+        <span class="sql-crumb" id="sql-curr-ds" data-i18n="sql_editor.no_datasource">未选择数据源</span>
+        <span class="sql-target" id="sql-target" style="display:none;"
+              title="当前语句在哪个库/用户/模式下执行">
+          <label class="sql-target-label" id="sql-target-db-label" for="sql-target-db"
+                 data-i18n="sql_editor.target_db">数据库</label>
+          <select class="sql-target-select" id="sql-target-db" onchange="FusionSqlEditor.onTargetChange('db')"></select>
+          <label class="sql-target-label" id="sql-target-schema-label" for="sql-target-schema" style="display:none;"
+                 data-i18n="sql_editor.target_schema">模式</label>
+          <select class="sql-target-select" id="sql-target-schema" style="display:none;"
+                  onchange="FusionSqlEditor.onTargetChange('schema')"></select>
+        </span>
+      </div>
+
+      <div class="sql-toolbar-group">
+        <label class="sql-target-label" for="sql-scope" data-i18n="sql_editor.scope_label">范围</label>
+        <select class="sql-target-select sql-scope-select" id="sql-scope">
+          <option value="auto" data-i18n="sql_editor.scope_auto">自动（有选区执行选区，否则当前语句）</option>
+          <option value="selection" data-i18n="sql_editor.scope_selection_only">仅选中内容</option>
+          <option value="statement" data-i18n="sql_editor.scope_statement">光标所在语句</option>
+          <option value="all" data-i18n="sql_editor.scope_all_text">全部内容（多语句）</option>
+        </select>
+        <span class="sql-scope-hint" id="sql-scope-hint"></span>
+
+        <button class="btn btn-primary btn-sm" id="btn-exec-sql" type="button"
+                onclick="FusionSqlEditor.exec()">
+          ▶ <span data-i18n="sql_editor.execute">执行</span>
+        </button>
+        <button class="btn btn-ghost btn-sm" type="button" onclick="FusionSqlEditor.clear()">
+          <span data-i18n="sql_editor.clear">清空</span>
+        </button>
+
+        <span class="sql-tool-sep" aria-hidden="true"></span>
+
+        <span class="sql-tool-icons">
+        <button class="btn btn-ghost sql-icon-btn" type="button" id="sql-btn-format"
+                title="格式化 SQL（Ctrl+Shift+F）" data-i18n-title="sql_editor.format_tip"
+                onclick="FusionSqlEditor.format()">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
+            <path d="M2 4h12M2 8h8M2 12h5"/></svg>
+        </button>
+        <button class="btn btn-ghost sql-icon-btn" type="button" id="sql-btn-sample"
+                title="插入示例 SQL（按当前数据源方言）" data-i18n-title="sql_editor.insert_sample"
+                onclick="FusionSqlEditor.insertSample()">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
+            <path d="M8 2v12M2 8h12"/></svg>
+        </button>
+        <button class="btn btn-ghost sql-icon-btn is-on" type="button" id="sql-btn-autohint"
+                title="自动提示：开（点击关闭）" data-i18n-title="sql_editor.autohint_on"
+                onclick="FusionSqlEditor.toggleAutoHint()">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
+            <path d="M8 2a4 4 0 0 1 2.5 7.1c-.6.5-.9 1-1 1.9H6.5c-.1-.9-.4-1.4-1-1.9A4 4 0 0 1 8 2z"/>
+            <path d="M6.5 13.5h3"/></svg>
+        </button>
+        </span>
+      </div>
+    </div>
+
+    <!-- ── 主体：左树 + 右编辑器/结果 ── -->
+    <div class="sql-editor-main">
+      <div class="sql-tree-panel" id="sql-tree-panel">
+        <div class="sql-tree-toolbar">
+          <span class="sql-tree-title" data-i18n="sql_editor.datasource">数据源</span>
+          <input type="search" class="sql-tree-search" id="sql-tree-search" autocomplete="off"
+                 placeholder="搜索数据源" data-i18n-placeholder="sql_editor.tree_search_ph"
+                 oninput="FusionSqlEditor.filterTree(this.value)">
+          <button class="btn btn-ghost btn-xs" type="button" title="刷新树" data-i18n-title="sql_editor.refresh_tree"
+                  onclick="FusionSqlEditor.reloadTree()">↻</button>
+        </div>
+        <div class="sql-tree-body" id="sql-tree-body">
+          <div class="sql-tree-loading" data-i18n="sql_editor.loading">加载中...</div>
+        </div>
+        <div class="sql-tree-foot" data-i18n="sql_editor.insert_name_hint">
+          双击表/视图名插入到光标处，右键可 Top-N 或查看表属性
+        </div>
+      </div>
+
+      <div class="sql-splitter-v" id="sql-splitter-v"></div>
+
+      <div class="sql-right-panel" id="sql-right-panel">
+        <!-- 执行窗口页签：每个窗口一套编辑器 + 结果 + 数据源上下文 -->
+        <div class="sql-tabs-bar">
+          <div class="sql-tabs-list" id="sql-tabs-list"></div>
+          <button class="sql-tab-add" type="button" id="sql-tab-add" title="新建执行窗口"
+                  data-i18n-title="sql_editor.tab_add" onclick="FusionSqlEditor.addTab()">＋</button>
+        </div>
+
+        <div class="sql-editor-pane" id="sql-pane-editor">
+          <div id="sql-editors-host"></div>
+        </div>
+
+        <div class="sql-splitter" id="sql-splitter"></div>
+
+        <div class="sql-result-pane" id="sql-pane-result">
+          <div class="sql-pane-head">
+            <span class="sql-pane-title" data-i18n="sql_editor.result">查询结果</span>
+            <span class="sql-pane-count" id="sql-result-count"></span>
+            <span class="sql-pane-actions">
+              <button class="sql-icon-btn sql-result-max" type="button" id="sql-result-max"
+                      title="最大化结果区" data-i18n-title="sql_editor.result_max"
+                      onclick="FusionSqlEditor.toggleResultMax()">
+                <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
+                  <path d="M3 6V3h3M13 10v3h-3M10 3h3v3M6 13H3v-3"/></svg>
+              </button>
+              <button class="sql-icon-btn sql-result-close-all" type="button" id="sql-result-close-all"
+                      title="关闭全部结果" data-i18n-title="sql_editor.close_all_results"
+                      onclick="FusionSqlEditor.closeAllResults()">
+                <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
+                  <path d="M4 4l8 8M12 4l-8 8"/></svg>
+              </button>
+            </span>
+          </div>
+          <div class="sql-result-tabs" id="sql-result-tabs" style="display:none;"></div>
+          <div class="sql-result-table-wrap" id="sql-result-wrap">
+            <div class="sql-no-result" data-i18n="sql_editor.no_result">执行查询后显示结果</div>
+          </div>
+          <div class="sql-scroll-loading" id="sql-scroll-loading" style="display:none;">
+            <span class="sql-scroll-spinner"></span>
+            <span data-i18n="sql_editor.loading">加载中...</span>
+          </div>
+          <div class="sql-scroll-done" id="sql-scroll-done" style="display:none;">
+            <span data-i18n="sql_editor.all_loaded">已全部加载</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── 状态栏：说明 / 元数据 / 快捷键 / 执行结果，全部单行省略号 ── -->
+    <div class="sql-statusbar">
+      <span class="sql-statusbar-item sql-readonly-hint" data-i18n="sql_editor.readonly_short"
+            title="只读模式（后端强制）：关系库仅允许 SELECT / SHOW / EXPLAIN / WITH / DESCRIBE 等查询命令；Redis 仅 GET / KEYS / SCAN / TYPE 等只读命令">
+        只读模式（后端强制）
+      </span>
+      <span class="sql-statusbar-sep" aria-hidden="true"></span>
+      <span class="sql-statusbar-item sql-meta-status" id="sql-meta-status"></span>
+      <span class="sql-statusbar-spacer"></span>
+      <span class="sql-statusbar-item sql-keys-hint" data-i18n="sql_editor.keys_hint">
+        Ctrl+Enter 执行 · Ctrl+Space 提示 · Ctrl+Shift+F 格式化
+      </span>
+      <span class="sql-statusbar-sep" aria-hidden="true"></span>
+      <span class="sql-statusbar-item sql-status" id="sql-status"></span>
+    </div>
+  </div>
+
+  <!-- 表属性弹窗（右键树节点 → 查看表属性）；复用全站 modal-overlay / modal-box 皮肤 -->
+  <div class="modal-overlay" id="sql-ti-modal" style="display:none;"
+       onclick="if(event.target===this)FusionSqlEditor.closeTableInfo()">
+    <div class="modal-box" style="max-width:860px;">
+      <div class="modal-header">
+        <span id="sql-ti-title" data-i18n="sql_editor.props_title">表属性</span>
+        <button class="modal-close" type="button" onclick="FusionSqlEditor.closeTableInfo()">&times;</button>
+      </div>
+      <div class="modal-body" id="sql-ti-body" style="max-height:70vh;overflow:auto;"></div>
+    </div>
+  </div>
+
+  <!-- CLOB / BLOB 内容查看：双击结果格里带标记的单元格打开（PL/SQL Developer 习惯） -->
+  <div class="modal-overlay" id="sql-lob-modal" style="display:none;"
+       onclick="if(event.target===this)FusionSqlEditor.closeLobViewer()">
+    <div class="modal-box sql-lob-box">
+      <div class="modal-header">
+        <span id="sql-lob-title" data-i18n="sql_editor.lob_title">内容</span>
+        <button class="modal-close" type="button" onclick="FusionSqlEditor.closeLobViewer()">&times;</button>
+      </div>
+      <div class="sql-lob-body">
+        <pre class="sql-lob-content" id="sql-lob-content"></pre>
+      </div>
+      <div class="sql-lob-foot">
+        <span class="sql-lob-meta" id="sql-lob-meta"></span>
+        <button type="button" class="btn btn-ghost btn-sm" id="sql-lob-copy"
+                data-i18n="sql_editor.lob_copy"
+                onclick="FusionSqlEditor.copyLobContent()">复制</button>
+      </div>
+    </div>
+  </div>
+</div>

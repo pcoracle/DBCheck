@@ -60,10 +60,15 @@ EXCLUDED_DIR_COMPONENTS = {
     "copyright_registration",
     "pro_data",
     "data",
+    # Local virtualenv (third-party site-packages): never first-party source,
+    # otherwise the walk reports thousands of library files as "missing header".
+    ".venv",
+    "venv",
     # Throwaway local test/probe dirs (never committed; keep the checker clean).
     ".acceptance_tmp",
     ".pytest_tmp",
     "_qa_tmp",
+    "qa-temp",
 }
 
 # Path fragments (forward-slash normalised) that mark vendored / bundled code

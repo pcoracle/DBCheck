@@ -563,6 +563,36 @@ try:
 except Exception as _mon_e:
     print('[monitor] 采集器启动失败: %s' % _mon_e, flush=True)
 
+# ── JVM 预热（SQL 编辑器 / 字典查询用的 JDBC 插件）─────────────
+# Web 主进程跑在 gevent 协作式服务器上：第一次用到 JDBC 插件时才会在**请求线程**里
+# 执行 jpype.startJVM，而 JVM 启动（或被并发启动互等）期间整个 hub 不工作 ——
+# 实测表现就是「打开 SQL 编辑器后所有页面一起无响应，只能重启」。
+#
+# [WARN] 必须在**主线程、服务开跑之前**启动：
+#   * 放到后台线程启动会让解释器退出卡在 jpype._JTerminate（实测直接退不出去，
+#     用户停服务只能杀进程）；
+#   * 放到请求线程启动就是上面那个把界面钉死的毛病。
+# 所以这里在 import 阶段同步起好（约 0.3~3s，一次性），之后请求路径只走
+# 「已就绪」快分支；启动失败只记日志，不影响服务起来。
+def _prewarm_jvm_at_startup():
+    try:
+        from modules.pro import get_instance_manager
+        dbTypes = sorted({str(item.get('db_type') or '').lower()
+                          for item in get_instance_manager().get_all_instances()})
+        jdbcTypes = [name for name in dbTypes if name.endswith('_jdbc')]
+        if not jdbcTypes:
+            return
+        startedAt = time.time()
+        from modules.jdbc_connector import prestart_jvm
+        if prestart_jvm(jdbcTypes):
+            print('[jvm] 预热完成（%.1fs），SQL 编辑器首次点库不再触发 JVM 启动'
+                  % (time.time() - startedAt), flush=True)
+    except Exception as failure:
+        print('[jvm] 预热失败（不影响服务启动；首个 JDBC 请求会自行启动）: %s' % failure, flush=True)
+
+
+_prewarm_jvm_at_startup()
+
 # ── 监控大屏采样器（六大域指标 → /api/dashboard/overview）──────
 # 大屏的连接数/慢查询指标复用 MonitorEngine，故未启动时顺带拉起（幂等）。
 try:
@@ -7478,6 +7508,8 @@ def api_pro_datasource_update(instance_id):
         if 'labels' in data and 'tags' not in data:
             data['tags'] = _normalize_labels(data.get('labels'))
         result = im.update_instance(instance_id, data)
+        if result.get('ok'):
+            _invalidateDatasourceCaches(instance_id)   # 主机/端口/账号都可能变了，旧缓存与旧连接不能再借出去
         return jsonify(result)
     except ImportError as e:
         import traceback
@@ -7545,6 +7577,7 @@ def api_pro_datasource_delete(instance_id):
                 remove_owner('instance', instance_id)
             except Exception:
                 pass
+            _invalidateDatasourceCaches(instance_id)
         # 同步清理 history.db（旧趋势系统）
         if result.get('ok') and inst:
             try:
@@ -7748,9 +7781,66 @@ def _connect_oracle_thick_fallback(user, password, dsn, sysdba=False):
 #  SQL 编辑器 API（数据库树 / 对象列表）
 # ══════════════════════════════════════════════════════════════
 
+# ── 对象树结果缓存 ──────────────────────────────────────────────
+# 展开一次「库」或「库下的表」= 建连 + 查数据字典；用户在树里点开收起是常事，
+# 每次都回库里问一遍既慢又没意义。TTL 到点自然失效，树节点的「刷新」带 refresh=1 强制穿透。
+_DS_TREE_TTL_SECONDS = 120
+_ds_tree_cache = {}
+
+
+def _treeCacheGet(kind, dsId, database):
+    entry = _ds_tree_cache.get((kind, str(dsId), (database or '').lower()))
+    if entry and time.time() - entry[0] < _DS_TREE_TTL_SECONDS:
+        payload = dict(entry[1])
+        payload['cached'] = True
+        return payload
+    return None
+
+
+def _treeCachePut(kind, dsId, database, payload):
+    key = (kind, str(dsId), (database or '').lower())
+    _ds_tree_cache[key] = (time.time(), dict(payload))
+    if len(_ds_tree_cache) > 128:                      # 防止长期运行无限攒
+        for stale in [k for k, (ts, _p) in _ds_tree_cache.items()
+                      if time.time() - ts > _DS_TREE_TTL_SECONDS]:
+            _ds_tree_cache.pop(stale, None)
+
+
+def _treeCacheInvalidate(dsId=None):
+    for key in [k for k in list(_ds_tree_cache) if dsId is None or k[1] == str(dsId)]:
+        _ds_tree_cache.pop(key, None)
+
+
+def _invalidateDatasourceCaches(dsId=None):
+    """数据源被改动/删除：树名单、元数据、池里的连接一律立刻作废。
+
+    这些缓存都有 TTL（树 120s、元数据 300s、池 300s），不改的话
+    「把密码改了 / 换了主机 / 删了数据源」之后还要等 TTL 到点才反映新状态，
+    而且池里那条旧连接会被继续借用去查已经不存在的目标。
+    """
+    _treeCacheInvalidate(dsId)
+    try:
+        from modules.sqleditor.metadata import invalidate_cache
+        invalidate_cache(dsId)
+    except Exception:
+        pass
+    try:
+        from modules.sqleditor import conn_pool
+        if dsId is None:
+            conn_pool.clear()
+        else:
+            conn_pool.discard_datasource(dsId)
+    except Exception:
+        pass
+
+
 @app.route('/api/pro/datasources/<ds_id>/databases', methods=['GET'])
 def api_ds_databases(ds_id):
-    """返回某数据源的数据库列表（会用真实密码连库，必须先过可见性判定）"""
+    """返回某数据源的数据库列表（会用真实密码连库，必须先过可见性判定）。
+
+    结果按数据源缓存 120s；树节点「刷新」带 refresh=1 穿透。
+    """
+    refresh = (request.args.get('refresh') or '').strip().lower() in ('1', 'true', 'yes')
     from modules.pro import get_instance_manager
     from modules.access import principal_from_session, assert_visible
     mgr = get_instance_manager()
@@ -7761,6 +7851,31 @@ def api_ds_databases(ds_id):
     inst = mgr.get_instance_decrypted(ds_id)
     if not inst:
         return jsonify({'error': f'数据源不存在: {ds_id}'}), 404
+    # 缓存放在权限判定之后：缓存键只有数据源 ID，先命中后判权会把别人的库名发出去
+    if not refresh:
+        cached = _treeCacheGet('databases', ds_id, '')
+        if cached:
+            return jsonify(cached)
+
+    rawDbType = inst.get('db_type', '')
+    if _is_jdbc_plugin_datasource(rawDbType):
+        # 插件型数据源：走插件自己的连接（ojdbc / mssql-jdbc / PG JDBC…）。
+        # 之前按「去掉 _jdbc 的基础类型」退回原生驱动，Oracle 11g 没装 Instant Client
+        # 时这里直接失败，而同一个数据源在「数据源管理」里测试连接、跑巡检都是好的。
+        try:
+            from modules.sqleditor.metadata import normalize_db_type
+            pluginDialect = normalize_db_type(rawDbType)
+            rows = _plugin_tree_rows(inst, '', 0)
+            databases = _pluginTreeColumnValues(rows)
+            if pluginDialect == 'dm':
+                systemUsers = ('SYSDBA', 'SYSAUDITOR', 'SYS', 'SYSSESSION', 'INFORMATION_SCHEMA')
+                databases = [d for d in databases if d.upper() not in systemUsers]
+            payload = {'databases': databases, 'db_type': pluginDialect,
+                       'connection': 'plugin'}
+            _treeCachePut('databases', ds_id, '', payload)
+            return jsonify(payload)
+        except Exception as pluginFailure:
+            return jsonify({'error': str(pluginFailure), 'db_type': normalize_db_type(rawDbType)}), 500
 
     db_type = inst.get('db_type', '').lower().replace('oracle_full', 'oracle').replace('_jdbc', '')
     if db_type == 'pg':
@@ -7972,17 +8087,20 @@ def api_ds_databases(ds_id):
         else:
             return jsonify({'error': f'暂不支持该数据库类型: {db_type}'}), 400
 
-        return jsonify({'databases': databases, 'db_type': db_type})
+        payload = {'databases': databases, 'db_type': db_type}
+        _treeCachePut('databases', ds_id, '', payload)
+        return jsonify(payload)
     except Exception as e:
         return jsonify({'error': str(e), 'db_type': db_type}), 500
 
 
 @app.route('/api/pro/datasources/<ds_id>/objects', methods=['GET'])
 def api_ds_objects(ds_id):
-    """返回某数据库下的表、视图等对象"""
+    """返回某数据库下的表、视图等对象（结果按「数据源 + 库」缓存 120s，refresh=1 穿透）"""
     database = request.args.get('database', '').strip()
     if not database:
         return jsonify({'error': '缺少 database 参数'}), 400
+    refresh = (request.args.get('refresh') or '').strip().lower() in ('1', 'true', 'yes')
 
     from modules.pro import get_instance_manager
     from modules.access import principal_from_session, assert_visible
@@ -7994,6 +8112,42 @@ def api_ds_objects(ds_id):
     inst = mgr.get_instance_decrypted(ds_id)
     if not inst:
         return jsonify({'error': f'数据源不存在: {ds_id}'}), 404
+    # 同 /databases：先判权再读缓存，不能拿数据源 ID 当权限
+    if not refresh:
+        cachedObjects = _treeCacheGet('objects', ds_id, database)
+        if cachedObjects:
+            return jsonify(cachedObjects)
+
+    rawDbType = inst.get('db_type', '')
+    if _is_jdbc_plugin_datasource(rawDbType):
+        try:
+            from modules.sqleditor.metadata import PG_FAMILY, normalize_db_type
+            pluginDialect = normalize_db_type(rawDbType)
+            tableRows = _plugin_tree_rows(inst, database, 1)
+            viewRows = _plugin_tree_rows(inst, database, 2)
+            if pluginDialect in PG_FAMILY:
+                # 与原生 PG 分支一致：非 public 模式带 schema. 前缀，避免同名对象歧义
+                def _pgNames(rows):
+                    names = []
+                    for row in rows:
+                        schema = str(row[0]) if len(row) > 1 else ''
+                        name = str(row[-1])
+                        text = name if schema == 'public' else '%s.%s' % (schema, name)
+                        if text not in names:
+                            names.append(text)
+                    return names
+                tables, views = _pgNames(tableRows), _pgNames(viewRows)
+            else:
+                tables = _pluginTreeColumnValues(tableRows)
+                views = _pluginTreeColumnValues(viewRows)
+            payload = {'database': database, 'db_type': pluginDialect,
+                       'tables': sorted(tables), 'views': sorted(views),
+                       'connection': 'plugin'}
+            _treeCachePut('objects', ds_id, database, payload)
+            return jsonify(payload)
+        except Exception as pluginFailure:
+            from modules.sqleditor.metadata import normalize_db_type as _norm
+            return jsonify({'error': str(pluginFailure), 'db_type': _norm(rawDbType)}), 500
 
     db_type = inst.get('db_type', '').lower().replace('oracle_full', 'oracle').replace('_jdbc', '')
     if db_type == 'pg':
@@ -8289,14 +8443,102 @@ def api_ds_objects(ds_id):
         else:
             return jsonify({'error': f'暂不支持该数据库类型: {db_type}'}), 400
 
-        return jsonify({
+        payload = {
             'database': database,
             'db_type':  db_type,
             'tables':   sorted(tables),
             'views':    sorted(views),
-        })
+        }
+        _treeCachePut('objects', ds_id, database, payload)
+        return jsonify(payload)
     except Exception as e:
         return jsonify({'error': str(e), 'db_type': db_type}), 500
+
+
+@app.route('/api/pro/datasources/<ds_id>/schemas', methods=['GET'])
+def api_ds_schemas(ds_id):
+    """三层模型数据源的模式（schema）列表。
+
+    参数: database —— 已选中的库（PG 系连到该库后再列模式）。
+    只有「库里还有模式」的方言才有意义：PG 系 / SQL Server 列真实模式，
+    Oracle / DM / 崖山的「数据库」维度本身就是 owner，这里同样返回用户名单，
+    MySQL 系「库即模式」、Redis/Mongo 无模式 → 返回空列表 + reason（前端隐藏模式选择器）。
+    拿不到模式名单不算错误：编辑器只退化成「不选模式」。
+    """
+    database = request.args.get('database', '').strip()
+
+    from modules.pro import get_instance_manager
+    from modules.access import principal_from_session, assert_visible
+    ok, err = assert_visible(principal_from_session(), 'instance', ds_id)
+    if not ok:
+        return jsonify({'ok': False, **err}), 403
+    inst = get_instance_manager().get_instance_decrypted(ds_id)
+    if not inst:
+        return jsonify({'error': f'数据源不存在: {ds_id}'}), 404
+
+    from modules.sqleditor.metadata import list_schemas, normalize_db_type
+    try:
+        schemas, reason = list_schemas(inst, inst.get('db_type', ''), database,
+                                       conn_opener=_pooled_editor_conn)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    return jsonify({
+        'ok': True,
+        'schemas': schemas,
+        'db_type': normalize_db_type(inst.get('db_type', '')),
+        'supported': bool(reason is None),
+        'reason': reason or '',
+    })
+
+
+@app.route('/api/pro/datasources/<ds_id>/table-info', methods=['GET'])
+def api_ds_table_info(ds_id):
+    """表/视图属性（SQL 编辑器右键「查看表属性」）。
+
+    参数:
+        - database: 数据库名（Oracle / DM / 崖山为 owner）
+        - table:    表名或视图名（PG 系、SQL Server 支持 schema.table 形式）
+    返回 columns / indexes / row_count / table_size / comment / engine / errors；
+    字典视图在各版本间字段差异大，单个子查询失败只记进 errors，其余信息照常返回。
+    """
+    database = request.args.get('database', '').strip()
+    table = request.args.get('table', '').strip()
+    if not database or not table:
+        return jsonify({'error': '缺少 database 或 table 参数'}), 400
+
+    from modules.pro import get_instance_manager
+    from modules.access import principal_from_session, assert_visible
+    ok, err = assert_visible(principal_from_session(), 'instance', ds_id)
+    if not ok:
+        return jsonify({'ok': False, **err}), 403
+    inst = get_instance_manager().get_instance_decrypted(ds_id)
+    if not inst:
+        return jsonify({'error': f'数据源不存在: {ds_id}'}), 404
+
+    from modules.sqleditor.metadata import normalize_db_type
+    from modules.sqleditor.table_info import SUPPORTED, load_table_info
+    norm = normalize_db_type(inst.get('db_type', ''))
+    if norm not in SUPPORTED:
+        return jsonify({'ok': True, 'supported': False, 'db_type': norm,
+                        'columns': [], 'indexes': [],
+                        'error': '该数据库类型暂不支持查看表属性（%s）' % (norm or '未知')})
+
+    conn = None
+    try:
+        conn, _fetch_mode = _open_editor_conn(inst, inst.get('db_type', ''), database, pooled=True)
+        if conn is None:
+            return jsonify({'error': '无法建立连接（%s）' % (norm or '未知')}), 500
+        result = load_table_info(conn, inst.get('db_type', ''), database, table)
+        result['ok'] = True
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e), 'db_type': norm}), 500
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
 
 
 # ══════════════════════════════════════════════════════════════
@@ -8309,17 +8551,18 @@ _SQL_CURSOR_TTL = 300  # 游标超时 5 分钟
 
 
 def _cleanup_expired_cursors():
-    """清理过期的 SQL 游标"""
+    """清理过期的 SQL 游标（连同底层连接一起释放）"""
     global _sql_cursors
     now = time.time()
-    expired = [k for k, v in _sql_cursors.items() if now - v.get('created_at', 0) > _SQL_CURSOR_TTL]
-    for k in expired:
+    expiredCursorIds = [cursorId for cursorId, cursorInfo in _sql_cursors.items()
+                        if now - cursorInfo.get('created_at', 0) > _SQL_CURSOR_TTL]
+    for cursorId in expiredCursorIds:
         try:
-            _sql_cursors[k]['cursor'].close()
-            _sql_cursors[k]['conn'].close()
+            _sql_cursors[cursorId]['cursor'].close()
+            _sql_cursors[cursorId]['conn'].close()
         except Exception:
             pass
-        del _sql_cursors[k]
+        del _sql_cursors[cursorId]
 
 
 import re as _re
@@ -8332,27 +8575,150 @@ _SQL_READONLY_ALLOW = frozenset({
 
 def _strip_sql_comments_and_literals(sql):
     """去掉注释与字符串字面量，便于安全切分语句（仅用于静态白名单检查，不改变语义）。"""
-    out = []
-    i, n = 0, len(sql)
-    in_str = None
-    while i < n:
-        c = sql[i]
-        if in_str:
-            if c == in_str:
-                if i + 1 < n and sql[i + 1] == in_str:  # 转义引号 '' / ""
-                    i += 2; continue
-                in_str = None
-            i += 1; continue
-        if c in ("'", '"', '`'):
-            in_str = c; out.append(c); i += 1; continue
-        if c == '-' and i + 1 < n and sql[i + 1] == '-':  # 行注释 --
-            j = sql.find('\n', i); i = n if j == -1 else j; continue
-        if c == '#':  # MySQL 行注释 #
-            j = sql.find('\n', i); i = n if j == -1 else j; continue
-        if c == '/' and i + 1 < n and sql[i + 1] == '*':  # 块注释 /* */
-            j = sql.find('*/', i + 2); i = n if j == -1 else j + 2; continue
-        out.append(c); i += 1
-    return ''.join(out)
+    keptCharacters = []
+    position = 0
+    textLength = len(sql)
+    activeQuote = None
+    while position < textLength:
+        character = sql[position]
+        if activeQuote:                                    # 字符串/引号标识符内部：整段跳过
+            if character == activeQuote:
+                if position + 1 < textLength and sql[position + 1] == activeQuote:
+                    position += 2                          # '' / "" 转义引号，不算结束
+                    continue
+                activeQuote = None
+            position += 1
+            continue
+        if character in ("'", '"', '`'):
+            activeQuote = character
+            keptCharacters.append(character)
+            position += 1
+            continue
+        if character == '-' and position + 1 < textLength and sql[position + 1] == '-':
+            lineEnd = sql.find('\n', position)             # 行注释 --
+            position = textLength if lineEnd == -1 else lineEnd
+            continue
+        if character == '#':                               # MySQL 行注释 #
+            lineEnd = sql.find('\n', position)
+            position = textLength if lineEnd == -1 else lineEnd
+            continue
+        if character == '/' and position + 1 < textLength and sql[position + 1] == '*':
+            blockCommentEnd = sql.find('*/', position + 2)  # 块注释 /* */
+            position = textLength if blockCommentEnd == -1 else blockCommentEnd + 2
+            continue
+        keptCharacters.append(character)
+        position += 1
+    return ''.join(keptCharacters)
+
+
+def _sql_owner_principal():
+    """当前请求的身份主体（无会话/匿名返回 None）。"""
+    try:
+        from modules.access import principal_from_session
+        return principal_from_session()
+    except Exception:
+        return None
+
+
+def _sql_owner_key(principal=None):
+    """游标归属键；匿名/无身份返回 '' 表示不校验（与 DBCHECK_ACCESS_STRICT 的降级策略一致）。"""
+    owner = principal if principal is not None else _sql_owner_principal()
+    if owner is None or getattr(owner, 'is_anonymous', False):
+        return ''
+    return 'u%s' % (getattr(owner, 'id', None) or getattr(owner, 'username', '') or '')
+
+
+def _split_sql_statements(sql, maxStatements=50):
+    """按分号安全切分多条 SQL，保留原文（要拿去执行）。
+
+    字符串、引号标识符、行/块注释、PostgreSQL 美元引用（$$ / $tag$）内部的分号不切；
+    语句自带的注释会一并带到该条里，避免把注释行当成语句。
+    只把 `--` 与 `/* */` 当注释：`#` 注释是 MySQL 方言，在 Oracle/PG 里会误伤
+    （如 APEX$ 之类的标识符），交给具体方言自己处理。
+    超过 maxStatements 条直接拒绝，防止一次请求打爆连接。
+    """
+    text = sql or ''
+    statements = []
+    fragmentCharacters = []
+    position = 0
+    textLength = len(text)
+    activeQuote = None
+    dollarQuoteTag = None
+
+    def meaningfulStatement(fragment):
+        """丢掉只剩注释/空白的段：注释行不该被当成一条语句送去执行。"""
+        stripped = fragment.strip()
+        if not stripped or not _strip_sql_comments_and_literals(stripped).strip():
+            return None
+        return stripped
+
+    while position < textLength:
+        character = text[position]
+        if activeQuote:                                        # 字符串 / 引号标识符内部
+            fragmentCharacters.append(character)
+            if character == activeQuote:
+                if position + 1 < textLength and text[position + 1] == activeQuote:
+                    fragmentCharacters.append(text[position + 1])   # '' / "" 转义
+                    position += 2
+                    continue
+                activeQuote = None
+            position += 1
+            continue
+        if dollarQuoteTag:                                     # 美元引用体：整段照搬到闭合标记
+            closingIndex = text.find(dollarQuoteTag, position)
+            if closingIndex == -1:                             # 没闭合：剩下的一律算这条语句
+                fragmentCharacters.append(text[position:])
+                position = textLength
+                break
+            fragmentCharacters.append(text[position:closingIndex + len(dollarQuoteTag)])
+            position = closingIndex + len(dollarQuoteTag)
+            dollarQuoteTag = None    # 闭合后必须清掉，否则后面整段都被吞进同一条语句
+            continue
+        if character in ("'", '"', '`'):
+            activeQuote = character
+            fragmentCharacters.append(character)
+            position += 1
+            continue
+        quoteTagMatch = _re.match(r'\$\$|\$[A-Za-z_][A-Za-z0-9_]*\$', text[position:])
+        if quoteTagMatch:
+            dollarQuoteTag = quoteTagMatch.group(0)
+            fragmentCharacters.append(dollarQuoteTag)
+            position += len(dollarQuoteTag)
+            continue
+        if character == '-' and position + 1 < textLength and text[position + 1] == '-':
+            lineEnd = text.find('\n', position)
+            lineEnd = textLength if lineEnd == -1 else lineEnd
+            fragmentCharacters.append(text[position:lineEnd])   # 行注释随本条语句一起保留
+            position = lineEnd
+            continue
+        if character == '/' and position + 1 < textLength and text[position + 1] == '*':
+            blockCommentEnd = text.find('*/', position + 2)
+            blockCommentEnd = textLength if blockCommentEnd == -1 else blockCommentEnd + 2
+            fragmentCharacters.append(text[position:blockCommentEnd])
+            position = blockCommentEnd
+            continue
+        if character == ';':
+            statement = meaningfulStatement(''.join(fragmentCharacters))
+            if statement:
+                statements.append(statement)
+            fragmentCharacters = []
+            position += 1
+            continue
+        fragmentCharacters.append(character)
+        position += 1
+
+    trailingStatement = meaningfulStatement(''.join(fragmentCharacters))
+    if trailingStatement:
+        statements.append(trailingStatement)
+    if len(statements) > maxStatements:
+        raise ValueError('一次最多执行 %d 条语句（当前 %d 条）' % (maxStatements, len(statements)))
+    return statements
+
+
+def _sql_kind_of(sql):
+    """给前端标页签用：查询类 query，其余 exec。"""
+    matched = _re.match(r'\s*(\w+)', sql or '')
+    return 'query' if (matched and matched.group(1).upper() in _SQL_READONLY_ALLOW) else 'exec'
 
 
 def _assert_readonly_sql(sql):
@@ -8362,17 +8728,17 @@ def _assert_readonly_sql(sql):
     任意一条非只读语句（含注入的第二条 DROP/DELETE 等）都会被整体拒绝。
     """
     cleaned = _strip_sql_comments_and_literals(sql)
-    stmts = [s.strip() for s in cleaned.split(';') if s.strip()]
-    if not stmts:
+    statements = [item.strip() for item in cleaned.split(';') if item.strip()]
+    if not statements:
         raise ValueError('未检测到有效 SQL 语句')
-    for idx, st in enumerate(stmts, 1):
-        m = _re.match(r'\w+', st)
-        if not m:
-            raise ValueError(f'第 {idx} 条语句无法识别，已拒绝执行（只读模式）')
-        lead = m.group(0).upper()
-        if lead not in _SQL_READONLY_ALLOW:
+    for order, statement in enumerate(statements, 1):
+        leadingWord = _re.match(r'\w+', statement)
+        if not leadingWord:
+            raise ValueError(f'第 {order} 条语句无法识别，已拒绝执行（只读模式）')
+        leadKeyword = leadingWord.group(0).upper()
+        if leadKeyword not in _SQL_READONLY_ALLOW:
             raise ValueError(
-                f'只读模式：不允许执行「{lead}」类命令（仅允许 '
+                f'只读模式：不允许执行「{leadKeyword}」类命令（仅允许 '
                 f'SELECT / SHOW / EXPLAIN / WITH / DESCRIBE / VALUES 等查询命令）'
             )
     return True
@@ -8422,29 +8788,31 @@ def _split_redis_command(sql):
         return sql.split()
 
 
-def _format_redis_value(v, _depth=0):
+def _format_redis_value(rawValue, nestingDepth=0):
     """将 redis-py 返回（多为 bytes/嵌套）转为可展示字符串。"""
-    if isinstance(v, bytes):
+    if isinstance(rawValue, bytes):
         try:
-            return v.decode('utf-8', 'replace')
+            return rawValue.decode('utf-8', 'replace')
         except Exception:
-            return repr(v)
-    if isinstance(v, (list, tuple)):
-        if _depth > 4:
+            return repr(rawValue)
+    if isinstance(rawValue, (list, tuple)):
+        if nestingDepth > 4:
             return '[...]'
-        return '[' + ', '.join(_format_redis_value(x, _depth + 1) for x in v) + ']'
-    if isinstance(v, dict):
-        if _depth > 4:
+        return '[' + ', '.join(_format_redis_value(element, nestingDepth + 1)
+                               for element in rawValue) + ']'
+    if isinstance(rawValue, dict):
+        if nestingDepth > 4:
             return '{...}'
         return '{' + ', '.join(
-            f'{_format_redis_value(k, _depth + 1)}: {_format_redis_value(val, _depth + 1)}'
-            for k, val in v.items()
+            f'{_format_redis_value(key, nestingDepth + 1)}: '
+            f'{_format_redis_value(value, nestingDepth + 1)}'
+            for key, value in rawValue.items()
         ) + '}'
-    if v is None:
+    if rawValue is None:
         return '(nil)'
-    if isinstance(v, bool):
-        return 'true' if v else 'false'
-    return str(v)
+    if isinstance(rawValue, bool):
+        return 'true' if rawValue else 'false'
+    return str(rawValue)
 
 
 @app.route('/api/execute_sql', methods=['POST'])
@@ -8457,10 +8825,483 @@ def api_execute_sql():
         - database: 数据库名（可选）
         - cursor_id: 游标 ID（翻页时提供，无需 sql）
     """
+    return _execute_sql_core(request.get_json(silent=True) or {})
+
+
+@app.route('/api/execute_sql_multi', methods=['POST'])
+def api_execute_sql_multi():
+    """SQL 编辑器多语句执行：服务端拆分 + 逐条独立执行（失败不中断），逐条回结果与游标。
+
+    与单语句接口共用 _execute_sql_core，方言连接分支只有一份；只读白名单同样逐条生效，
+    某条被判写操作只让该条失败，不影响其它语句。上限 50 条由拆分器把关。
+    """
+    payload = request.get_json(silent=True) or {}
+    instance_id = str(payload.get('instance_id') or '').strip()
+    database = str(payload.get('database') or '').strip()
+    sql_text = payload.get('sql') or ''
+    if not instance_id:
+        return jsonify({'error': '数据源 ID 不能为空'}), 400
+
+    from modules.access import assert_visible
+    visible, _reason = assert_visible(_sql_owner_principal(), 'instance', instance_id)
+    if not visible:
+        return jsonify({'error': '数据源不存在或无权访问'}), 403
+
+    try:
+        statements = _split_sql_statements(sql_text)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    if not statements:
+        return jsonify({'error': '未检测到有效 SQL 语句'}), 400
+
+    batchStartedAt = time.time()
+    results = []
+    for statementIndex, statement in enumerate(statements, 1):
+        statementStartedAt = time.time()
+        try:
+            coreResponse = _execute_sql_core({'instance_id': instance_id, 'sql': statement,
+                                              'database': database,
+                                              'schema': payload.get('schema') or ''})
+            if isinstance(coreResponse, tuple):
+                coreResponse = coreResponse[0]
+            resultBody = (coreResponse.get_json(silent=True) or {}
+                          if hasattr(coreResponse, 'get_json') else (coreResponse or {}))
+        except Exception as failure:                  # 单条异常也收敛成结果项，不中断整批
+            resultBody = {'error': str(failure)}
+        errorText = resultBody.get('error') or ''
+        results.append({
+            'index': statementIndex,
+            'sql': statement,
+            'kind': _sql_kind_of(statement),
+            'columns': resultBody.get('columns') or [],
+            'column_types': resultBody.get('column_types') or [],
+            'rows': resultBody.get('rows') or [],
+            'row_count': resultBody.get('row_count', 0),
+            'cursor_id': resultBody.get('cursor_id'),
+            'has_more': bool(resultBody.get('has_more')),
+            'message': resultBody.get('message') or '',
+            'error': errorText,
+            'elapsed_ms': int((time.time() - statementStartedAt) * 1000),
+        })
+
+    return jsonify({
+        'ok': all(not item['error'] for item in results),
+        'multi': True,
+        'statement_count': len(results),
+        'failed_count': sum(1 for item in results if item['error']),
+        'elapsed_ms': int((time.time() - batchStartedAt) * 1000),
+        'results': results,
+    })
+
+
+def pg_default_database(db_type):
+    """PG 系各产品在不指定库名时的默认业务库（与 /databases 保持同一张对照表）。"""
+    return {'kingbase': 'kingbase', 'hgdb': 'highgo', 'ivorysql': 'ivorysql',
+            'halodb': 'halo'}.get(db_type, 'postgres')
+
+
+def _is_jdbc_plugin_datasource(raw_db_type):
+    """该数据源是否由插件（JDBC 等）负责建连。
+
+    本仓库的约定是「``_jdbc`` 只是连接实现方式，不改变数据库种类」
+    （见 modules.driver_registry.normalize_db_type 的说明），所以带这个后缀的类型
+    必须由插件按登记的驱动/连接串去连，不能按基础类型退回原生驱动。
+    """
+    return str(raw_db_type or '').strip().lower().endswith('_jdbc')
+
+
+def _open_jdbc_plugin_conn(raw_db_type, db_info, database=None):
+    """按数据源登记的连接方式（插件）建连，返回 DB-API 2.0 兼容连接。
+
+    与「数据源管理」页测试连接、实时监控深采走同一条路：
+    ``modules.pluginkit.loader.get_plugin_module(<类型>).get_connection(...)``。
+    为什么编辑器必须也走这里 —— 例如 oracle_jdbc：原生 oracledb 的 thin 模式连不上
+    11g，需要 Instant Client；而插件是 ojdbc8.jar + JPype 起 JVM，不依赖客户端。
+    之前编辑器按「去掉 _jdbc 的基础类型」退回原生驱动，于是同一个数据源在数据源页
+    能测通、在 SQL 编辑器里却冒出「需要 Oracle Instant Client」。
+
+    参数用「按签名取交集」的方式传：各插件 get_connection 的形参名是同一套词表
+    （host/port/user/password/database/service_name/sysdba/jdbc_url/driver_version/
+    instance_name/encrypt/trust_server_certificate/use_sid…），这里只准备候选值，
+    由插件自己挑要用的，新增插件不用改这段代码。
+    """
+    import inspect
+
+    rawType = str(raw_db_type or '').strip().lower()
+    try:
+        from modules.pluginkit.loader import get_plugin_module
+    except Exception as failure:
+        raise RuntimeError('加载插件系统失败：%s' % failure)
+    module = get_plugin_module(rawType)
+    if module is None or not hasattr(module, 'get_connection'):
+        raise RuntimeError('%s 插件未启用或缺少 get_connection 入口，请先在插件管理中启用对应插件' % rawType)
+
+    factory = getattr(module, 'get_connection')
+    candidates = {
+        'host': db_info.get('host', ''),
+        'port': int(db_info.get('port', 0) or 0) or None,
+        'user': db_info.get('user', ''),
+        'password': db_info.get('password') or '',
+        'database': (database or db_info.get('database') or '').strip() or None,
+        'service_name': db_info.get('service_name') or None,
+        'sid': db_info.get('sid') or None,
+        'sysdba': bool(db_info.get('sysdba')),
+        'use_sid': bool(db_info.get('use_sid')),
+        'jdbc_url': db_info.get('jdbc_url') or None,
+        'driver_version': db_info.get('driver_version') or '',
+        'instance_name': db_info.get('instance_name') or None,
+        'encrypt': bool(db_info.get('encrypt')),
+        'trust_server_certificate': bool(db_info.get('trust_server_certificate')),
+        'gbase_server_name': db_info.get('gbase_server_name') or None,
+    }
+    try:
+        accepted = inspect.signature(factory).parameters
+    except (TypeError, ValueError):
+        accepted = {}
+    kwargs = {}
+    for name, value in candidates.items():
+        if name not in accepted:
+            continue
+        parameter = accepted[name]
+        if parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD):
+            continue
+        # 端口没填就干脆不传，让插件用自己的默认端口（各产品默认端口不一样）
+        if name == 'port' and not value:
+            continue
+        kwargs[name] = value
+    connection = factory(**kwargs)
+    if connection is None:
+        raise RuntimeError('%s 插件返回了空连接' % rawType)
+    return connection
+
+
+def _plugin_tree_sql(dialect, database):
+    """插件型数据源的「库 / 表 / 视图」字典 SQL（与原生分支同一套查询）。
+
+    JDBC 包装层的游标只收一条 SQL、不支持参数绑定，所以这里的 owner / 库名
+    一律走 `_lit` 内联成字面量（含引号、控制字符或超长直接拒绝）。
+    返回 ``(databasesSql, tablesSql, viewsSql)``，未收录的方言返回 None。
+    """
+    from modules.sqleditor.metadata import MYSQL_FAMILY, PG_FAMILY, _lit
+
+    quotedDatabase = _lit(database, "'") if database else None
+    if database and not quotedDatabase:
+        return None
+
+    if dialect == 'oracle':
+        return ("SELECT username FROM all_users ORDER BY username",
+                "SELECT table_name FROM all_tables WHERE owner = %s ORDER BY table_name" % quotedDatabase,
+                "SELECT view_name FROM all_views WHERE owner = %s ORDER BY view_name" % quotedDatabase)
+    if dialect == 'sqlserver':
+        return ("SELECT name FROM sys.databases ORDER BY name",
+                "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES "
+                "WHERE TABLE_TYPE='BASE TABLE' AND TABLE_CATALOG=%s ORDER BY TABLE_NAME" % quotedDatabase,
+                "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES "
+                "WHERE TABLE_TYPE='VIEW' AND TABLE_CATALOG=%s ORDER BY TABLE_NAME" % quotedDatabase)
+    if dialect == 'db2':
+        return (None,
+                "SELECT TABNAME FROM SYSCAT.TABLES WHERE TABSCHEMA NOT LIKE 'SYS%%' "
+                "AND TYPE = 'T' ORDER BY TABNAME",
+                "SELECT TABNAME FROM SYSCAT.TABLES WHERE TABSCHEMA NOT LIKE 'SYS%%' "
+                "AND TYPE = 'V' ORDER BY TABNAME")
+    if dialect == 'clickhouse':
+        quoted = quotedDatabase or "'default'"
+        return ("SHOW DATABASES",
+                "SELECT name FROM system.tables WHERE database = %s AND position(engine, 'View') = 0 "
+                "ORDER BY name" % quoted,
+                "SELECT name FROM system.tables WHERE database = %s AND position(engine, 'View') > 0 "
+                "ORDER BY name" % quoted)
+    if dialect in PG_FAMILY:
+        return ("SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname",
+                "SELECT schemaname, tablename FROM pg_catalog.pg_tables "
+                "WHERE schemaname NOT IN ('pg_catalog','information_schema','pg_toast') "
+                "ORDER BY schemaname, tablename",
+                "SELECT schemaname, viewname FROM pg_catalog.pg_views "
+                "WHERE schemaname NOT IN ('pg_catalog','information_schema') "
+                "ORDER BY schemaname, viewname")
+    if dialect in MYSQL_FAMILY:
+        return ("SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA ORDER BY SCHEMA_NAME",
+                "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES "
+                "WHERE TABLE_SCHEMA=%s AND TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME" % quotedDatabase,
+                "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES "
+                "WHERE TABLE_SCHEMA=%s AND TABLE_TYPE='VIEW' ORDER BY TABLE_NAME" % quotedDatabase)
+    return None
+
+
+def _plugin_tree_rows(inst, database, sqlIndex):
+    """在插件（JDBC）连接上跑一条字典查询，返回原始行（tuple 列表）。"""
+    from modules.sqleditor.metadata import normalize_db_type
+    dialect = normalize_db_type(inst.get('db_type', ''))
+    treeSql = _plugin_tree_sql(dialect, database)
+    if not treeSql or not treeSql[sqlIndex]:
+        raise RuntimeError('%s 类型暂不支持该字典查询' % (inst.get('db_type') or dialect))
+    connection, _fetchMode = _open_editor_conn(inst, inst.get('db_type', ''), database, pooled=True)
+    try:
+        # 过一道 adapt_cursor：JDBC 游标默认一次只预取 10 行，几千行的字典查询要打几百次
+        # 网络往返（实测 9361 行名单要 12s，其中 11.9s 在取数）；补齐的适配层会顺手调大预取。
+        from modules.sqleditor.metadata import adapt_cursor
+        cursor = adapt_cursor(connection.cursor())
+        cursor.execute(treeSql[sqlIndex])
+        rawRows = cursor.fetchall()
+        cursor.close()
+    finally:
+        try:
+            connection.close()
+        except Exception:
+            pass
+    rows = []
+    for row in rawRows:
+        if isinstance(row, dict):
+            rows.append(tuple(row.values()))
+        elif isinstance(row, (list, tuple)):
+            rows.append(tuple(row))
+        else:
+            rows.append((row,))
+    return rows
+
+
+def _pluginTreeColumnValues(rows, column=0):
+    """取某一列的去重字符串值（保持数据库返回的顺序）。"""
+    values = []
+    for row in rows:
+        if column >= len(row) or row[column] is None:
+            continue
+        text = str(row[column])
+        if text and text not in values:
+            values.append(text)
+    return values
+
+
+def _build_editor_conn(db_info, db_type, database):
+    """按库类型建立一条全新的 SQL 编辑器连接，返回 ``(conn, fetch_mode)``。
+
+    fetch_mode：``'dict'`` —— 取出的行是 dict（pymysql DictCursor）；``'tuple'`` —— 序列。
+    不支持的方言返回 ``(None, None)``，由调用方给出可读错误。
+
+    单语句执行、多语句执行、对象树/元数据、表属性都走这一个入口：本仓库支持的方言里，
+    Oracle 厚模式回退、OceanBase 的 ``user@tenant`` 路由、ClickHouse/DB2/GBase 的 JDBC 包装、
+    PG 系各产品的默认库名差异，只在这里处理一次，不要在各接口里复制第二套。
+
+    插件型数据源（``*_jdbc``）优先按登记的连接方式建连，见
+    :func:`_open_jdbc_plugin_conn`。
+
+    多语句场景一律尽力开启 **autocommit**：否则某条语句报错会让事务进入 aborted 状态，
+    后续语句连环失败（PG / MySQL 尤其明显），用户看到的就是「一条错、全错」。
+    """
+    from modules.sqleditor.metadata import MYSQL_FAMILY, PG_FAMILY, normalize_db_type
+    rawDbType = str(db_type or db_info.get('db_type', '') or '').strip()
+    if _is_jdbc_plugin_datasource(rawDbType):
+        # 这里不吞异常：插件没启用/驱动缺失时，把插件给的原话抛给前端，
+        # 比退回原生驱动再报一句莫名其妙的「需要 Instant Client」有用得多。
+        return _open_jdbc_plugin_conn(rawDbType, db_info, database), 'tuple'
+
+    dialect = normalize_db_type(rawDbType)
+    host = db_info.get('host', '')
+    port = int(db_info.get('port', 0) or 0)
+    user = db_info.get('user', '')
+    pwd = db_info.get('password') or ''
+    timeout = 10
+
+    def _autocommit(conn):
+        try:
+            conn.autocommit = True
+        except Exception:
+            pass
+        return conn
+
+    if dialect in MYSQL_FAMILY:
+        import pymysql
+        # OceanBase MySQL 租户：用户名须带 @tenant 才能路由到正确租户（与 /databases、/objects 一致）
+        routedUser = user
+        if dialect == 'oceanbase':
+            _tenant = db_info.get('tenant', '') or ''
+            if _tenant:
+                routedUser = '%s@%s' % (user, _tenant)
+        conn = pymysql.connect(
+            host=host, port=port or 3306, user=routedUser, password=pwd,
+            database=database or 'INFORMATION_SCHEMA', charset='utf8mb4',
+            connect_timeout=timeout, autocommit=True
+        )
+        return conn, 'dict'
+
+    if dialect in PG_FAMILY:
+        import psycopg2
+        conn = psycopg2.connect(
+            host=host, port=port or 5432, user=user, password=pwd,
+            dbname=database or pg_default_database(dialect), connect_timeout=timeout
+        )
+        return _autocommit(conn), 'tuple'
+
+    if dialect == 'oracle':
+        import oracledb
+        serviceName = db_info.get('service_name', '') or ''
+        sid = db_info.get('sid', '') or ''
+        if serviceName:
+            dsn = oracledb.makedsn(host=host, port=port or 1521, service_name=serviceName)
+        elif sid:
+            dsn = oracledb.makedsn(host=host, port=port or 1521, sid=sid)
+        else:
+            dsn = '%s:%s/orcl' % (host, port or 1521)
+        conn = _connect_oracle_thick_fallback(
+            user, pwd, dsn, sysdba=db_info.get('sysdba', False))
+        return _autocommit(conn), 'tuple'
+
+    if dialect == 'sqlserver':
+        import pyodbc
+        conn_str = _build_sqlserver_conn_str(host, port, user, pwd,
+                                             database=database, timeout=timeout)
+        return _autocommit(pyodbc.connect(conn_str)), 'tuple'
+
+    if dialect == 'dm':
+        import dmPython
+        return _autocommit(dmPython.connect(user=user, password=pwd,
+                                           server=host, port=port or 5236)), 'tuple'
+
+    if dialect == 'yashandb':
+        import yasdb
+        return _autocommit(yasdb.connect(host=host, port=port or 1688,
+                                         user=user, password=pwd)), 'tuple'
+
+    if dialect == 'clickhouse':
+        from plugins.available.clickhouse_jdbc.main_plugin import get_connection
+        return get_connection(host, port or 8123, user, pwd,
+                              database=database or 'default'), 'tuple'
+
+    if dialect == 'db2':
+        from plugins.available.db2_jdbc.main_plugin import get_connection
+        return get_connection(host, port, user, pwd,
+                              database=database or 'testdb'), 'tuple'
+
+    if dialect == 'gbase':
+        # GBase 8s 统一走共享 JDBC 入口（与 /databases、/objects、巡检器一致），
+        # 不在这里内联 jaydebeapi，绕开驱动管理会拿到不一致的驱动版本。
+        from modules.entrypoints.main_gbase import connect_gbase_jdbc
+        conn, _jdbc_basename = connect_gbase_jdbc(
+            host, port or 1528, user, pwd,
+            database=database or 'gbase01',
+            gbase_server_name=db_info.get('gbase_server_name', 'gbase01') or 'gbase01',
+            driver_version=db_info.get('driver_version', '') or '')
+        return conn, 'tuple'
+
+    return None, None
+
+
+def _open_editor_conn(db_info, db_type, database, pooled=False):
+    """SQL 编辑器统一建连入口；``pooled=True`` 时复用字典查询连接。
+
+    字典类查询（对象树 / 元数据 / 表属性 / schema 名单）的痛点是**建连比查询还贵**：
+    实测 oracle_jdbc 一次建连 260~1300ms、首次含 JVM 启动 3.5s，而 all_tables 只要
+    几十到几百毫秒。用户展开一个库、点开一张表就是三四次建连，界面表现就是
+    「点一下卡一下」。所以这些只读查询走 :mod:`modules.sqleditor.conn_pool`。
+
+    执行 SQL 那条路**不进池**：它要把游标留在进程里做翻页，连接生命周期归游标管，
+    混用会让两条路径互相踩（翻页时连接已被别的请求借走 → 结果集错乱）。
+    """
+    if not pooled:
+        return _build_editor_conn(db_info, db_type, database)
+
+    from modules.sqleditor import conn_pool
+    from modules.sqleditor.metadata import MYSQL_FAMILY, OWNER_FAMILY, normalize_db_type
+    dialect = normalize_db_type(db_type or db_info.get('db_type', ''))
+    fetchMode = 'dict' if dialect in MYSQL_FAMILY else 'tuple'
+    # Oracle / 达梦 / 崖山：编辑器里的「数据库」其实是 owner，只是查询条件
+    # （WHERE owner = …），既不进连接串也不影响建连参数。所以这几类的池键要忽略它，
+    # 否则在树里每点开一个 owner 就重新建连一次（实测每次 0.3~3s，「点一下卡一下」）。
+    connectionTarget = '' if dialect in OWNER_FAMILY else (database or '')
+
+    def _connect():
+        conn, _mode = _build_editor_conn(db_info, db_type, connectionTarget)
+        return conn
+
+    handle, _fromPool = conn_pool.open_pooled(db_info, db_type, connectionTarget, _connect)
+    if handle is None:
+        return None, None
+    return handle, fetchMode
+
+
+def _pooled_editor_conn(db_info, db_type, database):
+    """给 metadata / list_schemas 当 conn_opener 用：签名一致，内部走连接池。"""
+    return _open_editor_conn(db_info, db_type, database, pooled=True)
+
+
+def _editor_cursor(conn, fetch_mode):
+    """按 fetch_mode 取游标；MySQL 系用 DictCursor（列名取值，兼容旧前端逻辑）。
+
+    出口统一过一遍 adapt_cursor：JDBC 插件包装层的游标没有 fetchmany、
+    也不收绑定参数，补齐后执行与翻页逻辑对所有连接方式只有一条路径。
+    **用户自己执行的 SQL 不设语句超时**（慢查询等多久由用户决定），
+    字典查询那几条路径才用默认的 30s 护栏。
+    """
+    from modules.sqleditor.metadata import adapt_cursor
+    if fetch_mode == 'dict':
+        try:
+            import pymysql
+            return adapt_cursor(conn.cursor(pymysql.cursors.DictCursor), queryTimeoutSeconds=None)
+        except Exception:
+            pass
+    return adapt_cursor(conn.cursor(), queryTimeoutSeconds=None)
+
+
+def _quote_sql_identifier(value, quote='"'):
+    """把「目标用户/库/模式」安全地引用成标识符（下拉里选来的值也要防注入）。
+
+    含引号、控制字符或超长一律拒绝（返回 None），调用方跳过即可 —— 宁可不设，
+    也不能拼出坏 SQL。
+    """
+    rawValue = str(value or '').strip()
+    if not rawValue or len(rawValue) > 128 or _re.search(r'[\x00-\x1f]', rawValue) or quote in rawValue:
+        return None
+    return quote + rawValue.replace(quote, quote * 2) + quote
+
+
+def _apply_session_target(conn, db_type, database, schema=''):
+    """把「在哪个用户/库/模式下执行」落到数据库会话上（尽力而为，失败只记日志）。
+
+    各库能生效的方式本来就不同，集中在一处（单一真源）：
+      - Oracle / DM / 崖山：树的「数据库」维度就是 owner → ``ALTER SESSION SET CURRENT_SCHEMA``
+        （这才是「以某用户身份执行未限定对象名」的正解，只传 database 对 Oracle 完全不生效）；
+      - PG / IvorySQL / Kingbase / HGDB / HaloDB：库由连接串的 dbname 决定，模式用 ``SET search_path``；
+      - MySQL 系 / SQL Server：库即连接参数；T-SQL 没有会话级默认模式，跨模式靠「schema.表名」限定。
+    """
+    from modules.sqleditor.metadata import PG_FAMILY, normalize_db_type
+    dialect = normalize_db_type(db_type)
+    statement = None
+    if dialect in ('oracle', 'dm', 'yashandb') and database:
+        quotedIdentifier = _quote_sql_identifier(database.upper())
+        if quotedIdentifier:
+            statement = 'ALTER SESSION SET CURRENT_SCHEMA = %s' % quotedIdentifier
+    elif dialect in PG_FAMILY and schema:
+        quotedIdentifier = _quote_sql_identifier(schema)
+        if quotedIdentifier:
+            statement = 'SET search_path TO %s, public' % quotedIdentifier
+    if not statement:
+        return
+    cur = None
+    try:
+        cur = conn.cursor()
+        cur.execute(statement)
+    except Exception as e:
+        print('[SQL Editor] 设置会话目标失败（已忽略）: %s -> %s' % (statement, e))
+    finally:
+        try:
+            if cur is not None:
+                cur.close()
+        except Exception:
+            pass
+
+
+def _execute_sql_core(data):
+    """单条语句的执行核心，返回 jsonify 结果（或 (jsonify, status)）。
+
+    从 api_execute_sql 抽出，供 /api/execute_sql 与 /api/execute_sql_multi 共用：
+    16 种方言的连接与取数分支只此一份，多语句接口不必复制第二套。
+    """
+    from modules.sqleditor.metadata import column_type_label, json_safe_value
+
     # 清理过期游标
     _cleanup_expired_cursors()
 
-    data = request.get_json()
+    data = data or {}
     cursor_id = data.get('cursor_id')
 
     try:
@@ -8472,6 +9313,10 @@ def api_execute_sql():
     # ── 游标翻页 ──────────────────────────────────────────────
     if cursor_id and cursor_id in _sql_cursors:
         cur_info = _sql_cursors[cursor_id]
+        # 游标按「谁创建谁续读」校验归属（旧游标无 owner 字段时放行，升级不炸）
+        owner = _sql_owner_key()
+        if cur_info.get('owner') and owner != cur_info['owner']:
+            return jsonify({'error': '游标不属于当前用户'}), 403
         cur_info['created_at'] = time.time()  # 刷新过期时间
         try:
             cursor = cur_info['cursor']
@@ -8480,7 +9325,10 @@ def api_execute_sql():
             new_cursor_id = cursor_id if has_more else None
             return jsonify({
                 'columns': cur_info['columns'],
-                'rows': rows,
+                'column_types': cur_info.get('column_types') or [],
+                'rows': [[json_safe_value(cell) for cell in (r if not isinstance(r, dict) else
+                                                             [r.get(c) for c in cur_info['columns']])]
+                        for r in rows],
                 'cursor_id': new_cursor_id,
                 'has_more': has_more,
                 'row_count': len(rows)
@@ -8505,6 +9353,13 @@ def api_execute_sql():
     if not sql:
         return jsonify({'error': 'SQL 不能为空'}), 400
 
+    # 与 /databases、/objects 一致：先按身份判定可见性，再取解密连接。
+    # 之前这里直接 get_instance_decrypted，任意登录用户拿到/猜到 instance_id
+    # 就能对别人范围内的数据源跑查询。
+    from modules.access import assert_visible
+    visible, _reason = assert_visible(_sql_owner_principal(), 'instance', instance_id)
+    if not visible:
+        return jsonify({'error': '数据源不存在或无权访问'}), 403
     db_info = im.get_instance_decrypted(instance_id)
     if not db_info:
         return jsonify({'error': '数据源不存在'}), 404
@@ -8567,100 +9422,25 @@ def api_execute_sql():
         except ValueError as e:
             return jsonify({'error': str(e)}), 403
 
-        if db_type in ('mysql', 'tidb', 'mariadb', 'oceanbase', 'tdsqlc_mysql'):
-            import pymysql
-            db_name = database or 'INFORMATION_SCHEMA'
-            conn = pymysql.connect(
-                host=host, port=port, user=user, password=pwd,
-                database=db_name, charset='utf8mb4', connect_timeout=10
-            )
-            cursor = conn.cursor(pymysql.cursors.DictCursor)
-            cursor.execute(sql)
-            columns = [desc[0] for desc in cursor.description] if cursor.description else []
-            rows = cursor.fetchmany(200)
-            has_more = len(rows) >= 200
-
-        elif db_type in ('postgresql', 'ivorysql', 'halodb', 'kingbase', 'hgdb'):
-            import psycopg2
-            db_name = database or ('highgo' if db_type == 'hgdb' else ('ivorysql' if db_type == 'ivorysql' else ('halo' if db_type == 'halodb' else 'postgres')))
-            conn = psycopg2.connect(
-                host=host, port=port, user=user, password=pwd,
-                dbname=db_name, connect_timeout=10
-            )
-            cursor = conn.cursor()
-            cursor.execute(sql)
-            columns = [desc[0] for desc in cursor.description] if cursor.description else []
-            rows = cursor.fetchmany(200)
-            has_more = len(rows) >= 200
-
-        elif db_type == 'oracle':
-            import oracledb
-            svc = db_info.get('service_name', '') or ''
-            sid = db_info.get('sid', '') or ''
-            if svc:
-                dsn = oracledb.makedsn(host=host, port=int(port), service_name=svc)
-            elif sid:
-                dsn = oracledb.makedsn(host=host, port=int(port), sid=sid)
-            else:
-                dsn = f"{host}:{port}/orcl"
-            sysdba = db_info.get('sysdba', False)
-            conn = _connect_oracle_thick_fallback(user, pwd, dsn, sysdba=sysdba)
-            cursor = conn.cursor()
-            cursor.execute(sql)
-            columns = [desc[0] for desc in cursor.description] if cursor.description else []
-            rows = cursor.fetchmany(200)
-            has_more = len(rows) >= 200
-
-        elif db_type == 'sqlserver':
-            conn_str = _build_sqlserver_conn_str(host, port, user, pwd, database=database, timeout=10)
-            import pyodbc
-            conn = pyodbc.connect(conn_str)
-            cursor = conn.cursor()
-            cursor.execute(sql)
-            columns = [col[0] for col in cursor.description] if cursor.description else []
-            rows = cursor.fetchmany(200)
-            has_more = len(rows) >= 200
-
-        elif db_type == 'dm':
-            import dmPython
-            conn = dmPython.connect(user=user, password=pwd, server=host, port=port)
-            cursor = conn.cursor()
-            cursor.execute(sql)
-            columns = [desc[0] for desc in cursor.description] if cursor.description else []
-            rows = cursor.fetchmany(200)
-            has_more = len(rows) >= 200
-
-        elif db_type == 'yashandb':
-            import yasdb
-            conn = yasdb.connect(host=host, port=int(port), user=user, password=pwd)
-            cursor = conn.cursor()
-            cursor.execute(sql)
-            columns = [desc[0] for desc in cursor.description] if cursor.description else []
-            rows = cursor.fetchmany(200)
-            has_more = len(rows) >= 200
-
-        elif db_type == 'db2':
-            from plugins.available.db2_jdbc.main_plugin import get_connection
-            db_name = database or 'testdb'
-            conn = get_connection(host, port, user, pwd, database=db_name)
-            cursor = conn.cursor()
-            cursor.execute(sql)
-            columns = [desc[0] for desc in cursor.description] if cursor.description else []
-            rows = cursor.fetchmany(200)
-            has_more = len(rows) >= 200
-
-        elif db_type == 'clickhouse':
-            from plugins.available.clickhouse_jdbc.main_plugin import get_connection
-            db_name = database or 'default'
-            conn = get_connection(host, int(port), user, pwd, database=db_name)
-            cursor = conn.cursor()
-            cursor.execute(sql)
-            columns = [desc[0] for desc in cursor.description] if cursor.description else []
-            rows = cursor.fetchmany(200)
-            has_more = len(rows) >= 200
-
-        else:
+        # 传**原始** db_type：*_jdbc 后缀代表「这个数据源由插件按登记的驱动连接」，
+        # 在这里先归一化会把 oracle_jdbc 降级成 oracle，于是又退回原生 oracledb，
+        # 11g 没装 Instant Client 时报一句莫名其妙的客户端提示（数据源页却是好的）。
+        conn, fetch_mode = _open_editor_conn(db_info, db_info.get('db_type', ''), database)
+        if conn is None:
             return jsonify({'error': f'不支持的数据库类型: {db_type}'}), 400
+        # 把「在哪个用户/库/模式下执行」落到会话上（Oracle/DM/崖山 = owner，PG 系 = search_path）
+        _apply_session_target(conn, db_type, database, data.get('schema') or '')
+
+        cursor = _editor_cursor(conn, fetch_mode)
+        cursor.execute(sql)
+        # 列名同样要过一遍：JDBC 包装层的 description 里是 java.lang.String，
+        # 直接 jsonify 会抛「Object of type java.lang.String is not JSON serializable」
+        columns = [json_safe_value(desc[0]) for desc in cursor.description] if cursor.description else []
+        # 列类型一并带回：前端据此把 CLOB/BLOB 列按 PL/SQL Developer 的方式展示
+        # （网格里只放标记 + 预览，双击再看全文），而不是把 Java 对象地址塞进格子。
+        column_types = [column_type_label(desc) for desc in cursor.description] if cursor.description else []
+        rows = cursor.fetchmany(200)
+        has_more = len(rows) >= 200
 
         # 判断是否为 SELECT 查询（有列描述说明是查询）
         if not columns:
@@ -8671,13 +9451,16 @@ def api_execute_sql():
                 conn.close()
             return jsonify({'columns': [], 'rows': [], 'message': '执行成功', 'row_count': 0})
 
-        # 构建结果
+        # 构建结果：单元格统一过 json_safe_value（与翻页分支一致）——
+        # 原生驱动的 Decimal / datetime / LOB 也要收口，否则 jsonify 会直接 500，
+        # 或者把 LOB 对象当成不可序列化对象。
         row_dicts = []
         for row in rows:
             if isinstance(row, dict):
-                row_dicts.append([row.get(c) for c in columns])
+                cells = [row.get(character) for character in columns]
             else:
-                row_dicts.append(list(row))
+                cells = list(row)
+            row_dicts.append([json_safe_value(cell) for cell in cells])
 
         total_count = len(row_dicts)
         new_cursor_id = None
@@ -8687,7 +9470,9 @@ def api_execute_sql():
                 'conn': conn,
                 'cursor': cursor,
                 'columns': columns,
-                'created_at': time.time()
+                'column_types': column_types,
+                'created_at': time.time(),
+                'owner': _sql_owner_key(),
             }
         else:
             cursor.close()
@@ -8695,6 +9480,7 @@ def api_execute_sql():
 
         return jsonify({
             'columns': columns,
+            'column_types': column_types,
             'rows': row_dicts,
             'cursor_id': new_cursor_id,
             'has_more': has_more,
@@ -8714,6 +9500,66 @@ def api_execute_sql():
         except Exception:
             pass
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/sql_metadata', methods=['GET'])
+def api_sql_metadata():
+    """SQL 编辑器自动补全需要的对象元数据（表/视图 + 列名）。
+
+    参数:
+        - instance_id: 数据源 ID（必填）
+        - database:    库名 / schema（Oracle 系为 owner）；留空则用当前 schema
+        - objects_only: 传 1 只取对象名单（不带列，大范围兜底用，快得多）
+        - full:        传 1 强制「对象 + 全部列」，即使在没指定 database 的全库范围下
+        - tables:      逗号分隔的表名，只取这些表的列（前端敲到 `表名.` 时按需补）
+        - refresh:     传 1 跳过缓存强制刷新
+
+    **未指定 database 时默认只给对象名单**（`objects_only`）：不限定 owner/schema 的
+    「全部表 + 全部列」是一次整实例数据字典扫描，实测 Oracle 要 15s（484 表 / 11220 列），
+    而名单只要 1s。前端敲到 `表名.` 会按需补列，代价毫秒级，所以默认走名单模式；
+    真需要全量列（例如换了个数据源、想一次把提示灌满）就显式带 `full=1`。
+
+    与 /execute_sql、/databases、/objects 一致：先按身份判定可见性，再取解密连接建库。
+    返回结构见 :func:`modules.sqleditor.metadata.load_metadata`；未覆盖的方言返回
+    ok=False + error（前端退化成「只有关键字提示」，不影响正常写 SQL）。
+    """
+    instance_id = (request.args.get('instance_id') or '').strip()
+    database = (request.args.get('database') or '').strip()
+    force = (request.args.get('refresh') or '').strip() in ('1', 'true', 'yes')
+    objects_only = (request.args.get('objects_only') or '').strip() in ('1', 'true', 'yes')
+    fullRequested = (request.args.get('full') or '').strip() in ('1', 'true', 'yes')
+    tables_raw = (request.args.get('tables') or '').strip()
+    requestedTables = ([token for token in _re.split(r'[,\s]+', tables_raw) if token]
+                       if tables_raw else None)
+    if not fullRequested and not objects_only and not requestedTables and not database:
+        objects_only = True
+
+    if not instance_id:
+        return jsonify({'ok': False, 'error': '数据源 ID 不能为空'}), 400
+
+    from modules.access import assert_visible
+    visible, _reason = assert_visible(_sql_owner_principal(), 'instance', instance_id)
+    if not visible:
+        return jsonify({'ok': False, 'error': '数据源不存在或无权访问'}), 403
+
+    try:
+        from modules.pro import get_instance_manager
+        db_info = get_instance_manager().get_instance_decrypted(instance_id)
+    except ImportError:
+        return jsonify({'ok': False, 'error': 'Pro 模块未安装'}), 500
+    if not db_info:
+        return jsonify({'ok': False, 'error': '数据源不存在'}), 404
+
+    from modules.sqleditor.metadata import load_metadata
+    try:
+        payload = load_metadata(db_info, db_info.get('db_type', ''), database,
+                                force=force, objects_only=objects_only, tables=requestedTables,
+                                conn_opener=_pooled_editor_conn)
+        return jsonify(payload)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'ok': False, 'error': '%s: %s' % (type(e).__name__, e)}), 500
 
 
 # ══════════════════════════════════════════════════════════════
