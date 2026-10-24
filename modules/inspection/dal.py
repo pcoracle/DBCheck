@@ -74,6 +74,19 @@ def _migrate_legacy_db_if_needed() -> None:
         print(f"[巡检] 遗留数据库迁移跳过: {e}")
 
 
+def _ensure_columns(cursor, table: str, columns) -> None:
+    """给已存在的老库增量补列。
+
+    SQLite 的 `CREATE TABLE IF NOT EXISTS` 不会升级已有表的列，仓库里巡检三张表
+    过去没有任何迁移入口，新增字段必须靠这里补齐；本函数幂等，重复调用不产生副作用。
+    """
+    cursor.execute("PRAGMA table_info(%s)" % table)
+    existing = {row[1] for row in cursor.fetchall()}
+    for name, ddl in columns:
+        if name not in existing:
+            cursor.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, name, ddl))
+
+
 def _ensure_tables(conn):
     """
     检查并创建所有必要的表（如果不存在）。
@@ -93,11 +106,15 @@ def _ensure_tables(conn):
             description TEXT,
             is_default INTEGER DEFAULT 0,
             is_preset INTEGER DEFAULT 0,
+            clone_from INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(db_type, template_name_zh)
         )
     """)
+
+    # 老库升级：clone_from 记录「克隆自哪个模板」，供副本溯源与预置只读语义使用
+    _ensure_columns(cursor, 'inspection_template', [('clone_from', 'INTEGER')])
     
     # 检查是否需要初始化预设数据（仅当模板表为空时）
     cursor.execute("SELECT COUNT(*) FROM inspection_template")
@@ -210,15 +227,30 @@ def get_db_connection(db_path: str = None) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row  # 使结果可以通过列名访问
     conn.execute("PRAGMA foreign_keys = ON")  # 启用外键约束
-    
+
     # 自动初始化数据库表（仅首次）
     global _db_initialized
     if not _db_initialized:
         _ensure_tables(conn)
         conn.commit()
         _db_initialized = True
-    
+    else:
+        # 增量列不能只靠「首次建表」：_db_initialized 是进程级开关，
+        # 若本进程第一次连的是别的库（测试/多库），默认库就永远升不了级，
+        # 之后所有 SELECT 到新列的语句都会炸。这里每次连接都廉价检查一下。
+        _ensure_columns_for_connection(conn)
+
     return conn
+
+
+def _ensure_columns_for_connection(conn) -> None:
+    """按连接补齐 inspection_template 的增量列（PRAGMA 只读，缺列才 ALTER）。"""
+    try:
+        _ensure_columns(conn.cursor(), 'inspection_template', [('clone_from', 'INTEGER')])
+        conn.commit()
+    except sqlite3.OperationalError:
+        # 表还不存在：首次建表路径本身已带该列，忽略
+        pass
 
 
 def init_database(db_path: str = None):
@@ -300,6 +332,103 @@ def create_template(db_type: str, template_name: str, description: str = None,
         conn.close()
 
 
+def clone_template(template_id: int, new_name: str = None, db_path: str = None) -> int:
+    """克隆巡检模板（连同章节与 SQL 查询），产出一份可自由编辑的副本。
+
+    对齐旧版「预置模板只读、克隆后再改」的用法：副本一律 `is_preset=0`、
+    `is_default=0`，并用 `clone_from` 记下来源模板 id，前端可据此显示「副本」徽标。
+    克隆只做复制，保留原有 enabled / sort_order / 章节编号，不改任何内容语义。
+
+    :param template_id: 被克隆的源模板 ID
+    :param new_name: 副本名称；留空则用「源名称_副本」，同类型重名时自动追加 _2/_3…
+    :param db_path: 数据库文件路径
+    :return: 新模板 ID
+    :raise ValueError: 源模板不存在，或副本名称实在取不出可用值
+    """
+    conn = get_db_connection(db_path)
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("SELECT * FROM inspection_template WHERE id = ?", (template_id,))
+        src_row = cursor.fetchone()
+        if not src_row:
+            raise ValueError('模板不存在: %s' % template_id)
+        src = dict(src_row)
+        db_type = src.get('db_type') or ''
+
+        base = (new_name or '').strip() or ('%s_副本' % (src.get('template_name_zh') or '模板'))
+        name, seq = base, 2
+        while True:
+            cursor.execute("""
+                SELECT 1 FROM inspection_template
+                WHERE db_type = ? AND template_name_zh = ? LIMIT 1
+            """, (db_type, name))
+            if not cursor.fetchone():
+                break
+            name = '%s_%d' % (base, seq)
+            seq += 1
+            if seq > 100:
+                raise ValueError('同名副本过多，请为克隆模板指定名称')
+
+        cursor.execute("""
+            INSERT INTO inspection_template
+                (db_type, template_name_zh, template_name_en, version, description,
+                 is_default, is_preset, clone_from)
+            VALUES (?, ?, ?, ?, ?, 0, 0, ?)
+        """, (db_type, name, src.get('template_name_en'), src.get('version') or 'v1',
+              src.get('description'), template_id))
+        new_id = cursor.lastrowid
+
+        cursor.execute("""
+            SELECT id, chapter_number, chapter_title_zh, chapter_title_en,
+                   description, enabled, sort_order
+            FROM inspection_chapter
+            WHERE template_id = ?
+            ORDER BY sort_order, chapter_number
+        """, (template_id,))
+        chapters = [dict(r) for r in cursor.fetchall()]
+
+        for ch in chapters:
+            cursor.execute("""
+                INSERT INTO inspection_chapter
+                    (template_id, chapter_number, chapter_title_zh, chapter_title_en,
+                     description, enabled, sort_order)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (new_id, ch['chapter_number'], ch['chapter_title_zh'],
+                  ch['chapter_title_en'], ch['description'],
+                  ch['enabled'], ch['sort_order']))
+            new_cid = cursor.lastrowid
+
+            cursor.execute("""
+                SELECT query_key, query_sql, query_description_zh,
+                       query_description_en, enabled, sort_order
+                FROM inspection_query
+                WHERE chapter_id = ?
+                ORDER BY sort_order, query_key
+            """, (ch['id'],))
+            for q in [dict(r) for r in cursor.fetchall()]:
+                cursor.execute("""
+                    INSERT INTO inspection_query
+                        (chapter_id, query_key, query_sql, query_description_zh,
+                         query_description_en, enabled, sort_order)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (new_cid, q['query_key'], q['query_sql'],
+                      q['query_description_zh'], q['query_description_en'],
+                      q['enabled'], q['sort_order']))
+
+        _record_history(cursor, 'inspection_template', new_id, 'INSERT',
+                        {'cloned_from': template_id},
+                        {'db_type': db_type, 'template_name': name})
+        conn.commit()
+        return new_id
+
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        conn.close()
+
+
 def get_template(template_id: int, db_path: str = None) -> Optional[Dict]:
     """
     获取指定 ID 的巡检模板。
@@ -321,6 +450,7 @@ def get_template(template_id: int, db_path: str = None) -> Optional[Dict]:
                    description,
                    is_default,
                    is_preset,
+                   clone_from,
                    created_at,
                    updated_at
             FROM inspection_template
@@ -355,6 +485,7 @@ def get_all_templates(db_path: str = None) -> List[Dict]:
                    t.version,
                    t.is_default,
                    t.is_preset,
+                   t.clone_from,
                    t.created_at,
                    COUNT(DISTINCT c.id) as chapter_count,
                    COUNT(DISTINCT q.id) as query_count
@@ -392,6 +523,7 @@ def get_templates_by_db_type(db_type: str, db_path: str = None) -> List[Dict]:
                    description,
                    is_default,
                    is_preset,
+                   clone_from,
                    created_at,
                    updated_at
             FROM inspection_template
@@ -458,10 +590,11 @@ def get_default_template(db_type: str, db_path: str = None,
 
 def update_template(template_id: int, template_name: str = None,
                    version: str = None, description: str = None, is_default: int = None,
+                   db_type: str = None, template_name_en: str = None,
                    db_path: str = None) -> bool:
     """
     更新巡检模板。
-    预置模板（is_preset=1）不能修改模板名称和版本号。
+    预置模板（is_preset=1）不能修改模板名称、版本号和数据库类型。
     设为默认时（is_default=1），自动取消同数据库类型其他模板的默认。
     Oracle 特殊处理：11g 模板和非 11g 模板各有一个独立的默认值。
 
@@ -470,8 +603,11 @@ def update_template(template_id: int, template_name: str = None,
     :param version: 新的版本号（如果为 None，则不更新）
     :param description: 新的模板描述（如果为 None，则不更新）
     :param is_default: 是否默认模板（如果为 None，则不更新）
+    :param db_type: 新的数据库类型（如果为 None，则不更新；预置模板禁止修改）
+    :param template_name_en: 新的模板英文名称（如果为 None，则不更新）
     :param db_path: 数据库文件路径
-    :return: 是否更新成功；预置模板改标题/版本时返回 False
+    :return: 是否更新成功；预置模板改标题/版本/类型时返回 False
+    :raise ValueError: 改名或改类型后会与同类型下的既有模板重名
     """
     conn = get_db_connection(db_path)
     cursor = conn.cursor()
@@ -501,11 +637,24 @@ def update_template(template_id: int, template_name: str = None,
         tmpl_db_type = old_value.get('db_type')
         tmpl_version = old_value.get('version')
 
-        # 预置模板不能修改名称和版本（仅在实际变更时拒绝）
+        # 预置模板不能修改名称、版本和数据库类型（仅在实际变更时拒绝）
         if is_preset == 1:
             if (template_name is not None and template_name != old_value.get('template_name')) or \
-               (version is not None and version != old_value.get('version')):
+               (version is not None and version != old_value.get('version')) or \
+               (db_type is not None and db_type != tmpl_db_type):
                 return False
+
+        # UNIQUE(db_type, template_name_zh)：改名/改类型前先查重，给出可读错误
+        new_db_type = db_type if db_type is not None else tmpl_db_type
+        new_name = template_name if template_name is not None else old_value.get('template_name')
+        if new_db_type != tmpl_db_type or (template_name is not None and
+                                          template_name != old_value.get('template_name')):
+            cursor.execute("""
+                SELECT 1 FROM inspection_template
+                WHERE db_type = ? AND template_name_zh = ? AND id != ? LIMIT 1
+            """, (new_db_type, new_name, template_id))
+            if cursor.fetchone():
+                raise ValueError('同类型下已存在同名模板：%s / %s' % (new_db_type, new_name))
 
         # 默认模板互斥：设为默认时，取消同类型其他模板的默认
         # Oracle：11g 和非 11g 各一个默认；其他数据库：只有一个默认
@@ -537,6 +686,14 @@ def update_template(template_id: int, template_name: str = None,
         if template_name is not None:
             updates.append("template_name_zh = ?")
             params.append(template_name)
+
+        if db_type is not None and db_type != tmpl_db_type:
+            updates.append("db_type = ?")
+            params.append(db_type)
+
+        if template_name_en is not None:
+            updates.append("template_name_en = ?")
+            params.append(template_name_en)
 
         if version is not None:
             updates.append("version = ?")

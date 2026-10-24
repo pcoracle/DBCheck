@@ -3483,6 +3483,7 @@ async function executeFixSql(taskId, sql) {
   <link rel="stylesheet" href="/static/css/inspection_config.css" data-page-node-id="ioW10XaqiPun7ZHGmokkN5">
   <link rel="stylesheet" href="/static/css/fusion/notifier.css?v={{ version }}-fusion3">
   <link rel="stylesheet" href="/static/css/fusion/datasources.css?v={{ version }}-fusion16">
+  <link rel="stylesheet" href="/static/css/fusion/inspection_config.css?v={{ version }}-fusion11">
 
   <!-- xterm.js（远程终端） -->
   <link rel="stylesheet" href="/static/css/xterm.css" data-page-node-id="fyVy1GfG9wP7FKcTrz1fR8" />
@@ -10437,93 +10438,8 @@ curl -H "X-API-Key: YOUR_API_KEY" http://localhost:5003/api/v1/inspect/{task_id}
 
       <!-- 巡检配置管理页面 -->
       <div class="page" id="page-inspection-config" style="display:none;" data-page-node-id="6RGAAfrKncQchBuKjNGomT">
-        <div class="page-header" data-page-node-id="CTPIFZAjti4HX6EhCmuvQP">
-          <h2 data-i18n="webui.nav_inspection_config" data-page-node-id="5XIm7Jfc5wtX1fOpE8lSfu">巡检配置管理</h2>
-        </div>
-        <div class="page-content" id="inspection-config-content" data-page-node-id="AbTVzWgTQ5lANXUH8wCRvH">
-          <!-- 模板列表页面 -->
-          <div id="inspection-template-list-page" data-page-node-id="vcehRI75TIdbnGaQMNSBDi">
-            <div class="page-toolbar" data-page-node-id="DBKZHLlCBzk3AN0dC9HHkX">
-              {% if user_role == 'admin' %}
-              <button class="btn btn-primary btn-sm" onclick="editInspectionTemplate(null)" data-i18n="webui.inspection_create_template" data-page-node-id="zSfB4BFJq5n7VZSV2XS2BG">创建模板</button>
-              <button class="btn btn-sm" onclick="importInspectionTemplate()" data-i18n="webui.inspection_import" data-page-node-id="mUHWBc85LoCAVs7i9BVEzS">导入</button>
-              {% endif %}
-            </div>
-            <div id="inspection-template-list" class="inspection-template-list" data-page-node-id="TYLXMlkGhxQcNNAzPzrl15">
-              <!-- 动态加载模板列表 -->
-            </div>
-          </div>
-
-          <!-- 模板编辑页面 -->
-          <div id="inspection-template-edit-page" style="display:none;" data-page-node-id="tGGFjCELcqvciTuoAnX6Qj">
-            <div class="page-toolbar" data-page-node-id="bB7HzCPv6JiypD8JviTbdn">
-              <button class="btn btn-ghost btn-sm" onclick="showInspectionTemplateList()" data-i18n="webui.inspection_back_to_list" data-page-node-id="pHXZajHLw45FBlmXlB7LvV">返回列表</button>
-              {% if user_role == 'admin' %}
-              <button class="btn btn-primary btn-sm" id="inspection-save-template-btn" onclick="saveInspectionTemplate()" data-i18n="webui.inspection_save_template" data-page-node-id="QHxC0Glkh8I0KzEVAvc0el">保存模板</button>
-              {% endif %}
-              <button class="btn btn-sm btn-primary" id="inspection-add-chapter-btn" onclick="addInspectionChapter()" data-i18n="webui.inspection_add_chapter" data-page-node-id="ONYIbDlGP62jvBJNyWDSWx">添加章节</button>
-              <button class="btn btn-sm" onclick="exportInspectionTemplate()" data-i18n="webui.inspection_export" style="display:none;" data-page-node-id="POtmzw77tGAi3FdSEovIwV">导出</button>
-            </div>
-            <!-- 模板信息编辑区 -->
-            <div class="inspection-template-info" data-page-node-id="3MCLaQtDoNg1B0KeYhZ0rY">
-              <div class="form-row" data-page-node-id="vpuWLnEEHt8aYW2QsBUGhF">
-                <div class="form-group" style="flex:2;" data-page-node-id="HZmVTB8GayqISfS2Hecj18">
-                  <label data-i18n="webui.inspection_template_name" data-page-node-id="35z2dNuhtOQhy9Decz31DK">模板名称</label>
-                  <input type="text" id="inspection-edit-name" class="form-input" placeholder="模板名称" data-page-node-id="tTWYU0noJ3TM9ti02DDbkC" />
-                </div>
-                <div class="form-group" style="flex:1;" data-page-node-id="BQBnz1NaHpxKsKtqJPxHbK">
-                  <label data-page-node-id="s4TwsZedQ4gagHUJ7hk3cs">版本</label>
-                  <input type="text" id="inspection-edit-version" class="form-input" placeholder="如 v1, v2, v1-pg14" value="v1" data-page-node-id="WAIrsr2JhciD8yOHkIHzjg" />
-                </div>
-                <div class="form-group" style="flex:1;" data-page-node-id="zbui3Q2dfsCAoVTs2YDJma">
-                  <label data-i18n="webui.inspection_db_type" data-page-node-id="ZJQWcxM9QCbbkw6isESba9">数据库类型</label>
-                  <select id="inspection-edit-db-type" class="form-input" data-page-node-id="KyWf0HymdN97cc3YIgBwU4">
-                    <option value="mysql" data-page-node-id="5t1MVJNF9gXGVSjhnvHGRo">MySQL</option>
-                    <option value="postgresql" data-page-node-id="nkeusm3n1YEVrUzJq2ckYw">PostgreSQL</option>
-                    <option value="oracle" data-page-node-id="dGmVHpHga1Nz5GQyDMWOgf">Oracle</option>
-                    <option value="sqlserver" data-page-node-id="tEyNcEPLgcupU6NgEojkf5">SQL Server</option>
-                    <option value="dm8" data-page-node-id="f9iAhtVNfI3zO3Jb1BOWYE">DM</option>
-                    <option value="tidb" data-page-node-id="7imLtgpxFlLn9ZvCPWR4nG">TiDB</option>
-                    <option value="ivorysql" data-page-node-id="DgWTiqOp2MS5DTRFCyPG61">IvorySQL</option>
-                    <option value="halodb">HaloDB</option>
-                    <option value="vastbase">Vastbase</option>
-                    <option value="kingbase" data-page-node-id="JGeJWQ0NPGlewXal2keXlB">KingbaseES</option>
-                    <option value="gbase" data-page-node-id="fituSC0iKhZXrCVg9g86et">GBase 8s</option>
-                  </select>
-                </div>
-                <div class="form-group" style="flex:0 0 auto;" data-page-node-id="jmF30AzSMTB61nalE4yqDD">
-                  <label data-page-node-id="20gbQ4ZvauE1EtLccdOxq6"><input type="checkbox" id="inspection-edit-default" data-page-node-id="VKhXSxRcP3EABb2SiEnYdZ" /> <span data-i18n="webui.inspection_set_default" data-page-node-id="F2TH4xR0wjB9jpiWidIHNj">设为默认</span></label>
-                </div>
-              </div>
-              <div class="form-group" data-page-node-id="YWf7e4EvVnq7DpinDYo3Xq">
-                <label data-i18n="webui.inspection_template_desc" data-page-node-id="mvLGcooCH8Lrt3n4W74z5G">模板描述</label>
-                <textarea id="inspection-edit-desc" class="form-textarea" rows="2" placeholder="模板描述"></textarea>
-              </div>
-            </div>
-            <div class="inspection-template-edit-layout" data-page-node-id="VsO024RfIJPoEsYhS7KALm">
-              <!-- 左侧：章节列表 -->
-              <div class="inspection-chapter-list-panel" data-page-node-id="gtbjX3TMP4RzQI8oj9p8qx">
-                <div class="panel-header" data-page-node-id="S5ISLjUbFevNLpE9SgeIl1">
-                  <h3 data-i18n="webui.inspection_chapters" data-page-node-id="CBH2nUjN0OyQ9ReZy4NvU2">章节列表</h3>
-                </div>
-                <div id="inspection-chapter-list" class="chapter-list" data-page-node-id="SjuLVb12mJcUSwpBdnmBYe">
-                  <!-- 动态加载章节列表 -->
-                </div>
-              </div>
-              <!-- 右侧：章节详情 + SQL 查询列表 -->
-              <div class="inspection-chapter-detail-panel" data-page-node-id="EQ6qD4IeWTZjSXHGZJSLHC">
-                <div class="panel-header" data-page-node-id="8FR2KxvfihuJnKPOJ1Fv4m">
-                  <h3 data-i18n="webui.inspection_chapter_detail" data-page-node-id="jf3XyPDCx9bswJsSmpCoeS">章节详情</h3>
-                </div>
-                <div id="inspection-chapter-detail" data-page-node-id="gHe6QEAV442GkViETvyU0U">
-                  <!-- 动态加载章节详情 -->
-                </div>
-                <div id="inspection-query-list" data-page-node-id="tJ3n5uG3yW1geF4x12tyOd">
-                  <!-- 动态加载 SQL 查询列表 -->
-                </div>
-              </div>
-            </div>
-          </div>
+        <div class="page-content" id="inspection-config-content">
+          {% include 'partials/fusion/inspection_config.html' %}
         </div>
       </div>
 
@@ -26972,6 +26888,7 @@ function mkdirRemote() {
   <script src="/static/js/inspection_config.js"></script>
   <script src="/static/js/fusion/notifier.js?v={{ version }}-fusion3"></script>
   <script src="/static/js/fusion/datasources.js?v={{ version }}-fusion16"></script>
+  <script src="/static/js/fusion/inspection_config.js?v={{ version }}-fusion11"></script>
 <!-- 底部状态栏 -->
 <div class="status-bar" id="status-bar" data-page-node-id="E0jlA1UaqTA24TltOH3TVC">
   <div class="sb-item sb-brand" data-page-node-id="upIEHjuNpzMJN8eZoS2MXe">

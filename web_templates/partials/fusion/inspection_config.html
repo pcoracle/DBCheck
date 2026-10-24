@@ -1,0 +1,119 @@
+<!--
+  SPDX-License-Identifier: Apache-2.0
+  Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
+  Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
+
+  Fusion page: inspection configuration (three-pane master-detail).
+  Layout and interaction habits ported from DBCheck v2.6 (MIT License,
+  Copyright (c) 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>),
+  rewritten for the RaccoonX module layout and API shape.
+  页内不再重复顶栏已有的标题；主操作按钮一律放在各栏顶部，把垂直空间留给数据。
+-->
+<div class="icx-layout" id="icx-layout">
+
+  <!-- 第 1 栏：模板（新建/导入在顶部，栏体可收缩） -->
+  <aside class="icx-rail" id="icx-rail">
+    <div class="icx-rail-head">
+      <span class="icx-rail-title">📋 <span data-i18n="webui.icx_rail_title">巡检模板</span>
+        <span class="icx-count" id="icx-tpl-count">0</span></span>
+      <span class="icx-collapsed-icon" title="展开模板栏" data-i18n-title="webui.icx_rail_expand"
+            aria-hidden="true" onclick="FusionInspection.toggleRail()">📋</span>
+      <span class="icx-rail-acts">
+        <button type="button" class="btn btn-primary icx-btn-xs" id="icx-btn-new"
+                title="新建模板" data-i18n-title="webui.icx_tpl_new"
+                onclick="FusionInspection.newTemplate()">
+          ＋<span class="icx-btn-text" data-i18n="webui.icx_tpl_new">新建模板</span>
+        </button>
+        <button type="button" class="btn btn-ghost icx-btn-xs" id="icx-btn-import"
+                title="导入模板" data-i18n-title="webui.icx_tpl_import"
+                onclick="FusionInspection.pickImportFile()">
+          📥<span class="icx-btn-text" data-i18n="webui.icx_tpl_import">导入</span>
+        </button>
+        <button type="button" class="icx-icon-btn" id="icx-rail-toggle"
+                title="收起/展开" data-i18n-title="webui.icx_rail_toggle"
+                onclick="FusionInspection.toggleRail()">«</button>
+      </span>
+    </div>
+
+    <div class="icx-rail-tools">
+      <input type="search" id="icx-tpl-search" autocomplete="off"
+             placeholder="搜索模板 / 版本 / 说明" data-i18n-placeholder="webui.icx_tpl_search_ph"
+             oninput="FusionInspection.onTplSearch(this.value)" />
+      <div class="icx-dbfilter">
+        <button type="button" class="icx-dbfilter-btn" id="icx-dbfilter-btn"
+                title="按数据库类型筛选（可多选）" data-i18n-title="webui.icx_dbfilter_title"
+                aria-haspopup="true" aria-expanded="false"
+                onclick="FusionInspection.toggleTypePanel(event)">
+          <span data-i18n="webui.icx_dbfilter_label">类型</span>：<b id="icx-dbfilter-text" data-i18n="webui.icx_dbfilter_all">全部</b>
+          <span class="icx-caret" aria-hidden="true">▾</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="icx-tpl-list" id="icx-tpl-list" role="listbox"></div>
+    <input type="file" id="icx-import-file" accept=".json,application/json" style="display:none"
+           onchange="FusionInspection.importFromFile(this)" />
+  </aside>
+
+  <!-- 第 2 栏：章节（添加章节在顶部；单击选中 / 双击全屏 / ✕ 删除 / 拖拽排序） -->
+  <div class="icx-splitter" data-split="rail"
+       title="拖动调整列宽 · 双击恢复默认" data-i18n-title="webui.icx_splitter_tip" role="separator" aria-orientation="vertical"></div>
+
+  <section class="icx-col icx-col-chapters" id="icx-chapters-col">
+    <div class="icx-col-head">
+      <span id="icx-tpl-name" class="icx-col-title">—</span>
+      <span class="icx-col-badges" id="icx-tpl-badges"></span>
+      <button type="button" class="btn btn-primary icx-btn-xs icx-head-btn" id="icx-btn-add-chapter"
+              title="添加章节" data-i18n-title="webui.icx_ch_add"
+              onclick="FusionInspection.newChapter()">
+        ＋<span class="icx-btn-text" data-i18n="webui.icx_ch_add">添加章节</span>
+      </button>
+    </div>
+    <div class="icx-col-sub" id="icx-tpl-meta"></div>
+
+    <div class="icx-col-actions">
+      <button type="button" class="btn btn-ghost icx-btn-xs" onclick="FusionInspection.editTemplateMeta()">
+        ✏️ <span data-i18n="webui.icx_tpl_edit">编辑信息</span>
+      </button>
+      <button type="button" class="btn btn-ghost icx-btn-xs" id="icx-btn-clone"
+              onclick="FusionInspection.cloneTemplate()">
+        📑 <span data-i18n="webui.icx_tpl_clone">克隆</span>
+      </button>
+      <button type="button" class="btn btn-ghost icx-btn-xs" onclick="FusionInspection.exportTemplate()">
+        📤 <span data-i18n="webui.icx_tpl_export">导出</span>
+      </button>
+      <button type="button" class="btn btn-ghost icx-btn-xs danger" id="icx-btn-del-tpl"
+              onclick="FusionInspection.deleteTemplate()">
+        🗑 <span data-i18n="webui.icx_tpl_delete">删除模板</span>
+      </button>
+      <span class="icx-hint icx-grow-hint" data-i18n="webui.icx_ch_drag_hint">拖动章节可排序</span>
+    </div>
+
+    <div class="icx-col-body">
+      <div class="icx-chapter-list" id="icx-chapter-list"></div>
+    </div>
+  </section>
+
+  <div class="icx-splitter" data-split="chapters"
+       title="拖动调整列宽 · 双击恢复默认" data-i18n-title="webui.icx_splitter_tip" role="separator" aria-orientation="vertical"></div>
+
+  <!-- 第 3 栏：章节详情 + SQL 行内编辑（工具条与列表由脚本渲染） -->
+  <section class="icx-col icx-col-detail">
+    <div class="icx-col-body" id="icx-detail-panel"></div>
+  </section>
+</div>
+
+<!-- 章节详情全屏弹窗：双击中栏章节打开，ESC 或右上角 × 关闭 -->
+<div class="icx-detail-modal" id="icx-detail-modal" style="display:none" role="dialog" aria-modal="true">
+  <div class="icx-detail-box">
+    <div class="icx-detail-modal-head">
+      <span>📑 <span data-i18n="webui.icx_detail_title">章节详情</span>
+        <span class="icx-detail-modal-hint" data-i18n="webui.icx_detail_hint">
+          · 双击中栏章节打开，按 ESC 或右上角 × 关闭
+        </span></span>
+      <button type="button" class="icx-modal-close" title="关闭" data-i18n-title="webui.icx_close"
+              onclick="FusionInspection.closeChapterDetail()">&times;</button>
+    </div>
+    <div class="icx-detail-modal-body" id="icx-detail-body"></div>
+  </div>
+</div>

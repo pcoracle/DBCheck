@@ -1,0 +1,1001 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
+ * Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
+ *
+ * Fusion page styles: inspection configuration (three-pane master-detail).
+ * Layout and interaction styles ported from DBCheck v2.6 (MIT License,
+ * Copyright (c) 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>),
+ * rewritten for the RaccoonX theme variables.
+ * Scoped to #page-inspection-config / body-level overlays to avoid leaking styles.
+ */
+
+/* 列宽用 0 1 basis：容器变窄时按比例一起收缩，永远贴着容器边缘铺满，
+   不再出现「右边/下面一大片空白」；具体高度与堆叠判定由 JS 按容器实测决定。 */
+#page-inspection-config .icx-layout {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  height: calc(100vh - 120px);
+  min-height: 380px;
+}
+
+/* 放大编辑：收纳左右两栏，让 SQL 编辑区独占宽度（长语句才改得动） */
+#page-inspection-config .icx-layout.icx-focus-edit .icx-rail,
+#page-inspection-config .icx-layout.icx-focus-edit .icx-col-chapters {
+  display: none;
+}
+
+/* ── 第 1 栏：模板 ───────────────────────────────────────── */
+
+#page-inspection-config .icx-rail {
+  flex: 0 1 258px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+  padding: 8px 9px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  transition: flex-basis .18s ease;
+}
+
+/* 收缩态：52px 图标窄条（与旧系统一致），中右两栏自动吃掉释放出的空间 */
+#page-inspection-config .icx-rail.icx-collapsed {
+  flex: 0 0 52px !important;
+  width: 52px !important;
+  min-width: 52px !important;
+  max-width: 52px !important;
+  min-height: 0;
+}
+
+#page-inspection-config .icx-rail.icx-collapsed .icx-rail-tools,
+#page-inspection-config .icx-rail.icx-collapsed .icx-tpl-list,
+#page-inspection-config .icx-rail.icx-collapsed .icx-rail-title,
+#page-inspection-config .icx-rail.icx-collapsed .icx-rail-acts button:not(#icx-rail-toggle) {
+  display: none !important;
+}
+
+#page-inspection-config .icx-rail.icx-collapsed .icx-rail-head {
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 6px 2px;
+}
+
+#page-inspection-config .icx-collapsed-icon { display: none; }
+
+#page-inspection-config .icx-rail.icx-collapsed .icx-collapsed-icon {
+  display: block;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+#page-inspection-config .icx-layout.icx-rail-collapsed .icx-splitter { display: none !important; }
+
+#page-inspection-config .icx-layout.icx-rail-collapsed .icx-col-chapters {
+  flex: 1 1 320px !important;
+  min-width: 240px;
+}
+
+#page-inspection-config .icx-layout.icx-rail-collapsed .icx-col-detail {
+  flex: 2 1 300px !important;
+  min-width: 300px;
+}
+
+/* 堆叠态下收缩成整宽细条，避免 52px 竖条孤零零挂在第一行 */
+#page-inspection-config .icx-layout.icx-stacked .icx-rail.icx-collapsed {
+  flex: 1 1 100% !important;
+  width: auto !important;
+  max-width: none !important;
+  height: 44px;
+  min-height: 44px;
+  max-height: none;
+}
+
+#page-inspection-config .icx-layout.icx-stacked .icx-rail.icx-collapsed .icx-rail-head {
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 4px 6px;
+}
+
+#page-inspection-config .icx-layout.icx-stacked .icx-rail.icx-collapsed .icx-collapsed-icon {
+  display: none !important;
+}
+
+#page-inspection-config .icx-rail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+#page-inspection-config .icx-rail-acts {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+#page-inspection-config .icx-rail-acts .icx-btn-xs { padding: 3px 6px; }
+
+#page-inspection-config .icx-icon-btn {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  line-height: 1;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+#page-inspection-config .icx-icon-btn:hover { color: var(--accent); background: var(--surface2); }
+
+#page-inspection-config .icx-rail-tools { display: flex; flex-direction: column; gap: 6px; }
+
+#page-inspection-config .icx-rail-tools input,
+#page-inspection-config .icx-rail-tools select,
+#page-inspection-config .icx-q-filter,
+#page-inspection-config .icx-inline input[type="text"],
+#page-inspection-config .icx-inline input[type="number"],
+#page-inspection-config .icx-cm-fallback {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 6px 8px;
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  outline: none;
+}
+
+#page-inspection-config .icx-q-filter {
+  flex: 1 1 150px;
+  width: auto;
+  max-width: 260px;
+}
+
+#page-inspection-config .icx-tpl-list {
+  flex: 1 1 auto;
+  min-height: 120px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-right: 2px;
+}
+
+#page-inspection-config .icx-tpl-item {
+  padding: 8px 9px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface2);
+  cursor: pointer;
+  min-width: 0;
+}
+
+#page-inspection-config .icx-tpl-item:hover { border-color: var(--accent2, var(--accent)); }
+
+#page-inspection-config .icx-tpl-item.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+#page-inspection-config .icx-tpl-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+#page-inspection-config .icx-tpl-name-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#page-inspection-config .icx-tpl-sub,
+#page-inspection-config .icx-empty-line {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#page-inspection-config .icx-badge {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 500;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  background: var(--surface);
+}
+
+#page-inspection-config .icx-badge.preset { color: var(--accent); }
+#page-inspection-config .icx-badge.def { color: var(--success, var(--accent)); }
+#page-inspection-config .icx-badge.clone { color: var(--warn, #d97706); }
+
+/* ── 通用按钮 / 列容器 ───────────────────────────────────── */
+
+#page-inspection-config .icx-btn-sm { padding: 5px 9px; font-size: 12px; border-radius: 7px; }
+#page-inspection-config .icx-btn-xs { padding: 3px 8px; font-size: 11.5px; border-radius: 6px; }
+#page-inspection-config .icx-btn-sm.danger:hover,
+#page-inspection-config .icx-btn-xs.danger:hover { color: var(--danger); border-color: var(--danger); }
+
+#page-inspection-config .icx-col {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 9px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+#page-inspection-config .icx-col-chapters { flex: 0 1 288px; }
+#page-inspection-config .icx-col-detail { flex: 1 1 320px; min-width: 280px; }
+
+#page-inspection-config .icx-col-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+#page-inspection-config .icx-col-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#page-inspection-config .icx-col-badges { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+
+#page-inspection-config .icx-col-sub,
+#page-inspection-config .icx-hint {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  min-height: 16px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#page-inspection-config .icx-col-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+#page-inspection-config .icx-col-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+#page-inspection-config .icx-head-btn { margin-left: auto; flex: 0 0 auto; }
+
+#page-inspection-config .icx-grow-hint { margin-left: auto; }
+
+/* ── 第 2 栏：章节行 ─────────────────────────────────────── */
+
+#page-inspection-config .icx-ch-ul {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+#page-inspection-config .icx-ch-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface2);
+  cursor: pointer;
+  min-width: 0;
+}
+
+#page-inspection-config .icx-ch-item:hover { border-color: var(--accent2, var(--accent)); }
+
+#page-inspection-config .icx-ch-item.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+#page-inspection-config .icx-ch-item.off .icx-ch-title {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+
+#page-inspection-config .icx-ch-ghost { opacity: .45; }
+#page-inspection-config .icx-no-drag { }
+
+#page-inspection-config .icx-ch-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+#page-inspection-config .icx-ch-num {
+  flex: 0 0 auto;
+  min-width: 20px;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+#page-inspection-config .icx-ch-text { display: flex; flex-direction: column; min-width: 0; }
+
+#page-inspection-config .icx-ch-title {
+  font-size: 12.5px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#page-inspection-config .icx-ch-title-en {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#page-inspection-config .icx-ch-count {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+#page-inspection-config .icx-ch-x {
+  flex: 0 0 auto;
+  padding: 2px 5px;
+  border-radius: 5px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+#page-inspection-config .icx-ch-x:hover { color: var(--danger); background: var(--surface); }
+
+/* ── 第 3 栏：章节详情 + SQL ─────────────────────────────── */
+
+#page-inspection-config .icx-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+#page-inspection-config .icx-detail-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#page-inspection-config .icx-meta {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+}
+
+#page-inspection-config .icx-meta.off { color: var(--danger); }
+
+#page-inspection-config .icx-detail-desc {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+#page-inspection-config .icx-detail-empty {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+#page-inspection-config .icx-q-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 0 8px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+#page-inspection-config .icx-q-toolbar-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+#page-inspection-config .icx-count {
+  min-width: 20px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  text-align: center;
+}
+
+#page-inspection-config .icx-q-rows { min-width: 0; }
+
+#page-inspection-config .icx-q-ul {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+#page-inspection-config .icx-q-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface2);
+  overflow: hidden;
+}
+
+#page-inspection-config .icx-q-row.editing { border-color: var(--accent); }
+
+#page-inspection-config .icx-q-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  cursor: pointer;
+  min-width: 0;
+}
+
+#page-inspection-config .icx-q-caret {
+  flex: 0 0 auto;
+  width: 10px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+#page-inspection-config .icx-q-caret::before { content: '▸'; }
+#page-inspection-config .icx-q-row.editing .icx-q-caret::before { content: '▾'; }
+
+#page-inspection-config .icx-q-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#page-inspection-config .icx-q-name.missing { color: var(--warn, #d97706); }
+
+#page-inspection-config .icx-q-name-hint {
+  margin-left: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+#page-inspection-config .icx-q-key {
+  flex: 0 0 auto;
+  max-width: 220px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#page-inspection-config .icx-q-state { flex: 0 0 auto; font-size: 11px; }
+
+#page-inspection-config .icx-q-actions {
+  flex: 0 0 auto;
+  display: inline-flex;
+  gap: 2px;
+  margin-left: auto;
+}
+
+#page-inspection-config .icx-ibtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+#page-inspection-config .icx-ibtn svg { width: 14px; height: 14px; }
+#page-inspection-config .icx-ibtn:hover { color: var(--accent); background: var(--surface); }
+#page-inspection-config .icx-ibtn.danger:hover { color: var(--danger); }
+
+/* 行内编辑表单：字段顺序按「先想清楚查什么，再写 SQL」*/
+
+#page-inspection-config .icx-q-slot { padding: 0 8px 8px; }
+
+#page-inspection-config .icx-inline {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+#page-inspection-config .icx-inline-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+#page-inspection-config .icx-inline-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+#page-inspection-config .icx-inline-head .icx-inline-field { flex: 1 1 240px; }
+
+#page-inspection-config .icx-inline-label,
+#page-inspection-config .icx-inline-field > label {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+#page-inspection-config .icx-inline-tip { font-size: 10.5px; color: var(--text-muted); opacity: .85; }
+#page-inspection-config .icx-req { color: var(--danger); }
+
+#page-inspection-config .icx-inline-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 16px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+#page-inspection-config .icx-inline-desc {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 1fr 1fr;
+}
+
+#page-inspection-config .icx-sqlblock { display: flex; flex-direction: column; gap: 4px; }
+
+#page-inspection-config .icx-sql-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+#page-inspection-config .icx-sql-meta { font-size: 10.5px; color: var(--text-muted); }
+
+#page-inspection-config .icx-sql-tools { display: inline-flex; gap: 4px; margin-left: auto; }
+
+#page-inspection-config .icx-sql-tool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface2);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+#page-inspection-config .icx-sql-tool svg { width: 14px; height: 14px; }
+#page-inspection-config .icx-sql-tool:hover { color: var(--accent); border-color: var(--accent); }
+#page-inspection-config .icx-sql-tool.active { color: var(--accent); border-color: var(--accent); }
+
+#page-inspection-config .icx-cm-host { min-width: 0; }
+
+#page-inspection-config .icx-cm-host .CodeMirror {
+  height: auto;
+  font-size: 12.5px;
+  line-height: 1.5;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+#page-inspection-config .icx-cm-fallback {
+  min-height: 120px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+/* 高度拖拽条：拖完记住偏好，双击回到「随内容自适应」 */
+#page-inspection-config .icx-sql-resize {
+  height: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  cursor: ns-resize;
+  background: var(--surface2);
+}
+
+#page-inspection-config .icx-sql-resize:hover,
+#page-inspection-config .icx-sql-resize.active { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+
+#page-inspection-config .icx-grip {
+  width: 34px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--text-muted);
+  opacity: .6;
+}
+
+body.icx-resizing-sql { user-select: none; cursor: ns-resize; }
+
+#page-inspection-config .icx-inline-foot {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-top: 4px;
+  background: var(--surface);
+}
+
+#page-inspection-config .icx-inline-hint { flex: 1 1 auto; font-size: 11px; color: var(--text-muted); }
+#page-inspection-config .icx-inline-foot-btns { display: inline-flex; gap: 6px; }
+
+/* ── 全屏章节详情弹窗 ───────────────────────────────────── */
+
+body > .icx-detail-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 999998;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, .55);
+}
+
+body > .icx-detail-modal .icx-detail-box {
+  display: flex;
+  flex-direction: column;
+  width: min(1180px, 100%);
+  height: min(92vh, 100%);
+  box-sizing: border-box;
+  background: var(--surface-solid, var(--surface));
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 14px 48px rgba(0, 0, 0, .35);
+}
+
+body > .icx-detail-modal .icx-detail-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+body > .icx-detail-modal .icx-detail-modal-hint {
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+body > .icx-detail-modal .icx-modal-close {
+  border: 0;
+  background: transparent;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+body > .icx-detail-modal .icx-modal-close:hover { color: var(--text); }
+
+body > .icx-detail-modal .icx-detail-modal-body {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 14px 16px 20px;
+}
+
+#page-inspection-config .icx-detail-full .icx-inline { background: var(--surface2); }
+#page-inspection-config .icx-detail-full .icx-cm-host .CodeMirror { font-size: 13.5px; }
+#page-inspection-config .icx-detail-full .icx-q-name { font-size: 13.5px; }
+#page-inspection-config .icx-detail-full .icx-inline-foot { background: var(--surface-solid, var(--surface)); }
+
+/* ── 模板 / 章节弹窗（挂在 body 下）────────────────────── */
+
+body > .icx-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 999999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, .5);
+}
+
+body > .icx-modal-backdrop .icx-modal {
+  width: min(560px, 100%);
+  max-height: 88vh;
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 18px;
+  display: grid;
+  gap: 12px;
+  background: var(--surface-solid, var(--surface));
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 44px rgba(0, 0, 0, .32);
+}
+
+body > .icx-modal-backdrop .icx-modal-title { font-size: 15px; font-weight: 600; color: var(--text); }
+body > .icx-modal-backdrop .icx-modal-grid { display: grid; gap: 10px; grid-template-columns: 1fr 1fr; }
+body > .icx-modal-backdrop .icx-modal-grid .icx-span2 { grid-column: 1 / -1; }
+
+body > .icx-modal-backdrop .icx-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+
+body > .icx-modal-backdrop .icx-field > label {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+body > .icx-modal-backdrop .icx-check { font-size: 12px; color: var(--text); cursor: pointer; }
+
+body > .icx-modal-backdrop .icx-field input[type="text"],
+body > .icx-modal-backdrop .icx-field input[type="number"],
+body > .icx-modal-backdrop .icx-field select,
+body > .icx-modal-backdrop .icx-field textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 7px 9px;
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  outline: none;
+  resize: vertical;
+}
+
+body > .icx-modal-backdrop .icx-modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+body > .icx-modal-backdrop .icx-modal-msg { min-height: 16px; font-size: 12px; color: var(--text-muted); }
+
+body > .icx-modal-backdrop .icx-readonly-hint {
+  padding: 7px 9px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-muted);
+  background: var(--surface2);
+  border: 1px dashed var(--border);
+  border-radius: 7px;
+}
+
+/* 列宽分隔条：拖动自定义三栏宽度，双击恢复默认（宽度记在 localStorage） */
+#page-inspection-config .icx-splitter {
+  position: relative;
+  flex: 0 0 7px;
+  align-self: stretch;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+#page-inspection-config .icx-splitter::after {
+  content: '';
+  position: absolute;
+  inset: 3px 2px;
+  border-radius: 3px;
+  background: var(--border);
+  opacity: .5;
+  transition: opacity .15s ease, background .15s ease;
+}
+
+#page-inspection-config .icx-splitter:hover::after,
+#page-inspection-config .icx-splitter.active::after {
+  opacity: 1;
+  background: var(--accent);
+}
+
+body.icx-resizing-col { user-select: none; cursor: col-resize; }
+
+/* 放大编辑态本就隐藏左右栏，分隔条一起收起，避免出现悬抓手 */
+#page-inspection-config .icx-layout.icx-focus-edit .icx-splitter { display: none; }
+
+/* 堆叠由 JS 按「容器实测宽度」加 .icx-stacked（窗口宽度会因侧栏/AI 面板失真），
+   所以这里不再用媒体查询，也不用 !important 去盖内联列宽。 */
+#page-inspection-config .page-content,
+#page-inspection-config .icx-layout { min-width: 0; }
+
+/* 紧贴容器边缘：本页不吃全局 36/40 内边距，也不叠加 page-content 的 20px */
+#page-inspection-config .page-content { padding: 0; }
+
+body:has(#page-inspection-config.active) > .app-layout .content { padding: 6px 8px 8px; }
+
+#page-inspection-config .icx-rail { min-height: 320px; }
+
+#page-inspection-config .icx-layout.icx-stacked {
+  flex-wrap: wrap;
+  height: auto;
+  min-height: 0;
+}
+
+#page-inspection-config .icx-layout.icx-stacked .icx-rail {
+  flex: 1 1 100%;
+  height: 46vh;
+  min-height: 340px;
+  max-height: none;
+}
+
+#page-inspection-config .icx-layout.icx-stacked .icx-col-chapters,
+#page-inspection-config .icx-layout.icx-stacked .icx-col-detail {
+  flex: 1 1 340px;
+  min-height: 46vh;
+}
+
+#page-inspection-config .icx-layout.icx-stacked .icx-splitter { display: none; }
+#page-inspection-config .icx-layout.icx-stacked .icx-inline-desc { grid-template-columns: 1fr; }
+
+/* 类型多选面板：挂在 body 下，按直接子元素限定作用域 */
+#page-inspection-config .icx-dbfilter { min-width: 0; }
+
+#page-inspection-config .icx-dbfilter-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  box-sizing: border-box;
+  height: 30px;
+  padding: 0 8px;
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  cursor: pointer;
+  text-align: left;
+}
+
+#page-inspection-config .icx-dbfilter-btn b { font-weight: 600; }
+#page-inspection-config .icx-dbfilter-btn:hover { border-color: var(--accent); }
+#page-inspection-config .icx-dbfilter-btn.active { border-color: var(--accent); color: var(--accent); }
+#page-inspection-config .icx-caret { margin-left: auto; color: var(--text-muted); font-size: 10px; }
+
+body > .icx-type-panel {
+  position: fixed;
+  z-index: 1000000;
+  width: min(320px, calc(100vw - 24px));
+  max-height: 60vh;
+  overflow: auto;
+  padding: 8px;
+  background: var(--surface-solid, var(--surface));
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, .3);
+}
+
+body > .icx-type-panel .icx-tp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 4px 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+body > .icx-type-panel .icx-tp-head button {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  border-radius: 6px;
+  padding: 2px 7px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+body > .icx-type-panel .icx-tp-head button:hover { color: var(--accent); border-color: var(--accent); }
+
+body > .icx-type-panel .icx-tp-group {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 8px;
+  padding: 3px 6px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+body > .icx-type-panel .icx-tp-group:hover { background: var(--surface2); color: var(--text); }
+body > .icx-type-panel .icx-tp-group input { accent-color: var(--accent, #388bfd); }
+
+body > .icx-type-panel label.icx-tp-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+body > .icx-type-panel label.icx-tp-item:hover { background: var(--surface2); }
+body > .icx-type-panel .icx-tp-count { margin-left: auto; font-size: 11px; color: var(--text-muted); }
+

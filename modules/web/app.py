@@ -4721,16 +4721,86 @@ def api_start_inspection():
 
 
 from modules.inspection.dal import (
-    get_all_templates, get_template, get_templates_by_db_type,
-    create_template, update_template,
+    get_all_templates, get_template,
+    create_template, update_template, clone_template,
     delete_template, get_chapters_by_template, get_chapter, create_chapter,
     update_chapter, delete_chapter, reorder_chapters,
     get_queries_by_chapter, get_query, create_query, update_query,
-    delete_query, export_template, import_template,
+    delete_query, reorder_queries, export_template, import_template,
     init_database as icfg_init_db,
     create_baseline, get_baselines_by_db_type, get_baseline,
     update_baseline, delete_baseline, init_default_baselines, force_reset_baselines,
 )
+
+
+def _require_icfg_admin():
+    """巡检配置写操作的管理员校验（此前 10 个路由各复制了两遍同样的判断）。
+
+    返回 (None, Response) 时调用方应直接返回该 Response；返回 (True, None) 表示放行。
+    """
+    if not session.get("is_admin", False):
+        return None, (jsonify({"success": False, "message": "只有管理员才能执行此操作"}), 403)
+    return True, None
+
+
+# ── 巡检配置可见性 / 归属（接入 modules/access，与数据源同一套策略）──
+#
+# 此前本模块的写接口只做 session.is_admin 判断，读接口连登录都不要求，
+# 且章节/SQL 可以按全局自增的 cid/qid 直接改——越权面很大。这里统一：
+# 所有子资源先反查父模板 id，再走 assert_visible(user, 'template', tid)。
+
+def _icfg_user():
+    from modules.access import principal_from_session
+    return principal_from_session()
+
+
+def _icfg_deny():
+    return jsonify({'success': False, 'code': 'RESOURCE_NOT_VISIBLE',
+                    'message': '模板不存在或无权访问'}), 403
+
+
+def _icfg_filter(rows, user=None):
+    """按身份过滤模板列表（匿名/未启用严格模式时行为与旧版一致：全部可见）。"""
+    from modules.access import filter_visible
+    u = user if user is not None else _icfg_user()
+    return filter_visible(u, rows, 'template')
+
+
+def _icfg_check_template(tid, user=None):
+    """模板可见性断言，返回 (True, None) 或 (False, Response)。"""
+    from modules.access import assert_visible
+    u = user if user is not None else _icfg_user()
+    ok, _err = assert_visible(u, 'template', tid)
+    return (True, None) if ok else (False, _icfg_deny())
+
+
+def _icfg_tid_of_chapter(cid):
+    """章节 → 所属模板 id（拿不到返回 None）。"""
+    try:
+        row = get_chapter(cid)
+        return (row or {}).get('template_id')
+    except Exception:
+        return None
+
+
+def _icfg_tid_of_query(qid):
+    """SQL 查询 → 所属章节 → 所属模板 id。"""
+    try:
+        row = get_query(qid)
+        if not row:
+            return None
+        return _icfg_tid_of_chapter(row.get('chapter_id'))
+    except Exception:
+        return None
+
+
+def _icfg_claim(entity_id, user):
+    """新建模板登记归属；匿名或 None 时不登记，保持旧行为。"""
+    try:
+        from modules.access import set_owner
+        set_owner('template', entity_id, user)
+    except Exception as e:
+        print('[inspection] 模板归属登记失败 %s: %s' % (entity_id, e))
 
 # ── 基线配置 API ───────────────────────────────────────────
 
@@ -4905,17 +4975,32 @@ def api_save_server_thresholds():
 
 @app.route('/api/inspection/templates', methods=['GET'])
 def api_list_icfg_templates():
-    """获取巡检模板列表，支持按 db_type 过滤"""
+    """获取巡检模板列表，支持按 db_type（可多选）/ keyword 过滤（三栏左栏筛选器用）"""
     try:
-        db_type = request.args.get('db_type')
+        # 多选：?db_type=a&db_type=b 或 ?db_type=a,b 都接受
+        raw_types = []
+        for v in request.args.getlist('db_type'):
+            raw_types.extend([x.strip() for x in str(v).split(',') if x.strip()])
+        keyword = (request.args.get('keyword') or '').strip().lower()
         # 前端 db_type 简称 → 数据库 template 全称映射
         _DB_TYPE_MAP = {'pg': 'postgresql', 'dm': 'dm8', 'ivorysql': 'ivorysql'}
-        if db_type:
-            db_type = _DB_TYPE_MAP.get(db_type, db_type)
-            rows = get_templates_by_db_type(db_type)
+        if raw_types:
+            wanted = set()
+            for v in raw_types:
+                low = v.lower()
+                wanted.add(low)
+                wanted.add(_DB_TYPE_MAP.get(low, low))
+            rows = [r for r in get_all_templates() if str(r.get('db_type') or '').lower() in wanted]
         else:
             rows = get_all_templates()
-        return jsonify({'success': True, 'data': rows})
+        if keyword:
+            def _hit(r):
+                hay = ' '.join(str(r.get(k) or '') for k in
+                               ('template_name', 'template_name_en', 'db_type',
+                                'version', 'description')).lower()
+                return keyword in hay
+            rows = [r for r in rows if _hit(r)]
+        return jsonify({'success': True, 'data': _icfg_filter(rows)})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)})
 
@@ -4924,12 +5009,10 @@ def api_list_icfg_templates():
 def api_create_icfg_template():
     """创建巡检模板"""
     try:
-        # 写操作仅管理员（巡检配置管理：创建/保存/删除）
-        if not session.get("is_admin", False):
-            return jsonify({"success": False, "message": "只有管理员才能执行此操作"}), 403
-        # 写操作仅管理员（巡检配置管理：创建/保存/删除）
-        if not session.get("is_admin", False):
-            return jsonify({"success": False, "message": "只有管理员才能执行此操作"}), 403
+        ok, deny = _require_icfg_admin()
+        if not ok:
+            return deny
+        user = _icfg_user()
         d = request.json
         tid = create_template(
             db_type=d.get('db_type', ''),
@@ -4939,6 +5022,7 @@ def api_create_icfg_template():
             description=d.get('description', ''),
             is_default=1 if d.get('is_default') else 0,
         )
+        _icfg_claim(tid, user)
         return jsonify({'success': True, 'data': {'id': tid}})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)})
@@ -4948,6 +5032,9 @@ def api_create_icfg_template():
 def api_get_icfg_template(tid):
     """获取巡检模板详情"""
     try:
+        ok, deny = _icfg_check_template(tid)
+        if not ok:
+            return deny
         row = get_template(tid)
         if row:
             return jsonify({'success': True, 'data': row})
@@ -4958,14 +5045,14 @@ def api_get_icfg_template(tid):
 
 @app.route('/api/inspection/templates/<int:tid>', methods=['PUT'])
 def api_update_icfg_template(tid):
-    """更新巡检模板"""
+    """更新巡检模板（透传 db_type / template_name_en，预置模板受只读保护）"""
     try:
-        # 写操作仅管理员（巡检配置管理：创建/保存/删除）
-        if not session.get("is_admin", False):
-            return jsonify({"success": False, "message": "只有管理员才能执行此操作"}), 403
-        # 写操作仅管理员（巡检配置管理：创建/保存/删除）
-        if not session.get("is_admin", False):
-            return jsonify({"success": False, "message": "只有管理员才能执行此操作"}), 403
+        ok, deny = _require_icfg_admin()
+        if not ok:
+            return deny
+        vis, refuse = _icfg_check_template(tid)
+        if not vis:
+            return refuse
         d = request.json
         result = update_template(
             tid,
@@ -4973,10 +5060,36 @@ def api_update_icfg_template(tid):
             version=d.get('version'),
             description=d.get('description'),
             is_default=d.get('is_default'),
+            db_type=d.get('db_type'),
+            template_name_en=d.get('template_name_en'),
         )
         if not result:
-            return jsonify({'success': False, 'message': '预置模板不能修改名称和版本'})
+            return jsonify({'success': False, 'code': 'preset_protected',
+                            'message': '预置模板不能修改名称、版本和数据库类型，请先克隆后再编辑'})
         return jsonify({'success': True, 'message': '模板更新成功'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/inspection/templates/<int:tid>/clone', methods=['POST'])
+def api_clone_icfg_template(tid):
+    """克隆巡检模板（连同章节与 SQL），产出可自由编辑的副本。
+
+    对齐旧版「预置模板只读、克隆后再改」的用法：副本 is_preset=0、is_default=0，
+    clone_from 记下来源模板 id。
+    """
+    try:
+        ok, deny = _require_icfg_admin()
+        if not ok:
+            return deny
+        user = _icfg_user()
+        vis, refuse = _icfg_check_template(tid, user)
+        if not vis:
+            return refuse
+        d = request.json or {}
+        new_id = clone_template(tid, new_name=d.get('template_name'))
+        _icfg_claim(new_id, user)
+        return jsonify({'success': True, 'data': {'id': new_id}, 'message': '模板克隆成功'})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)})
 
@@ -4985,13 +5098,17 @@ def api_update_icfg_template(tid):
 def api_delete_icfg_template(tid):
     """删除巡检模板（级联删除章节和查询）"""
     try:
-        # 写操作仅管理员（巡检配置管理：创建/保存/删除）
-        if not session.get("is_admin", False):
-            return jsonify({"success": False, "message": "只有管理员才能执行此操作"}), 403
-        # 写操作仅管理员（巡检配置管理：创建/保存/删除）
-        if not session.get("is_admin", False):
-            return jsonify({"success": False, "message": "只有管理员才能执行此操作"}), 403
-        delete_template(tid)
+        ok, deny = _require_icfg_admin()
+        if not ok:
+            return deny
+        vis, refuse = _icfg_check_template(tid)
+        if not vis:
+            return refuse
+        force = request.args.get('force') in ('1', 'true', 'yes')
+        if not delete_template(tid, force=force):
+            # 此前这里忽略返回值，预置模板删不掉也会报「删除成功」
+            return jsonify({'success': False, 'code': 'preset_protected',
+                            'message': '模板不存在或为预置模板（预置模板需 force=1 才能删除）'})
         return jsonify({'success': True, 'message': '模板删除成功'})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)})
@@ -5001,6 +5118,9 @@ def api_delete_icfg_template(tid):
 def api_export_icfg_template(tid):
     """导出巡检模板（含章节和查询）"""
     try:
+        ok, deny = _icfg_check_template(tid)
+        if not ok:
+            return deny
         data = export_template(tid)
         return jsonify({'success': True, 'data': data})
     except Exception as e:
@@ -5009,13 +5129,18 @@ def api_export_icfg_template(tid):
 
 @app.route('/api/inspection/templates/import', methods=['POST'])
 def api_import_icfg_template():
-    """导入巡检模板"""
+    """导入巡检模板（写操作，与其它模板接口同样限管理员）"""
     try:
+        ok, deny = _require_icfg_admin()
+        if not ok:
+            return deny
+        user = _icfg_user()
         d = request.json
         result = import_template(
             d.get('template_config', {}),
             overwrite=d.get('overwrite', False),
         )
+        _icfg_claim(result, user)
         return jsonify({'success': True, 'message': '模板导入成功 (ID: %d)' % result, 'data': {'id': result}})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)})
@@ -5027,6 +5152,9 @@ def api_import_icfg_template():
 def api_list_icfg_chapters(tid):
     """获取模板下的章节列表"""
     try:
+        ok, deny = _icfg_check_template(tid)
+        if not ok:
+            return deny
         rows = get_chapters_by_template(tid)
         for ch in rows:
             queries = get_queries_by_chapter(ch['id'])
@@ -5040,12 +5168,12 @@ def api_list_icfg_chapters(tid):
 def api_create_icfg_chapter(tid):
     """在模板下创建章节"""
     try:
-        # 写操作仅管理员（巡检配置管理：创建/保存/删除）
-        if not session.get("is_admin", False):
-            return jsonify({"success": False, "message": "只有管理员才能执行此操作"}), 403
-        # 写操作仅管理员（巡检配置管理：创建/保存/删除）
-        if not session.get("is_admin", False):
-            return jsonify({"success": False, "message": "只有管理员才能执行此操作"}), 403
+        ok, deny = _require_icfg_admin()
+        if not ok:
+            return deny
+        vis, refuse = _icfg_check_template(tid)
+        if not vis:
+            return refuse
         d = request.json
         cid = create_chapter(
             template_id=tid,
@@ -5054,6 +5182,8 @@ def api_create_icfg_chapter(tid):
             chapter_title_en=d.get('chapter_title_en', ''),
             description=d.get('description', ''),
             enabled=1 if d.get('enabled', 1) else 0,
+            # 不透传 sort_order 时新建章节恒为 0，三栏里顺序不可控
+            sort_order=int(d.get('sort_order') or 0),
         )
         return jsonify({'success': True, 'data': {'id': cid}})
     except Exception as e:
@@ -5062,8 +5192,11 @@ def api_create_icfg_chapter(tid):
 
 @app.route('/api/inspection/chapters/<int:cid>', methods=['GET'])
 def api_get_icfg_chapter(cid):
-    """获取章节详情"""
+    """获取章节详情（可见性按所属模板判定）"""
     try:
+        ok, deny = _icfg_check_template(_icfg_tid_of_chapter(cid))
+        if not ok:
+            return deny
         row = get_chapter(cid)
         if row:
             return jsonify({'success': True, 'data': row})
@@ -5074,14 +5207,14 @@ def api_get_icfg_chapter(cid):
 
 @app.route('/api/inspection/chapters/<int:cid>', methods=['PUT'])
 def api_update_icfg_chapter(cid):
-    """更新章节"""
+    """更新章节（可见性按所属模板判定，堵住直接改 cid 的越权）"""
     try:
-        # 写操作仅管理员（巡检配置管理：创建/保存/删除）
-        if not session.get("is_admin", False):
-            return jsonify({"success": False, "message": "只有管理员才能执行此操作"}), 403
-        # 写操作仅管理员（巡检配置管理：创建/保存/删除）
-        if not session.get("is_admin", False):
-            return jsonify({"success": False, "message": "只有管理员才能执行此操作"}), 403
+        ok, deny = _require_icfg_admin()
+        if not ok:
+            return deny
+        vis, refuse = _icfg_check_template(_icfg_tid_of_chapter(cid))
+        if not vis:
+            return refuse
         d = request.json
         update_chapter(
             cid,
@@ -5090,6 +5223,7 @@ def api_update_icfg_chapter(cid):
             chapter_title_en=d.get('chapter_title_en'),
             description=d.get('description'),
             enabled=d.get('enabled'),
+            sort_order=d.get('sort_order'),
         )
         return jsonify({'success': True, 'message': '章节更新成功'})
     except Exception as e:
@@ -5100,12 +5234,12 @@ def api_update_icfg_chapter(cid):
 def api_delete_icfg_chapter(cid):
     """删除章节（级联删除查询）"""
     try:
-        # 写操作仅管理员（巡检配置管理：创建/保存/删除）
-        if not session.get("is_admin", False):
-            return jsonify({"success": False, "message": "只有管理员才能执行此操作"}), 403
-        # 写操作仅管理员（巡检配置管理：创建/保存/删除）
-        if not session.get("is_admin", False):
-            return jsonify({"success": False, "message": "只有管理员才能执行此操作"}), 403
+        ok, deny = _require_icfg_admin()
+        if not ok:
+            return deny
+        vis, refuse = _icfg_check_template(_icfg_tid_of_chapter(cid))
+        if not vis:
+            return refuse
         delete_chapter(cid)
         return jsonify({'success': True, 'message': '章节删除成功'})
     except Exception as e:
@@ -5116,14 +5250,14 @@ def api_delete_icfg_chapter(cid):
 def api_reorder_icfg_chapters():
     """章节拖拽排序"""
     try:
-        # 写操作仅管理员（巡检配置管理：创建/保存/删除）
-        if not session.get("is_admin", False):
-            return jsonify({"success": False, "message": "只有管理员才能执行此操作"}), 403
-        # 写操作仅管理员（巡检配置管理：创建/保存/删除）
-        if not session.get("is_admin", False):
-            return jsonify({"success": False, "message": "只有管理员才能执行此操作"}), 403
+        ok, deny = _require_icfg_admin()
+        if not ok:
+            return deny
         d = request.json
         template_id = d.get('template_id')
+        vis, refuse = _icfg_check_template(template_id)
+        if not vis:
+            return refuse
         chapter_ids = d.get('chapter_ids', [])
         reorder_chapters(template_id, chapter_ids)
         return jsonify({'success': True, 'message': '排序保存成功'})
@@ -5135,10 +5269,37 @@ def api_reorder_icfg_chapters():
 
 @app.route('/api/inspection/chapters/<int:cid>/queries', methods=['GET'])
 def api_list_icfg_queries(cid):
-    """获取章节下的查询列表"""
+    """获取章节下的查询列表（可见性按所属模板判定）"""
     try:
+        ok, deny = _icfg_check_template(_icfg_tid_of_chapter(cid))
+        if not ok:
+            return deny
         rows = get_queries_by_chapter(cid)
         return jsonify({'success': True, 'data': rows})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/inspection/chapters/<int:cid>/queries/reorder', methods=['POST'])
+def api_reorder_icfg_queries(cid):
+    """SQL 查询拖拽排序。
+
+    dal.reorder_queries 早已实现并写好 sort_order，但一直没接路由，
+    三栏 UI 的 SQL 行排序因此无处落地。
+    """
+    try:
+        ok, deny = _require_icfg_admin()
+        if not ok:
+            return deny
+        vis, refuse = _icfg_check_template(_icfg_tid_of_chapter(cid))
+        if not vis:
+            return refuse
+        d = request.json or {}
+        query_ids = d.get('query_ids') or []
+        if not isinstance(query_ids, list):
+            return jsonify({'success': False, 'message': 'query_ids 需为数组'})
+        reorder_queries(cid, [int(q) for q in query_ids])
+        return jsonify({'success': True, 'message': '排序保存成功'})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)})
 
@@ -5147,12 +5308,12 @@ def api_list_icfg_queries(cid):
 def api_create_icfg_query(cid):
     """在章节下创建查询"""
     try:
-        # 写操作仅管理员（巡检配置管理：创建/保存/删除）
-        if not session.get("is_admin", False):
-            return jsonify({"success": False, "message": "只有管理员才能执行此操作"}), 403
-        # 写操作仅管理员（巡检配置管理：创建/保存/删除）
-        if not session.get("is_admin", False):
-            return jsonify({"success": False, "message": "只有管理员才能执行此操作"}), 403
+        ok, deny = _require_icfg_admin()
+        if not ok:
+            return deny
+        vis, refuse = _icfg_check_template(_icfg_tid_of_chapter(cid))
+        if not vis:
+            return refuse
         d = request.json
         qid = create_query(
             chapter_id=cid,
@@ -5161,6 +5322,7 @@ def api_create_icfg_query(cid):
             query_description_zh=d.get('query_description_zh', ''),
             query_description_en=d.get('query_description_en', ''),
             enabled=1 if d.get('enabled', 1) else 0,
+            sort_order=int(d.get('sort_order') or 0),
         )
         return jsonify({'success': True, 'data': {'id': qid}})
     except Exception as e:
@@ -5169,8 +5331,11 @@ def api_create_icfg_query(cid):
 
 @app.route('/api/inspection/queries/<int:qid>', methods=['GET'])
 def api_get_icfg_query(qid):
-    """获取查询详情"""
+    """获取查询详情（可见性按所属模板判定）"""
     try:
+        ok, deny = _icfg_check_template(_icfg_tid_of_query(qid))
+        if not ok:
+            return deny
         row = get_query(qid)
         if row:
             return jsonify({'success': True, 'data': row})
@@ -5181,14 +5346,14 @@ def api_get_icfg_query(qid):
 
 @app.route('/api/inspection/queries/<int:qid>', methods=['PUT'])
 def api_update_icfg_query(qid):
-    """更新查询"""
+    """更新查询（可见性按所属模板判定，堵住直接改 qid 的越权）"""
     try:
-        # 写操作仅管理员（巡检配置管理：创建/保存/删除）
-        if not session.get("is_admin", False):
-            return jsonify({"success": False, "message": "只有管理员才能执行此操作"}), 403
-        # 写操作仅管理员（巡检配置管理：创建/保存/删除）
-        if not session.get("is_admin", False):
-            return jsonify({"success": False, "message": "只有管理员才能执行此操作"}), 403
+        ok, deny = _require_icfg_admin()
+        if not ok:
+            return deny
+        vis, refuse = _icfg_check_template(_icfg_tid_of_query(qid))
+        if not vis:
+            return refuse
         d = request.json
         update_query(
             qid,
@@ -5197,6 +5362,7 @@ def api_update_icfg_query(qid):
             query_description_zh=d.get('query_description_zh'),
             query_description_en=d.get('query_description_en'),
             enabled=d.get('enabled'),
+            sort_order=d.get('sort_order'),
         )
         return jsonify({'success': True, 'message': '查询更新成功'})
     except Exception as e:
@@ -5207,12 +5373,12 @@ def api_update_icfg_query(qid):
 def api_delete_icfg_query(qid):
     """删除查询"""
     try:
-        # 写操作仅管理员（巡检配置管理：创建/保存/删除）
-        if not session.get("is_admin", False):
-            return jsonify({"success": False, "message": "只有管理员才能执行此操作"}), 403
-        # 写操作仅管理员（巡检配置管理：创建/保存/删除）
-        if not session.get("is_admin", False):
-            return jsonify({"success": False, "message": "只有管理员才能执行此操作"}), 403
+        ok, deny = _require_icfg_admin()
+        if not ok:
+            return deny
+        vis, refuse = _icfg_check_template(_icfg_tid_of_query(qid))
+        if not vis:
+            return refuse
         delete_query(qid)
         return jsonify({'success': True, 'message': '查询删除成功'})
     except Exception as e:
