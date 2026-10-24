@@ -5852,6 +5852,9 @@ def api_notifier_test_email():
         saved_email = saved.get('email', {})
         if not cfg.get('password') or cfg.get('password') == '***':
             cfg['password'] = saved_email.get('password', '')
+        # 前端未显式传抄送人时，沿用已保存配置，避免测试邮件漏发抄送
+        if not cfg.get('cc'):
+            cfg['cc'] = saved_email.get('cc', [])
 
         notifier = EmailNotifier(cfg)
 
@@ -6957,7 +6960,10 @@ def api_pro_import_instances_json():
 
 @app.route('/api/pro/datasources', methods=['GET'])
 def api_pro_datasources():
-    """获取数据源列表（按当前身份过滤：租户硬隔离 + scope 软隔离）"""
+    """获取数据源列表（按当前身份过滤：租户硬隔离 + scope 软隔离）。
+
+    可选筛选：dir_id / with_children / labels / kw。
+    """
     try:
         from modules.pro import get_instance_manager
         from modules.access import principal_from_session, filter_visible
@@ -6965,11 +6971,188 @@ def api_pro_datasources():
         user = principal_from_session()
         instances = filter_visible(
             user, im.get_all_instances(mask_password=True), 'instance')
+
+        dir_id = (request.args.get('dir_id') or '').strip()
+        with_children = (request.args.get('with_children') or '').lower() in ('1', 'true', 'yes')
+        labels_raw = (request.args.get('labels') or '').strip()
+        kw = (request.args.get('kw') or '').strip().lower()
+
+        if dir_id:
+            allowed = {dir_id}
+            if with_children:
+                dirs = im.get_all_dirs()
+                children = {}
+                for d in dirs:
+                    children.setdefault(d.get('parent_id') or '', []).append(d.get('id'))
+                stack = list(children.get(dir_id, []))
+                while stack:
+                    did = stack.pop()
+                    if did in allowed:
+                        continue
+                    allowed.add(did)
+                    stack.extend(children.get(did, []))
+            instances = [i for i in instances if (i.get('dir_id') or 'dir_unassigned') in allowed]
+
+        if labels_raw:
+            wanted = {x.strip().lower() for x in labels_raw.split(',') if x.strip()}
+            def _has_label(item):
+                vals = item.get('labels')
+                if vals is None:
+                    vals = item.get('tags') or []
+                return bool(wanted & {str(x).lower() for x in vals})
+            instances = [i for i in instances if _has_label(i)]
+
+        if kw:
+            def _match(item):
+                hay = ' '.join(str(item.get(k, '') or '') for k in (
+                    'name', 'host', 'port', 'database', 'service_name',
+                    'dir_path', 'dir_name', 'group', 'db_type'))
+                hay += ' ' + ' '.join(str(x) for x in (item.get('labels') or item.get('tags') or []))
+                return kw in hay.lower()
+            instances = [i for i in instances if _match(i)]
+
         return jsonify({'ok': True, 'datasources': instances})
     except ImportError as e:
         import traceback
         traceback.print_exc()
         return jsonify({'ok': False, 'error': 'Pro 模块加载失败: ' + str(e)})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+# ── 数据源目录树（与 groups 共用 groups.db，写操作限管理员）──
+
+@app.route('/api/pro/dirs', methods=['GET'])
+def api_pro_dirs():
+    try:
+        from modules.pro import get_instance_manager
+        from modules.access import principal_from_session, filter_visible
+        im = get_instance_manager()
+        user = principal_from_session()
+        visible = filter_visible(
+            user, im.get_all_instances(mask_password=True), 'instance')
+        dirs = im.get_all_dirs()
+        by_id = {d.get('id'): d for d in dirs}
+        counts = {d.get('id'): 0 for d in dirs}
+        for inst in visible:
+            cur = inst.get('dir_id') or 'dir_unassigned'
+            seen = set()
+            while cur and cur in by_id and cur not in seen:
+                counts[cur] = counts.get(cur, 0) + 1
+                seen.add(cur)
+                cur = by_id[cur].get('parent_id') or ''
+        for d in dirs:
+            d['count'] = counts.get(d.get('id'), 0)
+        return jsonify({'ok': True, 'dirs': dirs, 'total': len(visible)})
+    except ImportError as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'ok': False, 'error': 'Pro 模块加载失败: ' + str(e)})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+def _require_dir_admin():
+    from modules.access import principal_from_session
+    user = principal_from_session()
+    if not user or not user.is_admin:
+        return None, (jsonify({'ok': False, 'error': '需要管理员权限'}), 403)
+    return user, None
+
+
+def _normalize_labels(value):
+    """把前端 labels（数组或逗号分隔字符串）归一化为字符串数组。"""
+    if isinstance(value, (list, tuple, set)):
+        return [str(x).strip() for x in value if str(x).strip()]
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return []
+        if raw.startswith('['):
+            try:
+                import json as _json
+                parsed = _json.loads(raw)
+                if isinstance(parsed, list):
+                    return [str(x).strip() for x in parsed if str(x).strip()]
+            except Exception:
+                pass
+        return [x.strip() for x in raw.split(',') if x.strip()]
+    return []
+
+
+@app.route('/api/pro/dirs', methods=['POST'])
+def api_pro_dir_add():
+    try:
+        user, denied = _require_dir_admin()
+        if denied:
+            return denied
+        from modules.pro import get_instance_manager
+        data = request.get_json(silent=True) or {}
+        im = get_instance_manager()
+        result = im.add_dir(
+            data.get('name', ''),
+            data.get('parent_id', '') or '',
+            data.get('color', '#378ADD') or '#378ADD',
+            data.get('sort_order'),
+        )
+        return jsonify(result), (200 if result.get('ok') else 400)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/pro/dirs/<dir_id>', methods=['PUT'])
+def api_pro_dir_update(dir_id):
+    try:
+        user, denied = _require_dir_admin()
+        if denied:
+            return denied
+        from modules.pro import get_instance_manager
+        data = request.get_json(silent=True) or {}
+        im = get_instance_manager()
+        result = im.update_dir(dir_id, data)
+        return jsonify(result), (200 if result.get('ok') else 400)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/pro/dirs/<dir_id>', methods=['DELETE'])
+def api_pro_dir_delete(dir_id):
+    try:
+        user, denied = _require_dir_admin()
+        if denied:
+            return denied
+        from modules.pro import get_instance_manager
+        mode = (request.args.get('mode') or 'move_parent').strip()
+        im = get_instance_manager()
+        result = im.delete_dir(dir_id, mode=mode)
+        return jsonify(result), (200 if result.get('ok') else 400)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/pro/datasources/<instance_id>/move', methods=['POST'])
+def api_pro_datasource_move(instance_id):
+    try:
+        from modules.pro import get_instance_manager
+        from modules.access import principal_from_session, assert_visible
+        im = get_instance_manager()
+        user = principal_from_session()
+        ok, err = assert_visible(user, 'instance', instance_id)
+        if not ok:
+            return jsonify({'ok': False, **err}), 403
+        data = request.get_json(silent=True) or {}
+        result = im.move_instance(instance_id, data.get('dir_id', '') or '')
+        return jsonify(result), (200 if result.get('ok') else 400)
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -7087,8 +7270,9 @@ def api_pro_datasource_add():
             trust_server_certificate=bool(data.get('trust_server_certificate', True)) if _db_type == 'sqlserver_jdbc' else True,
             driver_version=data.get('driver_version', '') or '',
             use_sid=bool(data.get('use_sid', False)),
-            tags=data.get('tags', []),
+            tags=_normalize_labels(data.get('labels', data.get('tags', []))),
             group=data.get('group', 'default'),
+            dir_id=data.get('dir_id', '') or '',
             description=data.get('description', ''),
         )
         im = get_instance_manager()
@@ -7124,6 +7308,9 @@ def api_pro_datasource_update(instance_id):
         ok, err = assert_visible(user, 'instance', instance_id)
         if not ok:
             return jsonify({'ok': False, **err}), 403
+        # 前端统一用 labels；物理列仍是 tags
+        if 'labels' in data and 'tags' not in data:
+            data['tags'] = _normalize_labels(data.get('labels'))
         result = im.update_instance(instance_id, data)
         return jsonify(result)
     except ImportError as e:

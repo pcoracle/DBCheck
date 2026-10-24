@@ -1,0 +1,192 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
+ * Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
+ *
+ * Fusion page styles: notification settings.
+ * Layout and UX adapted from DBCheck v2.6 (MIT License,
+ * Copyright (c) 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>),
+ * rewritten for the RaccoonX module layout.
+ * All selectors are scoped to #page-notifier to avoid affecting existing pages.
+ */
+
+/* 页头沿用目标系统约定的 .page-header > h2，与其他页面同一左边缘 */
+#page-notifier .page-header h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+#page-notifier .notify-tabs {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: 100%;
+  margin-bottom: 20px;
+  padding: 4px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+#page-notifier .notify-tab {
+  padding: 8px 18px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--text-muted);
+  transition: color .2s, background .2s, border-color .2s;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#page-notifier .notify-tab:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+
+#page-notifier .notify-tab:focus-visible {
+  outline: 2px solid var(--accent, #388bfd);
+  outline-offset: 1px;
+}
+
+#page-notifier .notify-tab.active {
+  color: var(--accent, #388bfd);
+  background: var(--surface-solid, var(--surface));
+  border-color: var(--border);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .12);
+}
+
+#page-notifier .notify-tab-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  opacity: .45;
+}
+
+#page-notifier .notify-tab.active .notify-tab-dot {
+  background: var(--accent, #388bfd);
+  opacity: 1;
+}
+
+#page-notifier .notify-panel {
+  display: none;
+}
+
+#page-notifier .notify-panel.active {
+  display: block;
+}
+
+/* 全局 .form-grid / 输入框样式只覆盖 text|password|number|select，
+   email 一类会退化成浏览器默认小框，同行高度和列宽就跟着错位。
+   这里在通知页作用域内补齐，保证每个框等高、等宽、左右边缘对齐。 */
+#page-notifier .form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px 20px;
+}
+
+#page-notifier .field {
+  min-width: 0;
+}
+
+#page-notifier .field input:not([type="checkbox"]),
+#page-notifier .field select {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 9px 12px;
+  font-size: 13.5px;
+  color: var(--text);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  outline: none;
+}
+
+#page-notifier .field input:not([type="checkbox"]):focus,
+#page-notifier .field select:focus {
+  border-color: var(--accent2);
+  box-shadow: 0 0 0 3px rgba(56, 139, 253, .12);
+}
+
+@media (max-width: 760px) {
+  #page-notifier .form-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+#page-notifier .notify-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 20px;
+  flex-wrap: wrap;
+}
+
+#page-notifier .notify-msg {
+  margin-top: 12px;
+  font-size: 13px;
+  min-height: 18px;
+}
+
+#page-notifier .notify-field-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 8px;
+}
+
+#page-notifier .notify-tls-row {
+  margin-top: 12px;
+}
+
+#page-notifier .notify-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+#page-notifier .notify-fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+
+#page-notifier .notify-disabled-card {
+  opacity: .72;
+}
+
+#page-notifier .recv-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 18px;
+  vertical-align: middle;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  background: var(--surface2);
+}
+
+#page-notifier .recv-badge.owner {
+  color: var(--accent, #388bfd);
+  border-color: color-mix(in srgb, var(--accent, #388bfd) 35%, transparent);
+}
+
+#page-notifier .recv-badge.cc {
+  color: var(--text-muted);
+}
+
+#page-notifier .recv-input {
+  width: 100%;
+}

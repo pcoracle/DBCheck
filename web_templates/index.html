@@ -3481,6 +3481,8 @@ async function executeFixSql(taskId, sql) {
   <link rel="stylesheet" href="/static/codemirror/theme/dracula.css" data-page-node-id="R1rux9PFfASI13MPLgv0qF">
   <link rel="stylesheet" href="/static/codemirror/addon/hint/show-hint.css" data-page-node-id="OSREkyFQ42zRqT8BSrB9CA">
   <link rel="stylesheet" href="/static/css/inspection_config.css" data-page-node-id="ioW10XaqiPun7ZHGmokkN5">
+  <link rel="stylesheet" href="/static/css/fusion/notifier.css?v={{ version }}-fusion3">
+  <link rel="stylesheet" href="/static/css/fusion/datasources.css?v={{ version }}-fusion16">
 
   <!-- xterm.js（远程终端） -->
   <link rel="stylesheet" href="/static/css/xterm.css" data-page-node-id="fyVy1GfG9wP7FKcTrz1fR8" />
@@ -6412,6 +6414,8 @@ function formatBytes(bytes) {
       // ─── Data Sources Page ────────────────────────
       let currentGroupFilter = '';
       async function loadDataSources(groupFilter) {
+        // 新版数据源页（左树右表）已接管；保留旧函数签名供现有调用点使用
+        if (window.FusionDataSources) return FusionDataSources.load();
         if (groupFilter !== undefined) currentGroupFilter = groupFilter || '';
         try {
           const res = await fetch('/api/pro/datasources');
@@ -6464,8 +6468,9 @@ function formatBytes(bytes) {
           const data = await res.json();
           const wrap = document.getElementById('group-chips-wrap');
           const allChip = document.getElementById('group-all-chip');
+          if (!wrap) return;
           if (!data.ok || !data.groups || data.groups.length === 0) { wrap.innerHTML = ''; return; }
-          allChip.className = 'group-chip' + (!currentGroupFilter ? ' active' : '');
+          if (allChip) allChip.className = 'group-chip' + (!currentGroupFilter ? ' active' : '');
           wrap.innerHTML = data.groups.map(g => {
             const isActive = currentGroupFilter === g.name;
             const isDefault = g.name === 'default';
@@ -6605,6 +6610,11 @@ function formatBytes(bytes) {
   '<div id="ds-mongo-wrap" style="grid-column:1/-1;display:none"><div style="font-size:12px;color:var(--text-muted);margin:8px 0 4px">MongoDB 连接参数 <span style="color:#43a047">NoSQL</span></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px"><div><label style="font-size:12px;color:var(--text-muted)">连接模式</label><select id="ds-connect-mode" style="width:100%;margin-top:4px;padding:8px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px"><option value="standard">standard</option><option value="srv">srv</option></select></div><div><label style="font-size:12px;color:var(--text-muted)">认证源</label><input id="ds-auth-source" value="admin" style="width:100%;margin-top:4px;padding:8px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px" placeholder="admin"></div><div><label style="font-size:12px;color:var(--text-muted)">认证机制</label><input id="ds-auth-mechanism" style="width:100%;margin-top:4px;padding:8px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px" placeholder="SCRAM-SHA-256（留空默认）"></div><div><label style="font-size:12px;color:var(--text-muted)">副本集</label><input id="ds-replica-set" style="width:100%;margin-top:4px;padding:8px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px" placeholder="留空表示单机"></div><div><label style="font-size:12px;color:var(--text-muted)">TLS CA 证书路径</label><input id="ds-tls-ca-file" style="width:100%;margin-top:4px;padding:8px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px" placeholder="留空不使用"></div><div><label style="font-size:12px;color:var(--text-muted)">TLS 客户端证书路径</label><input id="ds-tls-cert-key-file" style="width:100%;margin-top:4px;padding:8px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px" placeholder="留空不使用"></div></div><div style="display:flex;gap:18px;margin-top:8px;flex-wrap:wrap"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="ds-tls" style="width:16px;height:16px;accent-color:var(--accent)" /><span style="font-size:13px;color:var(--text-muted)">启用 TLS</span></label><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="ds-tls-allow-invalid" style="width:16px;height:16px;accent-color:var(--accent)" /><span style="font-size:13px;color:var(--text-muted)">允许无效证书</span></label></div></div>' +
   '<div id="ds-redis-seed-wrap" style="grid-column:1/-1;display:none"><label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px">集群种子节点 <span style="color:var(--text-muted);font-weight:normal">（多个用逗号分隔 host:port）</span></label><input id="ds-redis-seed-nodes" style="width:100%;padding:8px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px" placeholder="127.0.0.1:6379,127.0.0.1:6380"></div>' +
   '<div style="grid-column:1/-1"><label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px">' + i18n('webui.pro_ds_group') + '</label><select id="ds-group" style="width:100%;padding:8px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px"><option value="default">default</option></select></div>' +
+  '<div style="grid-column:1/-1"><label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px">所属目录 <span style="color:var(--text-muted);font-weight:normal">（按目录树层级选择）</span></label><div style="display:flex;gap:6px;align-items:center"><input id="ds-dir-label" readonly placeholder="未分配" style="flex:1;min-width:0;padding:8px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px" />' +
+'<button type="button" class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="FusionDataSources.openDirPicker(\'ds-dir\',\'ds-dir-label\')">选择</button>' +
+'<button type="button" class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="FusionDataSources.clearDirPicker(\'ds-dir\',\'ds-dir-label\')">清除</button></div>' +
+'<select id="ds-dir" style="display:none"><option value="dir_unassigned">未分配</option></select></div>' +
+  '<div style="grid-column:1/-1"><label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px">业务标签 <span style="color:var(--text-muted);font-weight:normal">（逗号分隔，可多值）</span></label><input id="ds-labels" style="width:100%;padding:8px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px" placeholder="如：核心业务, 华东, 财务"></div>' +
 '</div>' +
             // SSH 配置（开关 + 下拉切换认证方式）
             '<div style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px;">' +
@@ -6661,6 +6671,33 @@ function formatBytes(bytes) {
           const sel = document.getElementById('ds-group');
           if(sel && d.ok && d.groups){
             sel.innerHTML = d.groups.map(g=>'<option value="'+escHtml(g.name)+'">'+escHtml(g.name)+'</option>').join('') + '<option value="default">default</option>';
+          }
+        });
+        // 填充目录 select（树形路径展平），并回填编辑态目录/标签
+        fetch('/api/pro/dirs').then(r=>r.json()).then(d=>{
+          const sel = document.getElementById('ds-dir');
+          if (!sel) return;
+          if (d.ok && d.dirs) {
+            sel.innerHTML = d.dirs.map(function(dir){
+              const path = dir.full_path || dir.name || '';
+              const indent = (path.split('/').length - 1) * 2;
+              return '<option value="' + escHtml(dir.id) + '">' + escHtml('　'.repeat(indent) + path) + '</option>';
+            }).join('');
+          }
+          if (!sel.options.length) {
+            sel.innerHTML = '<option value="dir_unassigned">未分配</option>';
+          }
+          const target = (existingDs && existingDs.dir_id) ? existingDs.dir_id : 'dir_unassigned';
+          sel.value = target;
+          const dirLabel = document.getElementById('ds-dir-label');
+          if (dirLabel) {
+            const chosen = (d.dirs || []).filter(function (x) { return x.id === target; })[0];
+            dirLabel.value = chosen ? (chosen.full_path || chosen.name) : '未分配';
+          }
+          const labelsEl = document.getElementById('ds-labels');
+          if (labelsEl && existingDs) {
+            const vals = existingDs.labels || existingDs.tags || [];
+            labelsEl.value = Array.isArray(vals) ? vals.join(', ') : String(vals || '');
           }
         });
       }
@@ -6924,6 +6961,9 @@ function formatBytes(bytes) {
           user: document.getElementById('ds-user').value.trim(),
           password: document.getElementById('ds-password').value || undefined,
           group: document.getElementById('ds-group').value.trim() || 'default',
+          dir_id: document.getElementById('ds-dir')?.value || 'dir_unassigned',
+          labels: (document.getElementById('ds-labels')?.value || '')
+            .split(',').map(function(s){ return s.trim(); }).filter(Boolean),
         };
         const sshOn = document.getElementById('ds-ssh-section')?.style.display !== 'none';
         payload.ssh_enabled = sshOn ? 1 : 0;
@@ -7044,6 +7084,15 @@ function formatBytes(bytes) {
               document.getElementById('ds-password').placeholder = '（不修改请留空）';
               document.getElementById('ds-password').value = '';
               document.getElementById('ds-group').value = ds.group || 'default';
+              const dirSel = document.getElementById('ds-dir');
+              if (dirSel && ds.dir_id) dirSel.value = ds.dir_id;
+              const dirLabel = document.getElementById('ds-dir-label');
+              if (dirLabel) dirLabel.value = ds.dir_path || (ds.dir_id === 'dir_unassigned' ? '未分配' : '未分配');
+              const labelsEl = document.getElementById('ds-labels');
+              if (labelsEl) {
+                const vals = ds.labels || ds.tags || [];
+                labelsEl.value = Array.isArray(vals) ? vals.join(', ') : String(vals || '');
+              }
               // 数据库名回填：按 SHOW_DB_FIELD 通用覆盖（db2/tdsqlc_mysql/插件类型此前漏填）
               if (window.SHOW_DB_FIELD && window.SHOW_DB_FIELD[ds.db_type]) {
                 document.getElementById('ds-database').value = ds.database || '';
@@ -8758,94 +8807,8 @@ function wfCloseRunDrawer() {
       </div>
 
       <!-- ══ Page: Notifier ══ -->
-      <div class="page" id="page-notifier" data-page-node-id="W8oMwP8x9X8q9Xgf0UimhO">
-        <div class="card" data-page-node-id="R3379DlU7SJfB56oTklEgg">
-          <div class="card-title" data-page-node-id="j9UdIJV3BkcNN7cAd298uV">
-            <span data-page-node-id="svPCFoMkx7n7dlwcxYNW2r">📧</span> 邮件通知配置
-            <span class="badge" id="email-status" data-i18n="webui.email_status_fail" data-page-node-id="96CauxQ9gKmmPzyPmHSMC4">未配置</span>
-          </div>
-          <div class="form-grid" data-page-node-id="il8Wsv6HI8FKqGER8u991a">
-            <div class="field" data-page-node-id="D02Snd4RA5aMvk390pBAHF">
-              <label data-i18n="webui.email_server_label" data-page-node-id="EHlWPpX9WolrlB8vQOyfwJ">SMTP 服务器</label>
-              <input type="text" id="smtp-host" placeholder="smtp.qq.com" data-page-node-id="qRZngqlHEOpOiNhMtAlTJ1" />
-            </div>
-            <div class="field" data-page-node-id="MKB3UrfVwoeyZWckklBmOK">
-              <label data-i18n="webui.email_port_label" data-page-node-id="ZeyJADHSXOEMb4f2SAQuKj">端口</label>
-              <input type="number" id="smtp-port" value="587" data-page-node-id="KkYkG7i7lAUZwgCaXx64mZ" />
-            </div>
-            <div class="field" data-page-node-id="QWVPw2qJcmCchdVGMTKWUU">
-              <label data-i18n="webui.email_addr_label" data-page-node-id="YfLxI3yADJvxIT9funYj4H">邮箱地址</label>
-              <input type="email" id="smtp-user" placeholder="your_email@qq.com" data-page-node-id="wAONGDBstkmHypC0w2yMsj" />
-            </div>
-            <div class="field" data-page-node-id="WR7wskKALGFq7qyvLDMHtD">
-              <label data-i18n="webui.email_pass_label" data-page-node-id="yzRPlaiz4XrQtlHTTmQCne">密码/授权码</label>
-              <input type="password" id="smtp-password" placeholder="邮箱授权码（非登录密码）" data-page-node-id="bewpBJYbxXHQuC17VtzMAs" />
-            </div>
-            <div class="field full" data-page-node-id="RNgAfIQgTvY5WCODZpxXYp">
-              <label data-i18n="webui.email_recipients_label" data-page-node-id="PSCq0BVDEWtGI0J6CpX0YG">收件人邮箱（逗号分隔）</label>
-              <input type="text" id="smtp-recipients" placeholder="admin@example.com, dba@example.com" data-page-node-id="gVvmM0XPzaysFiyI8QVc9d" />
-            </div>
-          </div>
-          <div style="margin-top:12px;" data-page-node-id="FCDLvMKrTaJwDM57oC1o41">
-            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;" data-page-node-id="0fMa9cTKiEYPpqXQeL5ES2">
-              <input type="checkbox" id="smtp-tls" checked data-page-node-id="oiZYkpuvgn35xpaRqhhFWG" />
-              <span data-i18n="webui.email_tls_label" data-page-node-id="fdRYlZu2WoJgrH8rBbIz8G">使用 TLS 加密</span>
-            </label>
-          </div>
-          <div class="btn-row" style="margin-top:20px;" data-page-node-id="T3lCGGgSXsdW0RxYxkbflq">
-            <button class="btn btn-primary" onclick="saveEmailConfig()" data-i18n="webui.email_btn_save" data-i18n="webui.webhook_btn_save" data-page-node-id="yxhVfM27fwKnhVsUQOpcdi">💾 保存配置</button>
-            <button class="btn btn-ghost" onclick="testEmailConfig()" data-i18n="webui.email_btn_test" data-i18n="webui.webhook_btn_test" data-page-node-id="NJyKtKRE9EXSrSFbMzT3nc">🧪 测试发送</button>
-          </div>
-          <div id="email-msg" style="margin-top:10px;font-size:13px;" data-page-node-id="qzUJxSWUNKyqUJeGIFud6p"></div>
-        </div>
-
-        <div class="card" data-page-node-id="Ht8Bf2Zgpb9dUiOPJnpgmX">
-          <div class="card-title" data-page-node-id="G6Tf3bf1AtQzz8FoA6QBaC">
-            <span data-page-node-id="DsmjxpK5hsGkgNYD1P8ZyI">🔔</span> <span data-i18n="webui.webhook_title" data-page-node-id="PRA06qoDk97YT4eFeptpqy">Webhook 告警配置</span>
-            <span class="badge" id="webhook-status" data-i18n="webui.webhook_status_fail" data-page-node-id="Qe1n8kHCpxI0FPMhBlQ8wH">未配置</span>
-          </div>
-          <div class="form-grid" data-page-node-id="656eA6ZBf2ewtSFn8KNIai">
-            <div class="field full" data-page-node-id="XOS5c8BLklCYteZFCUKM67">
-              <label data-page-node-id="9MvsvFhUTzbCQb7EjT5srv">类型</label>
-              <select id="webhook-type" onchange="onWebhookTypeChange()" data-page-node-id="BjFDBq4Ry169PArYWSlklw">
-                <option value="custom" data-i18n="webui.webhook_type_custom" data-page-node-id="kmoYUqVUYt1ik1NkMcim0V">自定义 Webhook</option>
-                <option value="wecom" data-page-node-id="dTS02fdRP4b0HG0ehUCUoY">企业微信</option>
-                <option value="dingtalk" data-page-node-id="roUfMQa1JxaN25PbIazdo2">钉钉</option>
-              </select>
-            </div>
-            <div class="field full" data-page-node-id="UMQVdjCT3mucM4lqYqpj1S">
-              <label data-i18n="webui.webhook_url_label" data-page-node-id="1ETCoPfpr4vD6ApNfDjpjZ">Webhook 地址</label>
-              <input type="text" id="webhook-url" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx" data-page-node-id="0rdD2dVSQkMxo6iJloYIK1" />
-            </div>
-            <div class="field full" data-page-node-id="WpXr4ProxyField00001">
-              <label data-i18n="webui.webhook_proxy_label" data-page-node-id="WpXr4ProxyLabel00001">网络代理（可选）</label>
-              <input type="text" id="webhook-proxy" placeholder="http://user:pass@192.168.1.10:8080" data-i18n-placeholder="webui.webhook_proxy_placeholder" data-page-node-id="WpXr4ProxyInput00001" />
-            </div>
-            <div class="field full" data-page-node-id="WpXr4CaCertField00001">
-              <label data-i18n="webui.webhook_ca_cert_label" data-page-node-id="WpXr4CaCertLabel00001">CA 证书路径（可选）</label>
-              <input type="text" id="webhook-ca-cert" placeholder="/etc/ssl/certs/corp-ca.pem" data-i18n-placeholder="webui.webhook_ca_cert_placeholder" data-page-node-id="WpXr4CaCertInput00001" />
-            </div>
-            <div class="field full" data-page-node-id="WpXr4VerifySslField00001">
-              <label style="display:flex;align-items:center;gap:8px;cursor:pointer" data-page-node-id="WpXr4VerifySslLabel00001">
-                <input type="checkbox" id="webhook-verify-ssl" style="width:16px;height:16px;accent-color:var(--accent)" checked data-page-node-id="WpXr4VerifySslInput00001" />
-                <span style="font-size:13px;color:var(--text-muted)" data-i18n="webui.webhook_verify_ssl_label" data-page-node-id="WpXr4VerifySslSpan00001">校验 SSL 证书（代理 SSL 解密导致证书错误时可关闭）</span>
-              </label>
-            </div>
-            <div class="field full" id="webhook-secret-wrap" style="display:none" data-page-node-id="LOnT8mjvH4WdS6zSNJA2cM">
-              <label data-page-node-id="S7fr02HgJejhmxpEbCfJ4L">签名密钥（可选）</label>
-              <input type="text" id="webhook-secret" placeholder="用于签名验证" data-page-node-id="rXu1WV91YMOemp4F7ZZWon" />
-            </div>
-            <div class="field full" id="dingtalk-at-wrap" style="display:none" data-page-node-id="0YIFrhh4YnIuM8SJx6YBZq">
-              <label data-page-node-id="ec6xUSpDQJ60JJJMF8MyyL">需要 @ 的手机号（逗号分隔）</label>
-              <input type="text" id="dingtalk-phones" placeholder="13800138000, 13900139000" data-page-node-id="5YNAUsJfkh5LtQ5l6BEKYE" />
-            </div>
-          </div>
-          <div class="btn-row" style="margin-top:20px;" data-page-node-id="IPeo3oFAGnmFZsbT9x3imi">
-            <button class="btn btn-primary" onclick="saveWebhookConfig()" data-page-node-id="hZv9FiN6EWqp9BLAID0HB6">💾 保存配置</button>
-            <button class="btn btn-ghost" onclick="testWebhookConfig()" data-page-node-id="y0TBbhLJGbpxECzFkk3lwK">🧪 测试发送</button>
-          </div>
-          <div id="webhook-msg" style="margin-top:10px;font-size:13px;" data-page-node-id="XhjCHxXj7upKWVPSvzYzKX"></div>
-        </div>
+      <div class="page" id="page-notifier">
+        {% include 'partials/fusion/notifier.html' %}
       </div>
 
       <!-- ══ Page: Backup ══ -->
@@ -10106,27 +10069,10 @@ curl -H "X-API-Key: YOUR_API_KEY" http://localhost:5003/api/v1/inspect/{task_id}
         </div>
       </div><!-- /page-plugin-market -->
       <!-- ══ Page: Data Sources ══ -->
-      <div class="page" id="page-datasources" data-page-node-id="7QCwlxiSDtk8PjOjx57brA">
-        <div class="card" data-page-node-id="hPfQxkl7yrVwjF3Kq8u7mI">
-          <div class="card-title" data-page-node-id="I3JwLtLh4xujurjUlUEANr">
-            <span data-page-node-id="FA4kTpWulGlOxXuM45DLP3">🗄️</span> <span data-i18n="webui.datasources_title" data-page-node-id="gEytgGYHZSEIClIN0CWGlD">数据源管理</span>
-            <span class="badge" id="datasources-count" data-page-node-id="VPoZSzoIg6HYCTyBfNuwon">0</span>
-            <button class="btn btn-ghost" style="margin-left:auto;padding:6px 14px;font-size:12px" onclick="exportDatasourcesJson()" data-i18n="webui.ds_export" data-page-node-id="dSxP0rtBtn1">⤓ <span data-i18n="webui.ds_export" data-page-node-id="dSxP0rtBtn1t">导出</span></button>
-            <button class="btn btn-ghost" style="padding:6px 14px;font-size:12px" onclick="importDatasourcesJson(this)" data-i18n="webui.ds_import" data-page-node-id="dSxImptBtn1">⤒ <span data-i18n="webui.ds_import" data-page-node-id="dSxImptBtn1t">导入</span></button>
-            <button class="btn btn-primary" style="padding:6px 14px;font-size:12px" onclick="showAddDatasourceModal()" data-page-node-id="Sz7f7EU39QKBq61TLPuCUG">➕ <span data-i18n="webui.datasources_add" data-page-node-id="d106HdzB5aF7yJbXxNIjtI">添加数据源</span></button>
-          </div>
-          <!-- 分组筛选 -->
-          <div style="margin:12px 0 4px;display:flex;align-items:center;gap:8px;flex-wrap:wrap" data-page-node-id="nrAOtHzHI4HB9MHAXbqRMK">
-            <span style="font-size:12px;color:var(--text-muted)" data-i18n="webui.group_filter" data-page-node-id="6tw5NyAKDDXZEFlog8bWqM">分组筛选：</span>
-            <span id="group-all-chip" class="group-chip active" onclick="filterByGroup('')" style="display:inline-block;padding:4px 12px;background:var(--surface2);border-radius:16px;font-size:12px;cursor:pointer;border:1px solid var(--accent)" data-i18n="webui.group_all" data-page-node-id="OfW8fLPFZAvLM0iVANzxWp">全部</span>
-            <span id="group-chips-wrap" style="display:inline-flex;gap:6px;flex-wrap:wrap" data-page-node-id="PUsHOMe6yZ0tb91AN1IXt5"></span>
-            <button class="btn btn-ghost" style="font-size:11px;padding:2px 8px;margin-left:4px" onclick="showAddGroupModalFromDatasource()" data-i18n="webui.add_group_btn" data-page-node-id="7EwbNY6S2JQv6lwZxSCshh">＋分组</button>
-          </div>
-          <div id="datasources-list" style="margin-top:12px;" data-page-node-id="AZ5DDFCP4CD5Ua1A3i8u0s">
-            <div style="text-align:center;padding:40px;color:var(--text-muted);" data-i18n="webui.datasources_empty" data-page-node-id="Nh4XmeRDS4gXlSN6qYon2K">暂无数据源，点击上方按钮添加</div>
-          </div>
-        </div>
+      <div class="page" id="page-datasources">
+        {% include 'partials/fusion/datasources.html' %}
       </div>
+
       {% if rules_available %}
       <!-- ══ Page: Rules ══ -->
       <div class="page" id="page-rules" data-page-node-id="SFQ8u8EJOAXzYrfKOIjhzb">
@@ -12808,7 +12754,10 @@ function showPage(name) {
   
   if (RULES_AVAILABLE && name === 'rules') loadRules();
   
-  if (name === 'notifier') loadNotifierConfig();
+  if (name === 'notifier') {
+    if (window.FusionNotifier) FusionNotifier.load();
+    else if (typeof loadNotifierConfig === 'function') loadNotifierConfig();
+  }
   if (name === 'ai') loadAIConfig();
   if (name === 'rag') showRagPage();
   if (name === 'doc-kb') loadDocKb();
@@ -27021,6 +26970,8 @@ function mkdirRemote() {
   <!-- 巡检配置管理：写操作（保存/删除/创建）仅管理员可见可用 -->
   <script>window._IS_ADMIN = ({{ 'true' if user_role == 'admin' else 'false' }});</script>
   <script src="/static/js/inspection_config.js"></script>
+  <script src="/static/js/fusion/notifier.js?v={{ version }}-fusion3"></script>
+  <script src="/static/js/fusion/datasources.js?v={{ version }}-fusion16"></script>
 <!-- 底部状态栏 -->
 <div class="status-bar" id="status-bar" data-page-node-id="E0jlA1UaqTA24TltOH3TVC">
   <div class="sb-item sb-brand" data-page-node-id="upIEHjuNpzMJN8eZoS2MXe">

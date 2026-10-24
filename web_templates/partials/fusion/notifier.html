@@ -1,0 +1,186 @@
+<!--
+  SPDX-License-Identifier: Apache-2.0
+  Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
+  Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
+
+  Fusion page: notification settings.
+  Layout and UX adapted from DBCheck v2.6 (MIT License,
+  Copyright (c) 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>),
+  rewritten for the RaccoonX module layout.
+-->
+<div class="page-header">
+  <h2 data-i18n="webui.nav_notifier">通知设置</h2>
+</div>
+
+<div class="notify-tabs" role="tablist" aria-label="通知方式">
+  <button type="button" class="notify-tab active" id="notify-tab-email" role="tab"
+          aria-selected="true" aria-controls="notify-panel-email"
+          onclick="FusionNotifier.switchTab('email')">
+    📧 <span data-i18n="webui.notify_tab_email">邮件通知</span>
+  </button>
+  <button type="button" class="notify-tab" id="notify-tab-daily" role="tab"
+          aria-selected="false" aria-controls="notify-panel-daily"
+          onclick="FusionNotifier.switchTab('daily')">
+    📨 <span data-i18n="webui.notify_tab_daily">每日报告</span>
+  </button>
+  <button type="button" class="notify-tab" id="notify-tab-webhook" role="tab"
+          aria-selected="false" aria-controls="notify-panel-webhook"
+          onclick="FusionNotifier.switchTab('webhook')">
+    🔔 <span data-i18n="webui.notify_tab_webhook">Webhook 告警</span>
+  </button>
+</div>
+
+<!-- 页签 1：邮件通知 -->
+<div class="notify-panel active" id="notify-panel-email" role="tabpanel" aria-labelledby="notify-tab-email">
+  <div class="card">
+    <div class="card-title">
+      <span>📧</span> <span data-i18n="webui.notify_smtp_title">SMTP 配置</span>
+      <span class="badge" id="email-status" data-i18n="webui.email_status_fail">未配置</span>
+    </div>
+    <div class="form-grid">
+      <div class="field">
+        <label data-i18n="webui.email_server_label">SMTP 服务器</label>
+        <input type="text" id="smtp-host" placeholder="smtp.example.com" autocomplete="off" />
+      </div>
+      <div class="field">
+        <label data-i18n="webui.email_port_label">端口</label>
+        <input type="number" id="smtp-port" value="587" />
+      </div>
+      <div class="field">
+        <label data-i18n="webui.email_addr_label">邮箱地址</label>
+        <input type="text" inputmode="email" id="smtp-user" placeholder="dba@example.com" autocomplete="off" />
+      </div>
+      <div class="field">
+        <label data-i18n="webui.email_pass_label">密码/授权码</label>
+        <input type="password" id="smtp-password" placeholder="邮箱授权码（非登录密码）" autocomplete="new-password" />
+      </div>
+      <div class="field full">
+        <label>
+          <span data-i18n="webui.email_recipients_label">收件人邮箱（逗号分隔）</span>
+          <span class="recv-badge owner" data-i18n="webui.email_role_owner">责任主体</span>
+        </label>
+        <input type="text" class="recv-input" id="smtp-recipients"
+               placeholder="admin@example.com, dba@example.com" autocomplete="off" />
+      </div>
+      <div class="field full">
+        <label>
+          <span data-i18n="webui.email_cc_label">抄收人邮箱（可选，逗号分隔）</span>
+          <span class="recv-badge cc" data-i18n="webui.email_role_cc">仅知会</span>
+        </label>
+        <input type="text" class="recv-input" id="smtp-cc"
+               placeholder="leader@example.com, audit@example.com" autocomplete="off" />
+      </div>
+    </div>
+    <div class="notify-tls-row">
+      <label class="notify-check">
+        <input type="checkbox" id="smtp-tls" checked />
+        <span data-i18n="webui.email_tls_label">使用 TLS 加密</span>
+      </label>
+    </div>
+
+    <div class="notify-actions">
+      <button class="btn btn-primary" onclick="FusionNotifier.saveEmail()" data-i18n="webui.email_btn_save">💾 保存配置</button>
+      <button class="btn btn-ghost" onclick="FusionNotifier.testEmail()" data-i18n="webui.email_btn_test">🧪 测试邮件</button>
+    </div>
+    <div class="notify-msg" id="email-msg" role="status" aria-live="polite"></div>
+  </div>
+</div>
+
+<!-- 页签 2：每日报告 -->
+<div class="notify-panel" id="notify-panel-daily" role="tabpanel" aria-labelledby="notify-tab-daily">
+  <div class="card notify-disabled-card" id="notify-daily-report-card">
+    <div class="card-title">
+      <span>📨</span> <span data-i18n="webui.email_daily_title">每日报告</span>
+      <span class="badge" data-i18n="webui.email_daily_disabled">需启用 Zabbix 监控</span>
+    </div>
+    <fieldset class="notify-fieldset" disabled>
+      <div class="form-grid">
+        <div class="field">
+          <label data-i18n="webui.email_daily_from">发件人</label>
+          <input type="text" id="zbx-cfg-from" placeholder="zabbix@example.com" />
+        </div>
+        <div class="field">
+          <label data-i18n="webui.email_daily_to">收件人（逗号分隔）</label>
+          <input type="text" id="zbx-cfg-to" placeholder="dba@example.com" />
+        </div>
+        <div class="field">
+          <label data-i18n="webui.email_daily_cc">抄送（可选）</label>
+          <input type="text" id="zbx-cfg-cc" />
+        </div>
+        <div class="field">
+          <label data-i18n="webui.email_daily_subject">邮件主题前缀</label>
+          <input type="text" id="zbx-cfg-prefix" value="[Zabbix Daily Report]" />
+        </div>
+      </div>
+      <div class="notify-tls-row">
+        <label class="notify-check">
+          <input type="checkbox" id="zbx-cfg-report-enabled" />
+          <span data-i18n="webui.email_daily_auto">启用每日报告自动发送</span>
+        </label>
+      </div>
+    </fieldset>
+    <div class="notify-field-hint" data-i18n="webui.email_daily_hint">
+      每日报告依赖 Zabbix 监控模块；当前版本未启用，配置项暂不可用。
+    </div>
+
+    <div class="notify-actions">
+      <button class="btn btn-primary" disabled title="需启用 Zabbix 监控后可用" data-i18n="webui.email_btn_save">💾 保存配置</button>
+      <button class="btn btn-ghost" disabled title="需启用 Zabbix 监控后可用" data-i18n="webui.email_btn_test_report">📨 测试报告</button>
+    </div>
+    <div class="notify-msg" id="daily-msg" role="status" aria-live="polite"></div>
+  </div>
+</div>
+
+<!-- 页签 3：Webhook 告警 -->
+<div class="notify-panel" id="notify-panel-webhook" role="tabpanel" aria-labelledby="notify-tab-webhook">
+  <div class="card">
+    <div class="card-title">
+      <span>🔔</span> <span data-i18n="webui.webhook_title">Webhook 告警配置</span>
+      <span class="badge" id="webhook-status" data-i18n="webui.webhook_status_fail">未配置</span>
+    </div>
+    <div class="form-grid">
+      <div class="field full">
+        <label data-i18n="webui.webhook_type_label">类型</label>
+        <select id="webhook-type" onchange="FusionNotifier.onWebhookTypeChange()">
+          <option value="custom" data-i18n="webui.webhook_type_custom">自定义 Webhook</option>
+          <option value="wecom">企业微信</option>
+          <option value="dingtalk">钉钉</option>
+        </select>
+      </div>
+      <div class="field full">
+        <label data-i18n="webui.webhook_url_label">Webhook 地址</label>
+        <input type="text" id="webhook-url"
+               placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx" autocomplete="off" />
+      </div>
+      <div class="field full">
+        <label data-i18n="webui.webhook_proxy_label">网络代理（可选）</label>
+        <input type="text" id="webhook-proxy"
+               placeholder="http://user:pass@192.0.2.10:8080" autocomplete="off" />
+      </div>
+      <div class="field full">
+        <label data-i18n="webui.webhook_ca_cert_label">CA 证书路径（可选）</label>
+        <input type="text" id="webhook-ca-cert" placeholder="/etc/ssl/certs/corp-ca.pem" />
+      </div>
+      <div class="field full">
+        <label class="notify-check">
+          <input type="checkbox" id="webhook-verify-ssl" checked />
+          <span data-i18n="webui.webhook_verify_ssl_label">校验 SSL 证书（代理 SSL 解密导致证书错误时可关闭）</span>
+        </label>
+      </div>
+      <div class="field full" id="webhook-secret-wrap" style="display:none">
+        <label data-i18n="webui.webhook_secret_label">签名密钥（可选）</label>
+        <input type="text" id="webhook-secret" placeholder="用于签名验证" autocomplete="off" />
+      </div>
+      <div class="field full" id="dingtalk-at-wrap" style="display:none">
+        <label data-i18n="webui.webhook_dingtalk_phones">需要 @ 的手机号（逗号分隔）</label>
+        <input type="text" id="dingtalk-phones" placeholder="13800138000, 13900139000" />
+      </div>
+    </div>
+
+    <div class="notify-actions">
+      <button class="btn btn-primary" onclick="FusionNotifier.saveWebhook()" data-i18n="webui.webhook_btn_save">💾 保存配置</button>
+      <button class="btn btn-ghost" onclick="FusionNotifier.testWebhook()" data-i18n="webui.webhook_btn_test">🧪 测试发送</button>
+    </div>
+    <div class="notify-msg" id="webhook-msg" role="status" aria-live="polite"></div>
+  </div>
+</div>

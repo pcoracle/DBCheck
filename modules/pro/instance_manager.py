@@ -19,6 +19,7 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict, fields as dc_fields
 import hashlib
 import base64
+import uuid
 
 from modules.core import paths
 
@@ -220,6 +221,7 @@ class DatabaseInstance:
     ssh_enabled: bool = False  # 是否启用 SSH
     tags: List[str] = None  # 标签列表
     group: str = "default"  # 分组
+    dir_id: str = ""  # 目录 ID（树形归属；与 group 独立，group 继续供监控大屏使用）
     enabled: bool = True
     description: str = ""
     created_at: str = ""
@@ -281,6 +283,40 @@ class InstanceGroup:
         }
 
 
+@dataclass
+class DirNode:
+    """数据源目录节点（树形归属）。
+
+    与旧版 ds_nodes 不同：这里只做「区域/机房/业务目录」的层级归属，
+    不是物理集群节点。一个数据源仍是一条普通连接记录。
+    """
+    id: str
+    parent_id: str = ""
+    name: str = ""
+    full_path: str = ""
+    kind: str = "dir"
+    color: str = "#378ADD"
+    sort_order: int = 0
+    created_at: str = ""
+    updated_at: str = ""
+
+    def __post_init__(self):
+        if not self.created_at:
+            self.created_at = datetime.now().isoformat()
+        if not self.updated_at:
+            self.updated_at = self.created_at
+        if not self.full_path:
+            self.full_path = self.name
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "DirNode":
+        allowed = {f.name for f in dc_fields(cls)}
+        return cls(**{k: v for k, v in (data or {}).items() if k in allowed})
+
+
 class InstanceManager:
     """实例管理器"""
 
@@ -299,6 +335,7 @@ class InstanceManager:
         # 初始化存储
         self._instances: Dict[str, DatabaseInstance] = {}
         self._groups: Dict[str, InstanceGroup] = {}
+        self._dirs: Dict[str, DirNode] = {}
         # 跨进程缓存失效依据：revision 戳文件（instances.db.rev / groups.db.rev）
         # 每次本进程或通过本类写库都会使 rev +1，读取时比对即可感知外部进程（Web 端）
         # 的数据源改动。相比 mtime / 内容哈希 / SQLite data_version，rev 戳不受同秒写入、
@@ -408,6 +445,25 @@ class InstanceManager:
             self._groups["production"] = InstanceGroup("production", "生产环境", "#E24B4A")
             self._groups["test"] = InstanceGroup("test", "测试环境", "#639922")
 
+        # ── 加载目录树（与 groups 共用 groups.db）──
+        self._dirs = {}
+        if os.path.exists(self.groups_db):
+            try:
+                conn = sqlite3.connect(self.groups_db)
+                conn.row_factory = sqlite3.Row
+                c = conn.cursor()
+                c.execute("SELECT * FROM ds_dirs ORDER BY sort_order, created_at")
+                for row in c.fetchall():
+                    node = DirNode.from_dict(dict(row))
+                    if node.id:
+                        self._dirs[node.id] = node
+                conn.close()
+            except Exception:
+                pass
+        if not self._dirs:
+            self._seed_dirs_from_groups()
+        self._assign_instance_dirs()
+
         # ── 跨进程缓存失效依据：读取 rev 戳 ──
         self._instances_rev = self._read_rev(self.instances_db)
         self._groups_rev = self._read_rev(self.groups_db)
@@ -457,6 +513,219 @@ class InstanceManager:
         cur = self._read_rev(self.groups_db)
         if cur != self._groups_rev:
             self._load_data()
+
+    # ── 数据源目录树 ──────────────────────────────────────────
+    # 设计参考 DBCheck v2.6（MIT License, Copyright (c) 2025-2026
+    # fiyo (Jack Ge) <sdfiyon@gmail.com>），按 RaccoonX 的数据模型重写：
+    # 保留 group 供监控大屏使用，目录只做树形归属，不引入 ds_nodes。
+
+    @staticmethod
+    def _dir_id_for_group(name: str) -> str:
+        raw = (name or 'default').strip() or 'default'
+        return 'dir_group_' + hashlib.md5(raw.encode('utf-8')).hexdigest()[:8]
+
+    @staticmethod
+    def _validate_dir_name(name: str) -> str:
+        """返回空串表示合法；否则返回错误文案。目录名会拼进 full_path，禁止分隔符。"""
+        if not name:
+            return '目录名称不能为空'
+        if len(name) > 80:
+            return '目录名称不能超过 80 个字符'
+        if name in ('.', '..') or '/' in name or '\\' in name:
+            return '目录名称不能包含 / 或 \\'
+        if any(ord(ch) < 32 for ch in name):
+            return '目录名称不能包含控制字符'
+        return ''
+
+    def _seed_dirs_from_groups(self):
+        """首次运行：把现有 groups 迁成一层根目录，并建立未分配目录。"""
+        self._dirs = {}
+        unassigned = DirNode(
+            id='dir_unassigned', parent_id='', name='未分配',
+            full_path='未分配', kind='unassigned', color='#888888', sort_order=-1,
+        )
+        self._dirs[unassigned.id] = unassigned
+        for idx, grp in enumerate(self._groups.values()):
+            node = DirNode(
+                id=self._dir_id_for_group(grp.name),
+                parent_id='', name=grp.name, full_path=grp.name,
+                kind='dir', color=grp.color or '#378ADD', sort_order=idx,
+            )
+            self._dirs[node.id] = node
+
+    def _assign_instance_dirs(self):
+        """给存量数据源补齐目录归属，不改变其 group（监控大屏仍按 group 聚合）。"""
+        for inst in self._instances.values():
+            if inst.dir_id and inst.dir_id in self._dirs:
+                continue
+            inst.dir_id = self._dir_for_group(inst.group)
+
+    def _dir_for_group(self, group: str) -> str:
+        grp = group or ''
+        for d in self._dirs.values():
+            if d.kind != 'unassigned' and (d.full_path == grp or d.name == grp):
+                return d.id
+        return 'dir_unassigned'
+
+    def _dir_full_path(self, parent_id: str, name: str) -> str:
+        if parent_id:
+            parent = self._dirs.get(parent_id)
+            if parent:
+                return (parent.full_path or parent.name) + '/' + name
+        return name
+
+    def _descendant_dir_ids(self, dir_id: str) -> List[str]:
+        result = []
+        stack = [d.id for d in self._dirs.values() if d.parent_id == dir_id]
+        while stack:
+            did = stack.pop()
+            if did in result:
+                continue
+            result.append(did)
+            stack.extend(d.id for d in self._dirs.values() if d.parent_id == did)
+        return result
+
+    def _recalc_dir_paths(self, dir_id: str):
+        node = self._dirs.get(dir_id)
+        if not node:
+            return
+        node.full_path = self._dir_full_path(node.parent_id, node.name)
+        for child in [d for d in self._dirs.values() if d.parent_id == dir_id]:
+            self._recalc_dir_paths(child.id)
+
+    def get_all_dirs(self) -> List[Dict]:
+        self._ensure_groups_fresh()
+        if not self._dirs:
+            self._seed_dirs_from_groups()
+            self._assign_instance_dirs()
+        return [d.to_dict() for d in sorted(
+            self._dirs.values(), key=lambda x: (x.sort_order, x.full_path or x.name))]
+
+    def get_dir(self, dir_id: str) -> Optional[Dict]:
+        self._ensure_groups_fresh()
+        node = self._dirs.get(dir_id)
+        return node.to_dict() if node else None
+
+    def add_dir(self, name: str, parent_id: str = '', color: str = '#378ADD',
+                sort_order: Optional[int] = None) -> Dict[str, Any]:
+        self._ensure_groups_fresh()
+        name = (name or '').strip()
+        name_err = self._validate_dir_name(name)
+        if name_err:
+            return {'ok': False, 'message': name_err}
+        if parent_id == 'dir_unassigned':
+            parent_id = ''
+        if parent_id and parent_id not in self._dirs:
+            return {'ok': False, 'message': '父目录不存在'}
+        try:
+            sort_order = int(sort_order) if sort_order is not None else None
+        except (TypeError, ValueError):
+            sort_order = None
+        full_path = self._dir_full_path(parent_id, name)
+        for d in self._dirs.values():
+            if d.parent_id == (parent_id or '') and d.name == name:
+                return {'ok': False, 'message': '同级目录已存在'}
+        if sort_order is None:
+            siblings = [d.sort_order for d in self._dirs.values() if d.parent_id == (parent_id or '')]
+            sort_order = (max(siblings) + 1) if siblings else 0
+        did = 'dir_' + uuid.uuid4().hex[:8]
+        node = DirNode(id=did, parent_id=parent_id or '', name=name,
+                       full_path=full_path, kind='dir', color=color or '#378ADD',
+                       sort_order=sort_order)
+        self._dirs[did] = node
+        self._save_data()
+        return {'ok': True, 'message': '目录创建成功', 'dir': node.to_dict()}
+
+    def update_dir(self, dir_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
+        self._ensure_groups_fresh()
+        if dir_id == 'dir_unassigned':
+            return {'ok': False, 'message': '未分配目录不可修改'}
+        node = self._dirs.get(dir_id)
+        if not node:
+            return {'ok': False, 'message': '目录不存在'}
+        new_parent = updates.get('parent_id', node.parent_id)
+        if new_parent == 'dir_unassigned':
+            new_parent = ''
+        new_parent = new_parent or ''
+        if new_parent == dir_id or new_parent in self._descendant_dir_ids(dir_id):
+            return {'ok': False, 'message': '不能把目录移动到自身或子目录下'}
+        if new_parent and new_parent not in self._dirs:
+            return {'ok': False, 'message': '父目录不存在'}
+        new_name = (updates.get('name') or node.name or '').strip()
+        name_err = self._validate_dir_name(new_name)
+        if name_err:
+            return {'ok': False, 'message': name_err}
+        for d in self._dirs.values():
+            if d.id != dir_id and d.parent_id == new_parent and d.name == new_name:
+                return {'ok': False, 'message': '同级目录已存在'}
+        node.name = new_name
+        node.parent_id = new_parent
+        if 'color' in updates and updates.get('color'):
+            node.color = updates.get('color')
+        if 'sort_order' in updates:
+            try:
+                node.sort_order = int(updates.get('sort_order'))
+            except (TypeError, ValueError):
+                pass
+        node.updated_at = datetime.now().isoformat()
+        self._recalc_dir_paths(dir_id)
+        self._save_data()
+        return {'ok': True, 'message': '目录更新成功', 'dir': node.to_dict()}
+
+    def delete_dir(self, dir_id: str, mode: str = 'move_parent') -> Dict[str, Any]:
+        self._ensure_groups_fresh()
+        if dir_id == 'dir_unassigned':
+            return {'ok': False, 'message': '未分配目录不可删除'}
+        node = self._dirs.get(dir_id)
+        if not node:
+            return {'ok': False, 'message': '目录不存在'}
+        children = [d for d in self._dirs.values() if d.parent_id == dir_id]
+        descendants = self._descendant_dir_ids(dir_id)
+        direct_instances = [i for i in self._instances.values() if i.dir_id == dir_id]
+        if (children or direct_instances) and mode == 'block':
+            return {'ok': False, 'message': '目录非空，请先移动其中的数据源或子目录'}
+        if mode not in ('move_parent', 'move_default', 'block'):
+            return {'ok': False, 'message': '不支持的删除模式'}
+        if mode == 'move_default':
+            for inst in self._instances.values():
+                if inst.dir_id == dir_id or inst.dir_id in descendants:
+                    inst.dir_id = 'dir_unassigned'
+            for did in [dir_id] + descendants:
+                self._dirs.pop(did, None)
+        else:
+            parent_id = node.parent_id or ''
+            for child in children:
+                child.parent_id = parent_id
+                self._recalc_dir_paths(child.id)
+            target_dir = parent_id if parent_id in self._dirs else 'dir_unassigned'
+            for inst in direct_instances:
+                inst.dir_id = target_dir
+            self._dirs.pop(dir_id, None)
+        self._save_data()
+        return {'ok': True, 'message': '目录删除成功'}
+
+    def move_instance(self, instance_id: str, dir_id: str) -> Dict[str, Any]:
+        self._ensure_groups_fresh()
+        inst = self._instances.get(instance_id)
+        if not inst:
+            return {'ok': False, 'message': '数据源不存在'}
+        if dir_id == '':
+            dir_id = 'dir_unassigned'
+        if dir_id not in self._dirs:
+            return {'ok': False, 'message': '目录不存在'}
+        inst.dir_id = dir_id
+        inst.updated_at = datetime.now().isoformat()
+        self._save_data()
+        return {'ok': True, 'message': '数据源已移动'}
+
+    def _enrich_instance(self, d: Dict[str, Any]) -> Dict[str, Any]:
+        d['labels'] = d.get('tags') or []
+        dir_id = d.get('dir_id') or 'dir_unassigned'
+        d['dir_id'] = dir_id
+        node = self._dirs.get(dir_id)
+        d['dir_path'] = node.full_path if node else ''
+        d['dir_name'] = node.name if node else ''
+        return d
 
     def _save_data(self):
         """保存数据到 SQLite（失败直接抛异常，不静默吞掉）"""
@@ -532,6 +801,11 @@ class InstanceManager:
                 c.execute('ALTER TABLE instances ADD COLUMN "jdbc_url" TEXT DEFAULT \'\'')
             except Exception:
                 pass
+            # 迁移：为旧表添加 dir_id 列（目录树归属；缺失时按 group 自动回填）
+            try:
+                c.execute('ALTER TABLE instances ADD COLUMN "dir_id" TEXT DEFAULT \'\'')
+            except Exception:
+                pass
             # 确保表存在
             c.execute("""
                 CREATE TABLE IF NOT EXISTS instances (
@@ -546,6 +820,7 @@ class InstanceManager:
                     ssh_user TEXT DEFAULT '', ssh_password TEXT DEFAULT '',
                     ssh_key_file TEXT DEFAULT '', ssh_key_password TEXT DEFAULT '', ssh_enabled INTEGER DEFAULT 0,
                     tags TEXT DEFAULT '[]', "group" TEXT DEFAULT 'default',
+                    dir_id TEXT DEFAULT '',
                     enabled INTEGER DEFAULT 1, description TEXT DEFAULT '',
                     created_at TEXT DEFAULT '', updated_at TEXT DEFAULT '',
                     connection_mode TEXT DEFAULT 'odbc',
@@ -563,9 +838,9 @@ class InstanceManager:
                     (id, name, db_type, host, port, "user", password, "database", service_name, gbase_server_name, tenant, sysdba,
                      connect_mode, auth_source, auth_mechanism, replica_set, tls, tls_ca_file, tls_cert_key_file, tls_allow_invalid_certs,
                      ssh_host, ssh_port, ssh_user, ssh_password, ssh_key_file, ssh_key_password, ssh_enabled,
-                     tags, "group", enabled, description, created_at, updated_at, connection_mode,
+                     tags, "group", dir_id, enabled, description, created_at, updated_at, connection_mode,
                      encrypt, trust_server_certificate, use_sid, driver_version, jdbc_url)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     d.get("id", ""), d.get("name", ""), d.get("db_type", ""),
                     d.get("host", ""), d.get("port", 0), d.get("user", ""),
@@ -584,7 +859,8 @@ class InstanceManager:
                     d.get("ssh_user", ""), d.get("ssh_password", ""),
                     d.get("ssh_key_file", ""), d.get("ssh_key_password", ""), 1 if d.get("ssh_enabled") else 0,
                     json.dumps(d.get("tags", []), ensure_ascii=False),
-                    d.get("group", "default"), 1 if d.get("enabled", True) else 0,
+                    d.get("group", "default"), d.get("dir_id", "") or 'dir_unassigned',
+                    1 if d.get("enabled", True) else 0,
                     d.get("description", ""), d.get("created_at", ""), d.get("updated_at", ""),
                     # 空值归一化，避免存量空字符串导致路由拿到无效模式。
                     # sqlserver_jdbc 类型语义即 JDBC，缺省必须归一为 'jdbc'，
@@ -629,6 +905,42 @@ class InstanceManager:
             conn.commit()
         except Exception as e:
             print(f"[InstanceManager] 保存 groups.db 失败: {e}")
+            raise
+        finally:
+            if conn:
+                conn.close()
+
+        # ── 保存目录到 groups.db ──
+        conn = None
+        try:
+            conn = sqlite3.connect(self.groups_db)
+            c = conn.cursor()
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS ds_dirs (
+                    id TEXT PRIMARY KEY,
+                    parent_id TEXT DEFAULT '',
+                    name TEXT NOT NULL,
+                    full_path TEXT NOT NULL,
+                    kind TEXT DEFAULT 'dir',
+                    color TEXT DEFAULT '#378ADD',
+                    sort_order INTEGER DEFAULT 0,
+                    created_at TEXT DEFAULT '',
+                    updated_at TEXT DEFAULT ''
+                )
+            """)
+            c.execute("CREATE INDEX IF NOT EXISTS idx_ds_dirs_parent ON ds_dirs(parent_id)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_ds_dirs_path ON ds_dirs(full_path)")
+            c.execute("DELETE FROM ds_dirs")
+            for node in sorted(self._dirs.values(), key=lambda x: (x.sort_order, x.full_path or x.name)):
+                c.execute("""
+                    INSERT OR REPLACE INTO ds_dirs
+                    (id, parent_id, name, full_path, kind, color, sort_order, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (node.id, node.parent_id, node.name, node.full_path, node.kind,
+                      node.color, node.sort_order, node.created_at, node.updated_at))
+            conn.commit()
+        except Exception as e:
+            print(f"[InstanceManager] 保存 ds_dirs 失败: {e}")
             raise
         finally:
             if conn:
@@ -734,7 +1046,7 @@ class InstanceManager:
                 避免越权带走他人数据源。
 
         Returns:
-            dict: {schema, app, exported_at, with_password, groups, instances}
+            dict: {schema, app, exported_at, with_password, groups, dirs, instances}
         """
         self._ensure_instances_fresh()
         out = []
@@ -759,6 +1071,7 @@ class InstanceManager:
             'exported_at': datetime.now().isoformat(timespec='seconds'),
             'with_password': bool(include_password),
             'groups': [g.to_dict() for g in self.get_all_groups()],
+            'dirs': self.get_all_dirs(),
             'instances': out,
         }
 
@@ -777,6 +1090,39 @@ class InstanceManager:
         valid_fields = {f.name for f in dc_fields(DatabaseInstance)}
         added = updated = skipped = failed = 0
         errors: List[str] = []
+        imported_dirs = 0
+
+        # 目录先落（按层级深度排序，父目录先于子目录）；同 id 已存在则跳过
+        raw_dirs = payload.get('dirs') or []
+        if isinstance(raw_dirs, list):
+            for raw in sorted(
+                    [d for d in raw_dirs if isinstance(d, dict)],
+                    key=lambda d: str(d.get('full_path') or d.get('name') or '').count('/')):
+                try:
+                    did = str(raw.get('id') or '').strip()
+                    name = str(raw.get('name') or '').strip()
+                    if not did or did == 'dir_unassigned' or did in self._dirs:
+                        continue
+                    if self._validate_dir_name(name):
+                        continue
+                    parent_id = str(raw.get('parent_id') or '')
+                    if parent_id == 'dir_unassigned' or parent_id not in self._dirs:
+                        parent_id = ''
+                    node = DirNode(
+                        id=did, parent_id=parent_id, name=name,
+                        full_path=self._dir_full_path(parent_id, name),
+                        kind=str(raw.get('kind') or 'dir'),
+                        color=str(raw.get('color') or '#378ADD'),
+                        sort_order=int(raw.get('sort_order') or 0),
+                        created_at=str(raw.get('created_at') or ''),
+                        updated_at=str(raw.get('updated_at') or ''),
+                    )
+                    self._dirs[did] = node
+                    imported_dirs += 1
+                except Exception as e:
+                    errors.append('目录 %s 导入失败: %s' % (raw.get('name'), e))
+        if imported_dirs:
+            self._save_data()
 
         # 分组先落（导入数据源时组引用才不悬空）
         existing_groups = {g.name for g in self.get_all_groups()}
@@ -832,11 +1178,14 @@ class InstanceManager:
                 errors.append('%s 异常: %s' % (label, e))
 
         msg = '新增 %d，更新 %d' % (added, updated)
+        if imported_dirs:
+            msg += '，目录 %d' % imported_dirs
         if skipped:
             msg += '，跳过 %d' % skipped
         if failed:
             msg += '，失败 %d' % failed
         return {'ok': failed == 0, 'added': added, 'updated': updated,
+                'imported_dirs': imported_dirs,
                 'skipped': skipped, 'failed': failed,
                 'errors': errors[:20], 'message': msg}
 
@@ -1081,6 +1430,9 @@ class InstanceManager:
             instance.id = self._generate_id(instance.name, instance.db_type)
         if instance.id in self._instances:
             return {"ok": False, "message": "实例ID已存在"}
+        # 未显式指定目录时，按 group 映射到同名根目录（无法匹配则未分配）
+        if not instance.dir_id or instance.dir_id not in self._dirs:
+            instance.dir_id = self._dir_for_group(instance.group)
         # 加密密码
         instance.password = _encrypt_pwd(instance.password)
         if instance.ssh_password:
@@ -1101,11 +1453,15 @@ class InstanceManager:
                 # 空值跳过，保留原值（密码字段除外：空密码不保存）
                 if value is None:
                     continue
-                if isinstance(value, str) and value == '' and key not in ('ssh_host', 'ssh_user', 'ssh_key_file'):
+                if isinstance(value, str) and value == '' and key not in ('ssh_host', 'ssh_user', 'ssh_key_file', 'dir_id'):
                     continue
                 # 密码字段自动加密
                 if key in ('password', 'ssh_password', 'ssh_key_password') and value:
                     value = _encrypt_pwd(value)
+                if key == 'dir_id':
+                    value = value or 'dir_unassigned'
+                    if value not in self._dirs:
+                        value = 'dir_unassigned'
                 setattr(instance, key, value)
         instance.updated_at = datetime.now().isoformat()
         self._save_data()
@@ -1162,7 +1518,7 @@ class InstanceManager:
                 d = inst.to_dict()
             if mask_password and d.get('password'):
                 d['password'] = '********'
-            result.append(d)
+            result.append(self._enrich_instance(d))
         return result
 
     def get_instance(self, instance_id: str, mask_password: bool = True) -> Optional[Dict]:
@@ -1177,7 +1533,7 @@ class InstanceManager:
             d = inst.to_dict()
         if mask_password and d.get('password'):
             d['password'] = '********'
-        return d
+        return self._enrich_instance(d)
 
     def get_instance_decrypted(self, instance_id: str) -> Optional[Dict]:
         """获取单个实例，密码解密（供巡检使用）"""
@@ -1195,7 +1551,7 @@ class InstanceManager:
             d['ssh_password'] = _decrypt_pwd(d['ssh_password'])
         if d.get('ssh_key_password'):
             d['ssh_key_password'] = _decrypt_pwd(d['ssh_key_password'])
-        return d
+        return self._enrich_instance(d)
 
     def get_all_instances_decrypted(self) -> List[Dict]:
         """获取所有实例，``password`` / ``ssh_password`` 已解密。

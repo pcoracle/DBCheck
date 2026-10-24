@@ -41,8 +41,6 @@ import json
 import platform
 import getpass
 
-from modules.inspection.chapter_filter import build_chapter_filter_sql  # 章节可选：共享过滤 helper
-
 try:
     import psutil
 except ImportError:
@@ -284,7 +282,7 @@ class BaseInspectionEngine:
     - 调用 generate_report() 生成报告
     """
     
-    def __init__(self, host, port, user, password, database=None, ssh_info=None, template_id=None, chapter_ids=None):
+    def __init__(self, host, port, user, password, database=None, ssh_info=None, template_id=None):
         self.host = host
         self.port = int(port)
         self.user = user
@@ -292,8 +290,6 @@ class BaseInspectionEngine:
         self.database = database
         self.ssh_info = ssh_info or {}
         self._template_id = template_id  # 用户显式指定的模板 ID
-        # 用户显式勾选的章节 ID 列表；None/不传 = 全量（不过滤）；列表 = 仅巡检选中章
-        self.chapter_ids = chapter_ids
         self.conn = None
         self.cursor = None
         self.context = {}
@@ -397,24 +393,22 @@ class BaseInspectionEngine:
                 conn_db = sqlite3.connect(_db_path)
                 c = conn_db.cursor()
                 if self._template_id is not None:
-                    _chap_frag, _chap_params = build_chapter_filter_sql(self.chapter_ids, alias='ch')
                     c.execute('''
                         SELECT q.query_key, q.query_sql
                         FROM inspection_query q
                         JOIN inspection_chapter ch ON q.chapter_id = ch.id
-                        WHERE ch.template_id = ? AND q.enabled = 1''' + _chap_frag + '''
+                        WHERE ch.template_id = ? AND q.enabled = 1
                         ORDER BY ch.sort_order, q.sort_order
-                    ''', (self._template_id,) + tuple(_chap_params))
+                    ''', (self._template_id,))
                 else:
-                    _chap_frag, _chap_params = build_chapter_filter_sql(self.chapter_ids, alias='ch')
                     c.execute('''
                         SELECT q.query_key, q.query_sql
                         FROM inspection_query q
                         JOIN inspection_chapter ch ON q.chapter_id = ch.id
                         JOIN inspection_template t ON ch.template_id = t.id
-                        WHERE t.db_type = ? AND q.enabled = 1''' + _chap_frag + '''
+                        WHERE t.db_type = ? AND q.enabled = 1
                         ORDER BY ch.sort_order, q.sort_order
-                    ''', (self.db_type,) + tuple(_chap_params))
+                    ''', (self.db_type,))
                 queries = c.fetchall()
 
                 # 直接用 dict 存储，不再经过 configparser
@@ -798,11 +792,10 @@ class BaseInspectionEngine:
                 return []
             
             # 加载章节
-            _chap_frag, _chap_params = build_chapter_filter_sql(self.chapter_ids, alias='')
             _cur.execute(
                 "SELECT id, chapter_number, chapter_title_zh, chapter_title_en "
-                "FROM inspection_chapter WHERE template_id=?" + _chap_frag + " ORDER BY chapter_number",
-                (template_id,) + tuple(_chap_params))
+                "FROM inspection_chapter WHERE template_id=? ORDER BY chapter_number",
+                (template_id,))
             
             _chapters = []
             for _ch_row in _cur.fetchall():
@@ -1223,8 +1216,8 @@ class BaseInspectionEngine:
             tpl_name = template.get('template_name_zh', '') or template.get('template_name', '')
             print(f"[INFO] 使用模板: {tpl_name} (id={template_id})")
 
-            # 2. 加载章节和查询（章节可选：按 chapter_ids 过滤）
-            chapters = get_chapters_by_template(template_id, chapter_ids=self.chapter_ids)
+            # 2. 加载章节和查询
+            chapters = get_chapters_by_template(template_id)
             _chapters = []
 
             total_queries = 0
@@ -1725,8 +1718,8 @@ class BaseInspectionEngine:
                 for run in h.runs:
                     run.font.name = '微软雅黑'
                     run._element.rPr.rFonts.set(_qn('w:eastAsia'), '微软雅黑')
-                run.font.color.rgb = _RGBColor(0, 51, 102)
-                run.font.size = _Pt(16) if level == 1 else _Pt(14)
+                    run.font.color.rgb = _RGBColor(0, 51, 102)
+                    run.font.size = _Pt(16) if level == 1 else _Pt(14)
                 return h
             
             def _ch_prefix(n, sub=None):
@@ -1902,9 +1895,9 @@ class BaseInspectionEngine:
                 for run in h.runs:
                     run.font.name = '微软雅黑'
                     run._element.rPr.rFonts.set(qn('w:eastAsia'), '微软雅黑')
-                run.font.color.rgb = RGBColor(0, 51, 102)
-                run.font.size = Pt(16) if level == 1 else Pt(14)
-                run.font.bold = True
+                    run.font.color.rgb = RGBColor(0, 51, 102)
+                    run.font.size = Pt(16) if level == 1 else Pt(14)
+                    run.font.bold = True
                 return h
             
             def _fmt_para(text, bold=False, size=10.5, color=None):

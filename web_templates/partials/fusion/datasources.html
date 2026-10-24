@@ -1,0 +1,69 @@
+<!--
+  SPDX-License-Identifier: Apache-2.0
+  Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
+  Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
+
+  Fusion page: data source management (left directory tree + right table).
+  Layout and UX adapted from DBCheck v2.6 (MIT License,
+  Copyright (c) 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>),
+  rewritten for the RaccoonX module layout.
+-->
+<div class="ds-page">
+  <div class="ds-toolbar">
+    <div class="ds-title">
+      <span class="badge" id="datasources-count">0</span>
+      <span class="ds-title-suffix" data-i18n="webui.ds_total_suffix">个数据源</span>
+    </div>
+    <div class="ds-search">
+      <input id="ds-search" type="search" placeholder="搜索名称 / IP / 标签..." autocomplete="off"
+             data-i18n-placeholder="webui.ds_search_placeholder"
+             oninput="FusionDataSources.onSearch(this.value)" />
+    </div>
+    <div class="ds-view-toggle" role="group" aria-label="视图">
+      <button type="button" id="ds-view-dir" class="active" onclick="FusionDataSources.setView('dir')" data-i18n="webui.ds_view_dir">按区域</button>
+      <button type="button" id="ds-view-label" onclick="FusionDataSources.setView('label')" data-i18n="webui.ds_view_label">按标签</button>
+    </div>
+    <div class="ds-toolbar-spacer"></div>
+    <button class="btn btn-ghost ds-toolbar-btn" onclick="exportDatasourcesJson()">
+      ⤓ <span data-i18n="webui.ds_export">导出</span>
+    </button>
+    <button class="btn btn-ghost ds-toolbar-btn" onclick="importDatasourcesJson(this)">
+      ⤒ <span data-i18n="webui.ds_import">导入</span>
+    </button>
+    <button class="btn btn-primary ds-toolbar-btn" onclick="showAddDatasourceModal()">
+      ➕ <span data-i18n="webui.datasources_add">添加数据源</span>
+    </button>
+  </div>
+
+  <div class="ds-layout">
+    <aside class="ds-tree-panel">
+      <div class="ds-tree-header">
+        <span id="ds-tree-title" data-i18n="webui.ds_tree_title">目录</span>
+        <span id="ds-tree-hint" class="ds-tree-hint" data-i18n="webui.ds_tree_hint">右键目录可管理</span>
+      </div>
+      <div id="ds-tree" class="ds-tree" role="tree"></div>
+    </aside>
+
+    <section class="ds-table-panel">
+      <div class="ds-breadcrumb" id="ds-breadcrumb">全部数据源</div>
+      <div class="ds-table-wrap">
+        <table class="ds-table">
+          <thead>
+            <tr>
+              <th class="ds-icon-col"></th>
+              <th data-i18n="webui.ds_col_instance">实例名称</th>
+              <th class="ds-type-col" data-i18n="webui.ds_col_dbtype">数据库类型</th>
+              <th data-i18n="webui.ds_col_address">地址</th>
+              <th data-i18n="webui.ds_col_dir">所属目录</th>
+              <th data-i18n="webui.ds_col_labels">标签</th>
+              <th data-i18n="webui.ds_col_status">状态</th>
+              <th class="ds-actions-col" data-i18n="webui.ds_col_actions">操作</th>
+            </tr>
+          </thead>
+          <tbody id="ds-tbody"></tbody>
+        </table>
+        <div id="ds-empty" class="ds-empty" style="display:none"></div>
+      </div>
+    </section>
+  </div>
+</div>

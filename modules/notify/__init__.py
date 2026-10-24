@@ -396,6 +396,21 @@ class EmailNotifier:
         self.use_tls = cfg.get('use_tls', True)
         self.from_name = cfg.get('from_name', 'DBCheck 巡检报告')
         self.recipients = cfg.get('recipients', [])
+        cc = cfg.get('cc', []) or []
+        if isinstance(cc, str):
+            cc = [x.strip() for x in cc.split(',') if x.strip()]
+        self.cc = cc
+
+    def _with_cc(self, recipients):
+        """合并收件人与抄送人，去重并保持顺序。"""
+        if isinstance(recipients, str):
+            recipients = [x.strip() for x in recipients.split(',') if x.strip()]
+        out = []
+        for addr in list(recipients or []) + list(self.cc or []):
+            addr = (addr or '').strip()
+            if addr and addr not in out:
+                out.append(addr)
+        return out
 
     def send_report(self, label, db_type, report_file, recipients=None, custom_msg=None,
                     issue_count=None, report_url=None):
@@ -403,6 +418,7 @@ class EmailNotifier:
             recipients = self.recipients or []
         if not recipients:
             raise ValueError('没有指定收件人')
+        delivery_recipients = self._with_cc(recipients)
 
         now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
@@ -428,6 +444,8 @@ class EmailNotifier:
         msg = MIMEMultipart('mixed')
         msg['From'] = self.user
         msg['To'] = ', '.join(recipients)
+        if self.cc:
+            msg['Cc'] = ', '.join(self.cc)
         msg['Subject'] = '[DBCheck] %s - %s 巡检报告 %s' % (
             label, db_type, now[:10])
 
@@ -446,7 +464,7 @@ class EmailNotifier:
                                filename=filename_encoded)
                 msg.attach(part)
 
-        return self._send_smtp(msg, recipients)
+        return self._send_smtp(msg, delivery_recipients)
 
     def send_alert_mail(self, subject, html_body, recipients=None):
         """发送告警邮件（HTML 正文、无附件），返回 (ok, error_msg)。
@@ -460,9 +478,11 @@ class EmailNotifier:
         msg = MIMEMultipart('alternative')
         msg['From'] = self.user
         msg['To'] = ', '.join(recipients)
+        if self.cc:
+            msg['Cc'] = ', '.join(self.cc)
         msg['Subject'] = subject
         msg.attach(MIMEText(html_body, 'html', 'utf-8'))
-        return self._send_smtp(msg, recipients)
+        return self._send_smtp(msg, self._with_cc(recipients))
 
     def send_test(self, recipients=None):
         """发送测试邮件（无附件，纯通知），返回 (ok, error_msg)"""
@@ -483,12 +503,14 @@ class EmailNotifier:
         msg = MIMEMultipart('mixed')
         msg['From'] = self.user
         msg['To'] = ', '.join(recipients)
+        if self.cc:
+            msg['Cc'] = ', '.join(self.cc)
         msg['Subject'] = '[DBCheck] 邮件通知测试 %s' % now[:10]
 
         html_part = MIMEText(body, 'html', 'utf-8')
         msg.attach(html_part)
 
-        return self._send_smtp(msg, recipients)
+        return self._send_smtp(msg, self._with_cc(recipients))
 
     def _send_smtp(self, msg, recipients):
         # 串行发送：避免同账号并发 SMTP 会话被服务端限制拒绝
