@@ -1,0 +1,243 @@
+<!--
+  SPDX-License-Identifier: Apache-2.0
+  Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
+  Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
+
+  AI 巡检助手页面包：全屏对话 + 任务回溯 + 工具管理。
+  归属说明：页面骨架归 MIT License, Copyright (c) 2025-2026 fiyo (Jack Ge) 所有：
+  右侧会话列表（可折叠 + 停靠页签）、顶栏（标题 / 历史 / 版本 / 工具 / 清空）、
+  消息流（深度思考块 + 工具轨迹卡 + 确认卡 + Markdown/SQL 代码块）、
+  输入区（数据源胶囊 + 行数上限 + 发送/停止）。
+  对话与工具编排在后端 /api/ai/assistant/*，任务历史在 /api/ai/tasks，会话在 /api/ai/sessions。
+-->
+<div class="page" id="page-ai-assistant">
+  <div class="aias-container" id="aias-container">
+
+    <!-- 主对话区 -->
+    <div class="aias-main">
+      <div class="aias-topbar">
+        <div class="aias-topbar-left">
+          <!-- 这里只显示「当前会话标题」：页面名由应用顶栏负责，模型信息在侧栏底部 -->
+          <span class="aias-topbar-title" id="aias-topbar-title" data-i18n="webui.aias_new_title">新对话</span>
+        </div>
+        <div class="aias-topbar-right">
+          <button type="button" class="aias-icon-btn" id="aias-history-btn" data-i18n-title="webui.aias_tip_history" title="AI 巡检任务进度">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M9 11H3v10h6V11zM9 3H3v6h6V3zm12 8h-6v10h6V11zm0-8h-6v6h6V3z"/></svg>
+          </button>
+          <button type="button" class="aias-icon-btn" id="aias-dsver-btn" data-i18n-title="webui.aias_tip_versions" title="数据源版本一览（系统自动实探，无需手工配置）">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.66 3.58 3 8 3s8-1.34 8-3V6"/><path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/></svg>
+          </button>
+          <button type="button" class="aias-icon-btn" id="aias-retro-btn" data-i18n-title="webui.aias_tip_retro" title="AI 对话任务回溯">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 8v13H3V8M1 3h22v5H1zM10 12h4"/></svg>
+          </button>
+          <button type="button" class="aias-icon-btn" id="aias-tools-btn" data-i18n-title="webui.aias_tip_tools" title="AI 工具管理">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4L15 12l-3-3z"/></svg>
+          </button>
+          <button type="button" class="aias-icon-btn" id="aias-clear-btn" data-i18n-title="webui.aias_tip_clear" title="清空对话">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+          </button>
+          <button type="button" class="aias-icon-btn" id="aias-collapse-btn" data-i18n-title="webui.aias_tip_sidebar" title="切换侧边栏">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="aias-messages" id="aias-messages"></div>
+      <div class="aias-scroll-prompt" id="aias-scroll-prompt" style="display:none;">
+        <span data-i18n="webui.aias_scroll_prompt">↓ 有新内容，点击查看</span>
+      </div>
+
+      <div class="aias-input-area">
+        <div class="aias-ds-capsule-bar" id="aias-ds-capsule">
+          <span class="aias-ds-capsule" id="aias-ds-capsule-btn"
+                data-i18n-title="webui.aias_ds_capsule_title" title="切换会话默认数据源（SQL 默认执行于此）">
+            <span id="aias-ds-capsule-icon">🏢</span>
+            <span id="aias-ds-capsule-name" data-i18n="webui.aias_ds_none">未选择数据源</span>
+            <span class="aias-ds-capsule-caret">▾</span>
+          </span>
+          <span class="aias-ds-capsule-tip" data-i18n="webui.aias_ds_capsule_tip">会话 SQL 默认执行源 · 点按可切换</span>
+          <select class="aias-ds-select" id="aias-ds-select"
+                  data-i18n-title="webui.aias_ds_select_title" title="直接指定数据源"></select>
+          <label class="aias-row-limit" data-i18n-title="webui.aias_row_limit_tip" title="全局行数上限：所有 SQL 结果最多显示多少行">
+            <span data-i18n="webui.aias_row_limit">行数上限</span>
+            <input type="number" id="aias-global-max-rows" min="1" max="5000" value="20">
+          </label>
+        </div>
+        <div class="aias-input-wrapper">
+          <textarea id="aias-input" class="aias-input" rows="1"
+            data-i18n-placeholder="webui.aias_input_placeholder" placeholder="输入问题或巡检需求，Enter 发送，Shift+Enter 换行..."></textarea>
+          <div class="aias-input-actions">
+            <button type="button" class="aias-stop-btn" id="aias-stop-btn" style="display:none;" data-i18n-title="webui.aias_tip_stop" title="停止生成">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+              <span data-i18n="webui.aias_stop">停止</span>
+            </button>
+            <button type="button" class="aias-send-btn" id="aias-send-btn" data-i18n-title="webui.aias_tip_send" title="发送">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="aias-input-hint" data-i18n="webui.aias_input_hint">AI 生成的 SQL 仅供参考，需由 DBA 审阅后手动执行</div>
+      </div>
+    </div>
+
+    <!-- 会话列表（右侧，可折叠） -->
+    <div class="aias-sidebar" id="aias-sidebar">
+      <div class="aias-sidebar-header">
+        <div class="aias-sidebar-header-row">
+          <button type="button" class="aias-new-chat-btn" id="aias-new-chat-btn">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            <span data-i18n="webui.aias_new_chat">新建对话</span>
+          </button>
+          <button type="button" class="aias-sidebar-collapse-btn" id="aias-collapse-btn-side" data-i18n-title="webui.aias_tip_collapse" title="折叠会话列表"
+                  onclick="document.getElementById('aias-collapse-btn').click()">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="aias-session-list" id="aias-session-list"></div>
+      <div class="aias-sidebar-footer">
+        <!-- 模型信息固定在侧栏底部（● 绿点 = 可用，红/黄 = 未启用或取不到） -->
+        <div class="aias-model-info" id="aias-model-info" data-i18n="webui.aias_model_loading">模型加载中…</div>
+        <div class="aias-model-note" data-i18n="webui.aias_footer_note">只读巡检助手</div>
+      </div>
+    </div>
+    <button type="button" class="aias-dock-tab" id="aias-dock-tab" data-i18n-title="webui.aias_tip_expand" title="展开会话列表"
+            onclick="document.getElementById('aias-collapse-btn').click()"><span data-i18n="webui.aias_dock_tab">会话列表</span></button>
+  </div>
+
+  <!-- 数据源选择弹层（单选 = 设为会话默认源；批量 = 在同类型数据源上依次执行） -->
+  <!-- 数据源单选弹窗：标题 + 关闭 + 列表体三段，与 JS 动态生成时的回退结构同一形状 -->
+  <div class="aias-ds-modal" id="aias-ds-modal" style="display:none;">
+    <div class="aias-ds-modal-content">
+      <div class="aias-ds-modal-header">
+        <span class="aias-ds-modal-title" data-i18n="webui.aias_pick_datasource">选择数据源</span>
+        <button type="button" class="aias-ds-modal-close" data-close-ds-modal>✕</button>
+      </div>
+      <div class="aias-ds-modal-body"></div>
+    </div>
+  </div>
+
+  <!-- 批量执行的多选弹窗：按数据库类型分组，勾首个即锁定类型 -->
+  <div class="aias-ds-modal" id="aias-ds-multi-modal" style="display:none;">
+    <div class="aias-ds-modal-content is-wide">
+      <div class="aias-ds-modal-header">
+        <span class="aias-ds-modal-title aias-ds-multi-title" data-i18n="webui.aias_batch_pick_title">批量执行 · 选择数据源</span>
+        <button type="button" class="aias-ds-modal-close" data-close-ds-multi>✕</button>
+      </div>
+      <div class="aias-ds-multi-note" data-i18n="webui.aias_batch_note_long">仅可批量执行同一数据库类型，勾选首个即锁定类型，避免跨库语法不兼容</div>
+      <div class="aias-ds-modal-body aias-ds-multi-body"></div>
+      <div class="aias-ds-multi-foot">
+        <span class="aias-ds-multi-count">已选 0</span>
+        <button type="button" class="aias-ds-multi-cancel" data-close-ds-multi data-i18n="webui.cancel">取消</button>
+        <button type="button" class="aias-ds-multi-ok">批量执行(0)</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 巡检任务历史（AI 发起的巡检） -->
+  <div class="aias-modal" id="aias-task-modal" style="display:none;">
+    <div class="aias-modal-box is-wide">
+      <div class="aias-modal-head">
+        <span data-i18n="webui.aias_task_history">AI 巡检任务</span> <em class="aias-task-count"></em>
+        <button type="button" class="aias-modal-close" data-close-task-modal>✕</button>
+      </div>
+      <div class="aias-task-body">
+        <div class="aias-task-list"></div>
+        <div class="aias-task-detail"><div class="aias-task-empty" data-i18n="webui.aias_task_pick">左侧选择一个任务查看进度与报告</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 单次巡检进度 -->
+  <div class="aias-modal" id="aias-track-modal" style="display:none;">
+    <div class="aias-modal-box">
+      <div class="aias-modal-head">
+        <span class="aias-track-title" data-i18n="webui.aias_track_title">巡检进度</span>
+        <button type="button" class="aias-modal-close" data-close-track>✕</button>
+      </div>
+      <div class="aias-track-body"><div class="aias-task-empty" data-i18n="webui.aias_loading">加载中…</div></div>
+    </div>
+  </div>
+
+  <!-- 数据源版本一览 -->
+  <div class="aias-modal" id="aias-ver-modal" style="display:none;">
+    <div class="aias-modal-box is-wide">
+      <div class="aias-modal-head">
+        <span data-i18n="webui.aias_versions_title">数据源版本一览</span> <em class="aias-ver-summary"></em>
+        <button type="button" class="aias-track-btn" data-refresh-versions><span data-i18n="webui.aias_reprobe">重新探测</span></button>
+        <button type="button" class="aias-modal-close" data-close-ver>✕</button>
+      </div>
+      <div class="aias-ver-list"><div class="aias-task-empty" data-i18n="webui.aias_ver_reading">正在读取版本…</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ AI 对话任务回溯 ══ -->
+<div class="page" id="page-ai-tasks">
+  <div class="ait-layout">
+    <aside class="ait-left">
+      <div class="ait-left-header">
+        <button type="button" class="ait-back-btn" onclick="showPage('ai-assistant')" data-i18n="webui.ait_back">← 返回</button>
+        <input type="search" class="ait-search" id="ait-search" data-i18n-placeholder="webui.ait_search_placeholder" placeholder="搜索提问、理解或结论…">
+        <button type="button" class="ait-refresh-btn" id="ait-refresh" data-i18n="webui.ait_refresh">刷新</button>
+      </div>
+      <div class="ait-stats" id="ait-stats"></div>
+      <div class="ait-list" id="ait-list"></div>
+    </aside>
+    <section class="ait-right">
+      <div class="ait-empty" id="ait-empty" data-i18n="webui.ait_empty_hint">左侧选择一条任务，查看「理解 → 思考 → 工具调用 → 结论」</div>
+      <div class="ait-detail" id="ait-detail" style="display:none;"></div>
+    </section>
+  </div>
+</div>
+
+<!-- ══ AI 工具管理 ══ -->
+<div class="page" id="page-tool-mgmt">
+  <div class="tool-wrap">
+    <div class="tool-head">
+      <div class="tool-title" data-i18n="webui.tool_title">🔧 AI 工具管理</div>
+      <div class="tool-head-actions">
+        <button type="button" class="btn btn-sm" id="tool-reload-btn"><span data-i18n="webui.tool_reload">🔄 刷新</span></button>
+        <button type="button" class="btn btn-sm btn-primary" id="tool-create-btn"><span data-i18n="webui.tool_create">＋ 新增工具</span></button>
+      </div>
+    </div>
+    <div class="tool-filter">
+      <input type="text" id="tool-search" data-i18n-placeholder="webui.tool_search_placeholder" placeholder="搜索工具名称或描述…">
+      <select id="tool-category-filter"></select>
+      <span class="tool-count" id="tool-count"></span>
+    </div>
+    <div class="tool-table-scroll">
+      <table class="tool-table">
+        <thead><tr>
+          <th data-i18n="webui.tool_col_enabled">启用</th><th data-i18n="webui.tool_col_name">工具名</th><th data-i18n="webui.tool_col_desc">说明</th><th data-i18n="webui.tool_col_category">分类</th><th data-i18n="webui.tool_col_params">参数</th><th data-i18n="webui.tool_col_guard">类型 / 边界</th><th data-i18n="webui.tool_col_actions">操作</th>
+        </tr></thead>
+        <tbody id="tool-table-body"></tbody>
+      </table>
+    </div>
+    <div class="tool-note" data-i18n="webui.tool_note">
+      停用中的工具不会出现在模型的可用清单里；内置工具只能停用不能删除。
+      自定义工具只有定义、没有后端实现，助手调用时会被只读边界拒绝。
+    </div>
+  </div>
+
+  <div class="aias-modal" id="tool-edit-modal" style="display:none;">
+    <div class="aias-modal-box">
+      <div class="aias-modal-head">
+        <span data-editor-title data-i18n="webui.tool_editor_title">工具定义</span>
+        <button type="button" class="aias-modal-close" data-close-editor>✕</button>
+      </div>
+      <div class="tool-form">
+        <label><span data-i18n="webui.tool_field_name">工具名（小写字母/数字/下划线）</span><input data-field="name" type="text" placeholder="my_readonly_check"></label>
+        <label><span data-i18n="webui.tool_field_desc">说明（模型据此决定何时调用）</span><textarea data-field="description" rows="3"></textarea></label>
+        <label><span data-i18n="webui.tool_field_category">分类</span><input data-field="category" type="text" placeholder="自定义"></label>
+        <label><span data-i18n="webui.tool_field_params">参数 JSON Schema</span><textarea data-field="parameters" rows="8"></textarea></label>
+        <label class="tool-field-inline"><input data-field="enabled" type="checkbox" checked>
+          <span data-i18n="webui.tool_field_enabled">启用（停用后不会出现在模型的可用清单里）</span></label>
+      </div>
+      <div class="tool-form-actions">
+        <button type="button" class="btn btn-sm" data-close-editor><span data-i18n="webui.tool_cancel">取消</span></button>
+        <button type="button" class="btn btn-sm btn-primary" data-save-tool><span data-i18n="webui.tool_save">保存</span></button>
+      </div>
+    </div>
+  </div>
+</div>

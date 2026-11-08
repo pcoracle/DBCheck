@@ -3,10 +3,10 @@
   Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
   Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
 
-  Fusion page: SQL editor (object tree + multi-window editor + result tabs).
-  Layout and interaction habits ported from DBCheck v2.6 (MIT License,
-  Copyright (c) 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>),
-  rewritten for the RaccoonX module layout and API shape.
+  Fusion page: SQL editor (object tree + object quick search + multi-window editor + result tabs).
+  归属说明：布局与交互设计归 MIT License,
+  Copyright (c) 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com> 所有，
+  按 RaccoonX 的模块结构与接口形状实现。
   分三区：操作栏（只放动作）/ 主体（树 + 编辑器 + 结果）/ 状态栏（说明、元数据、耗时）。
   长文案一律进状态栏并省略号收口，避免在窄屏被挤成一列竖排字。
 -->
@@ -81,6 +81,13 @@
           <input type="search" class="sql-tree-search" id="sql-tree-search" autocomplete="off"
                  placeholder="搜索数据源" data-i18n-placeholder="sql_editor.tree_search_ph"
                  oninput="FusionSqlEditor.filterTree(this.value)">
+          <button class="btn btn-ghost btn-xs sql-tree-search-btn" type="button" id="sql-btn-object-search"
+                  title="搜索对象（Ctrl+K）" data-i18n-title="sql_editor.obj_search_tip"
+                  onclick="FusionSqlEditor.openObjectSearch()">
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor"
+                 stroke-width="1.4" stroke-linecap="round" aria-hidden="true">
+              <circle cx="7" cy="7" r="4.2"/><path d="M10.2 10.2 14 14"/></svg>
+          </button>
           <button class="btn btn-ghost btn-xs" type="button" title="刷新树" data-i18n-title="sql_editor.refresh_tree"
                   onclick="FusionSqlEditor.reloadTree()">↻</button>
         </div>
@@ -156,6 +163,51 @@
       </span>
       <span class="sql-statusbar-sep" aria-hidden="true"></span>
       <span class="sql-statusbar-item sql-status" id="sql-status"></span>
+    </div>
+  </div>
+
+  <!-- 对象快速搜索（Ctrl+K）：服务端在对象名单上过滤，不要求树节点已经展开 -->
+  <div class="modal-overlay sql-obj-search-overlay" id="sql-obj-search-modal" style="display:none;"
+       onclick="if(event.target===this)FusionSqlEditor.closeObjectSearch()">
+    <div class="sql-obj-search-box" role="dialog" aria-modal="true" aria-labelledby="sql-obj-search-title">
+      <div class="sql-obj-search-head">
+        <span class="sql-obj-search-title" id="sql-obj-search-title"
+              data-i18n="sql_editor.obj_search_title">搜索对象</span>
+        <select class="sql-target-select sql-obj-search-scope" id="sql-obj-search-scope"
+                title="搜索范围" data-i18n-title="sql_editor.obj_search_scope"
+                onchange="FusionSqlEditor.onObjectSearchScopeChange(this.value)">
+          <option value="db" id="sql-obj-search-scope-db">当前库</option>
+          <option value="all" id="sql-obj-search-scope-all"
+                  data-i18n="sql_editor.obj_search_scope_all">本数据源全部对象</option>
+          <option value="ds" id="sql-obj-search-scope-ds"
+                  data-i18n="sql_editor.obj_search_scope_ds">所有同类型数据源</option>
+        </select>
+        <span class="sql-obj-search-types" id="sql-obj-search-types" role="group"
+              title="对象类型" data-i18n-title="sql_editor.obj_search_types">
+          <button type="button" class="sql-obj-type-btn active" data-object-type="all"
+                  aria-pressed="true" data-i18n="sql_editor.obj_search_type_all">全部</button>
+          <button type="button" class="sql-obj-type-btn" data-object-type="table"
+                  aria-pressed="false" data-i18n="sql_editor.obj_search_type_table">表</button>
+          <button type="button" class="sql-obj-type-btn" data-object-type="view"
+                  aria-pressed="false" data-i18n="sql_editor.obj_search_type_view">视图</button>
+        </span>
+        <button class="modal-close" type="button" title="关闭（Esc）"
+                data-i18n-title="sql_editor.obj_search_close"
+                onclick="FusionSqlEditor.closeObjectSearch()">&times;</button>
+      </div>
+      <input type="search" class="sql-obj-search-input" id="sql-obj-search-input"
+             autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list"
+             aria-expanded="true" aria-controls="sql-obj-search-results"
+             placeholder="输入表名/视图名，支持 % / * 通配符"
+             data-i18n-placeholder="sql_editor.obj_search_ph"
+             oninput="FusionSqlEditor.onObjectSearchInput(this.value)"
+             onkeydown="FusionSqlEditor.onObjectSearchKey(event)">
+      <div class="sql-obj-search-status" id="sql-obj-search-status" aria-live="polite"></div>
+      <div class="sql-obj-search-results" id="sql-obj-search-results" role="listbox"></div>
+      <div class="sql-obj-search-foot">
+        <span data-i18n="sql_editor.obj_search_keys">↑↓ 选择 · Enter 插入 · Shift+Enter 定位 · Esc 关闭</span>
+        <span class="sql-obj-search-scope-note" id="sql-obj-search-scope-note"></span>
+      </div>
     </div>
   </div>
 

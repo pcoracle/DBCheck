@@ -1,0 +1,249 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
+ * Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
+ *
+ * 数据源选择器（左目录树 / 右表格）样式。
+ * 版权归属：MIT License, Copyright (c) 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>。
+ *
+ * 尺寸口径（窄视口 vw=638 实测）：弹窗 591×530，行栅格 26/90.7/82/66.5/60.5，
+ * 行高 50，左树 200，遮罩 z-index 2147483100，搜索框自动聚焦。
+ * 这些数字刻意定住：选择器要在小屏里也能一眼扫完库名单，自加 @media 断点收窄
+ * 会把左树压没、把 5 列挤成换行，反而看不清自己选了哪个源。
+ *
+ * 两条主题变量适配：
+ *   · --surface-solid → --surface；
+ *   · --row-active-bg → 本仓库没有该变量，选中行高亮改用主色 14% 的底色。
+ * 整份规则收在 .ds-picker-overlay 作用域下（弹窗挂在 document.body 上，不属于任何
+ * .page），避免给其他页面凭空加一层全局样式。
+ */
+
+/* 弹窗挂在 document.body 上（不属于任何 .page），因此不做 #page-* 作用域 */
+.ds-picker-overlay {
+  /* 必须高于本页的数据源弹窗（.aias-ds-modal 那一档 2147483000），
+     否则从弹窗里再开选择器会被压在后面 */
+  position: fixed; inset: 0; z-index: 2147483100;
+  background: rgba(0, 0, 0, .5);
+  display: flex; align-items: center; justify-content: center; padding: 16px;
+}
+
+/* ── 弹窗骨架 ── */
+.ds-picker-overlay .ds-picker-box {
+  width: min(900px, calc(100vw - 32px));
+  height: min(620px, calc(100vh - 40px));
+  display: flex; flex-direction: column;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 14px; overflow: hidden;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, .45);
+}
+.ds-picker-overlay .ds-picker-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 16px; border-bottom: 1px solid var(--border);
+}
+.ds-picker-overlay .ds-picker-title { font-size: 14px; font-weight: 600; color: var(--text); }
+.ds-picker-overlay .ds-picker-sub { font-size: 11.5px; color: var(--text-muted); margin-top: 2px; }
+.ds-picker-overlay .ds-picker-close {
+  margin-left: auto; border: 1px solid transparent; background: transparent;
+  color: var(--text-muted); width: 28px; height: 28px; border-radius: 6px;
+  cursor: pointer; font-size: 15px;
+}
+.ds-picker-overlay .ds-picker-close:hover {
+  background: var(--surface2); border-color: var(--border); color: var(--text);
+}
+.ds-picker-overlay .ds-picker-toolbar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 16px; border-bottom: 1px solid var(--border);
+}
+.ds-picker-overlay .ds-picker-toolbar .ds-search-wrap { width: 240px; }
+/* 「按数据库类型筛选」下拉：与搜索框同尺寸同底色，工具条上是两个正交的筛选器
+   （目录按业务区域分，类型是另一条维度）。批量执行同一套语句时先收窄类型再挑目录，
+   比在几十个源里逐个翻要快得多。 */
+.ds-picker-overlay .ds-picker-type {
+  height: 30px;
+  max-width: 170px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+.ds-picker-overlay .ds-picker-type:focus { outline: none; border-color: var(--accent); }
+.ds-picker-overlay .ds-picker-count {
+  font-size: 11.5px; color: var(--text-muted); white-space: nowrap;
+}
+.ds-picker-overlay .ds-picker-body { display: flex; flex: 1; min-height: 0; }
+.ds-picker-overlay .ds-picker-tree {
+  flex: 0 0 200px; width: 200px; overflow-y: auto;
+  padding: 6px 4px; border-right: 1px solid var(--border); font-size: 13px;
+}
+.ds-picker-overlay .ds-picker-main {
+  flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0;
+}
+.ds-picker-overlay .ds-picker-rows { flex: 1; min-height: 0; overflow-y: auto; }
+.ds-picker-overlay .ds-picker-empty {
+  padding: 48px 20px; text-align: center; font-size: 13px; color: var(--text-muted);
+}
+.ds-picker-overlay .ds-picker-foot {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 16px; border-top: 1px solid var(--border);
+}
+.ds-picker-overlay .ds-picker-hint {
+  flex: 1; min-width: 0; font-size: 12px; color: var(--text-muted);
+}
+.ds-picker-overlay .ds-picker-foot .btn { padding: 8px 16px; font-size: 12.5px; }
+
+/* ── 右表：表头与行共用同一套 5 列栅格，保证列线对齐 ── */
+.ds-picker-overlay .ds-picker-list-head,
+.ds-picker-overlay .ds-picker-row {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1.5fr) 82px minmax(0, 1.1fr) minmax(0, 1fr);
+  gap: 10px; align-items: center; padding: 0 12px;
+}
+.ds-picker-overlay .ds-picker-list-head {
+  height: 32px; flex: 0 0 32px; background: var(--surface2);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em;
+}
+.ds-picker-overlay .ds-picker-row {
+  height: 50px; border-bottom: 1px solid var(--border); cursor: pointer;
+}
+.ds-picker-overlay .ds-picker-row:hover { background: var(--surface2); }
+.ds-picker-overlay .ds-picker-row.selected {
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+}
+.ds-picker-overlay .ds-picker-row.disabled { opacity: .4; cursor: not-allowed; }
+.ds-picker-overlay .ds-picker-row input {
+  width: 15px; height: 15px; accent-color: var(--accent); pointer-events: none;
+}
+.ds-picker-overlay .ds-picker-name {
+  font-size: 13px; font-weight: 500; color: var(--text);
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ds-picker-overlay .ds-picker-name-sub {
+  font-size: 11px; color: var(--text-muted);
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ds-picker-overlay .ds-picker-cell {
+  font-size: 12px; color: var(--text-muted);
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ds-picker-overlay .ds-picker-labels { display: flex; gap: 4px; overflow: hidden; }
+
+/* ── 搜索框（与数据源管理页同款样式，弹窗内复用）── */
+.ds-picker-overlay .ds-search-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 220px;
+  min-width: 140px;
+  padding: 0 9px;
+  height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface2);
+  color: var(--text-muted);
+}
+.ds-picker-overlay .ds-search {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+}
+.ds-picker-overlay .ds-search::placeholder { color: var(--text-muted); }
+
+/* ── 左侧目录树 ── */
+.ds-picker-overlay .ds-tree-node {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding-right: 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text-muted);
+  position: relative;
+  user-select: none;
+}
+.ds-picker-overlay .ds-tree-node:hover { background: var(--surface2); color: var(--text); }
+.ds-picker-overlay .ds-tree-node.active { background: var(--surface2); color: var(--text); }
+.ds-picker-overlay .ds-tree-node.active::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 5px; bottom: 5px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+.ds-picker-overlay .ds-tree-caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  color: var(--text-muted);
+  transition: transform .15s ease;
+}
+.ds-picker-overlay .ds-tree-caret.open { transform: rotate(90deg); }
+.ds-picker-overlay .ds-tree-caret.empty { visibility: hidden; }
+.ds-picker-overlay .ds-tree-icon {
+  flex: 0 0 14px; display: inline-flex; color: var(--text-muted);
+}
+.ds-picker-overlay .ds-tree-name {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ds-picker-overlay .ds-tree-count {
+  flex: 0 0 auto; font-size: 11px; color: var(--text-muted);
+}
+.ds-picker-overlay .ds-label-chip {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 「全选本类型」：工具条上的批量勾选开关。
+   灰态不是装饰 —— 类型还没定（既没选下拉也没勾过任何库）时一键全选会把不同方言的库
+   混进同一批，而那批语句在别的方言上多半跑不通。所以此时禁用并把原因放进 title。 */
+.ds-picker-overlay .ds-picker-selall {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text);
+  padding: 0 8px 0 0;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  transition: color var(--trans, .2s ease), opacity var(--trans, .2s ease);
+}
+
+.ds-picker-overlay .ds-picker-selall input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  cursor: inherit;
+  accent-color: var(--accent);
+}
+
+.ds-picker-overlay .ds-picker-selall:hover { color: var(--accent); }
+
+.ds-picker-overlay .ds-picker-selall.is-off {
+  color: var(--text-muted);
+  opacity: .5;
+  cursor: not-allowed;
+}
+
+.ds-picker-overlay .ds-picker-selall.is-off input { cursor: not-allowed; }
+.ds-picker-overlay .ds-picker-selall.is-off:hover { color: var(--text-muted); }

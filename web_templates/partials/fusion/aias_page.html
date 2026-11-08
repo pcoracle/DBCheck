@@ -1,0 +1,139 @@
+{#
+  AI 巡检助手页面骨架：会话列表 + 消息流（右侧挂对话缩略导航条）+ 底部输入区，
+  以及全屏接管需要的容器层级（#page-ai-assistant → .aias-container）。
+  行为在 static/js/fusion/aias.js、样式在 static/css/fusion/aias.css，这里只给结构；
+  id 与类名被 JS/CSS 直接依赖，改名要两边一起改。
+  #}
+      <div class="page" id="page-ai-assistant" style="display:none;flex-direction:column;overflow:hidden;">
+        <div class="aias-container" id="aias-container">
+          <!-- 会话列表：默认悬浮抽屉（浮在正文右侧、不挤布局），左缘可拖动改宽度，
+               可钉住回到占位式；折叠时整块滑出右缘，只留停靠页签 -->
+          <div class="aias-sidebar" id="aias-sidebar">
+            <div class="aias-sb-resizer" id="aias-sb-resizer" title="拖动调整会话列表宽度" role="separator" aria-label="拖动调整会话列表宽度"></div>
+            <div class="aias-sidebar-header">
+              <div class="aias-sidebar-header-row">
+                <button class="aias-new-chat-btn" onclick="aiasNewChat()">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                  新建对话
+                </button>
+                <button class="aias-sb-pin" id="aias-sb-pin" onclick="aiasToggleSidebarPin()" title="钉住会话列表（钉住后占据布局，不遮挡对话）" aria-pressed="false">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 17v5"/><path d="M9 3h6l1 7 3 3H5l3-3 1-7z"/></svg>
+                </button>
+                <button class="aias-sidebar-collapse-btn" onclick="aiasToggleSidebar()" title="收起会话列表">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+                </button>
+              </div>
+            </div>
+            <div class="aias-session-list" id="aias-session-list"></div>
+            <div class="aias-sidebar-footer">
+              <div class="aias-model-info" id="aias-model-info">模型加载中...</div>
+            </div>
+          </div>
+          <!-- 侧边栏吸附标签（折叠时显示，点击展开会话列表） -->
+          <button class="aias-dock-tab" id="aias-dock-tab" onclick="aiasToggleSidebar()" title="展开会话列表">会话列表</button>
+          <!-- 主对话区域 -->
+          <div class="aias-main">
+            <!-- 顶部工具栏 -->
+            <div class="aias-topbar">
+              <div class="aias-topbar-left">
+                <span class="aias-topbar-title" id="aias-topbar-title">新对话</span>
+              </div>
+              <div class="aias-topbar-right">
+                <button class="aias-icon-btn" onclick="aiasShowTaskHistory()" title="AI巡检任务历史">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11H3v10h6V11zM9 3H3v6h6V3zm12 8h-6v10h6V11zm0-8h-6v6h6V3z"/></svg>
+                </button>
+                <button class="aias-icon-btn" id="aias-dsver-btn" onclick="aiasShowDsVersions()" title="数据源版本一览（系统自动实探，无需手工配置）" aria-label="数据源版本一览">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.66 3.58 3 8 3s8-1.34 8-3V6"/><path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/></svg>
+                </button>
+                <button class="aias-icon-btn" onclick="showPage('ai-tasks')" title="AI 对话任务回溯">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 8v13H3V8M1 3h22v5H1zM10 12h4"/></svg>
+                </button>
+                <button class="aias-icon-btn" id="aias-minimap-btn" onclick="aiasToggleMinimap()" title="对话缩略导航（点击定位 · Alt+↑/↓ 逐条跳转）" aria-label="对话缩略导航" aria-pressed="true">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="13" y="3" width="8" height="18" rx="2"/><line x1="15.5" y1="7" x2="19" y2="7"/><line x1="15.5" y1="11" x2="18" y2="11"/><line x1="15.5" y1="15" x2="19.5" y2="15"/><line x1="3" y1="6" x2="9" y2="6"/><line x1="3" y1="12" x2="7" y2="12"/><line x1="3" y1="18" x2="9" y2="18"/></svg>
+                </button>
+                <button class="aias-icon-btn" onclick="aiasClearChat()" title="清空对话">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                </button>
+                <button class="aias-icon-btn" onclick="aiasToggleSidebar()" title="切换侧边栏">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+                </button>
+              </div>
+            </div>
+            <!-- 消息区域 + 右侧对话缩略导航条（覆盖在消息列右内边距上，不占正文宽度） -->
+            <div class="aias-stream" id="aias-stream">
+              <div class="aias-messages" id="aias-messages">
+                <div class="aias-welcome" id="aias-welcome">
+                  <div class="aias-welcome-icon">🤖</div>
+                  <h2>AI 巡检助手</h2>
+                  <p>只读巡检 · 查询分析 · 建议方案由 DBA 确认执行</p>
+                  <div class="aias-suggestion-grid">
+                    <div class="aias-suggestion-card" onclick="aiasQuickSend('查看所有数据源')">
+                      <span class="aias-suggestion-icon">📊</span>
+                      <span>查看所有数据源</span>
+                    </div>
+                    <div class="aias-suggestion-card" onclick="aiasQuickSend('系统状态概览')">
+                      <span class="aias-suggestion-icon">🏠</span>
+                      <span>系统状态概览</span>
+                    </div>
+                    <div class="aias-suggestion-card" onclick="aiasQuickSend('查看慢查询监控')">
+                      <span class="aias-suggestion-icon">⚡</span>
+                      <span>查看慢查询监控</span>
+                    </div>
+                    <div class="aias-suggestion-card" onclick="aiasQuickSend('MySQL慢查询怎么优化？')">
+                      <span class="aias-suggestion-icon">💡</span>
+                      <span>MySQL慢查询优化</span>
+                    </div>
+                  </div>
+                  <div class="aias-readonly-hint" style="margin-top:14px;font-size:12px;color:var(--text-muted);background:var(--surface2);border-radius:8px;padding:10px 14px;line-height:1.7">
+                    🔒 本助手为<strong>只读巡检助手</strong>：仅执行查询语句（SELECT 等），不执行任何写操作或管理操作。发现问题时提供分析结论与建议 SQL，<strong>需由 DBA 审阅确认后手动执行</strong>。
+                  </div>
+                </div>
+              </div>
+              <!-- 细轨：一横 = 一个主题（提问连同它的回答），线长=主题体量，横向居中、
+                   纵向自动避让到当前高度能放下的最多主题；鼠标扫过浮出主题名，点击定位 -->
+              <div class="aias-minimap" id="aias-minimap" role="navigation" aria-label="对话缩略导航" hidden>
+                <div class="aias-minimap-blocks" id="aias-minimap-blocks"></div>
+                <div class="aias-minimap-viewport" id="aias-minimap-viewport"></div>
+                <div class="aias-mm-tip" id="aias-mm-tip" hidden></div>
+              </div>
+            </div>
+            <!-- 新内容提示（用户上滚时不自动滚动） -->
+            <div class="aias-scroll-prompt" id="aias-scroll-prompt" style="display:none;" onclick="aiasScrollToBottom()">
+              <span>↓ 有新内容，点击查看</span>
+            </div>
+            <!-- 输入区域 -->
+            <div class="aias-input-area">
+              <!-- 会话当前数据源：常驻胶囊，点击可切换（整个会话 SQL 的默认执行源） -->
+              <div class="aias-ds-capsule-bar" id="aias-ds-capsule">
+                <span class="aias-ds-capsule" id="aias-ds-capsule-btn" onclick="aiasChangeDefaultDs()" title="切换会话默认数据源（SQL 默认执行于此）">
+                  <span id="aias-ds-capsule-icon">🏢</span>
+                  <span id="aias-ds-capsule-name">未选择数据源</span>
+                  <span class="aias-ds-capsule-caret">▾</span>
+                </span>
+                <span class="aias-ds-capsule-tip">会话 SQL 默认执行源 · 点按可切换</span>
+                <label class="aias-row-limit aias-global-row-limit" onclick="event.stopPropagation()" title="全局行数上限：所有 SQL 结果最多显示多少行（重新执行生效）">行数上限
+                  <input type="number" id="aias-global-max-rows" min="1" max="5000" value="20" onchange="aiasSaveGlobalRowLimit()">
+                </label>
+              </div>
+              <div class="aias-input-wrapper">
+                <textarea id="aias-input" class="aias-input" rows="1"
+                  placeholder="输入问题或巡检需求，Enter 发送，Shift+Enter 换行..."
+                  oninput="aiasAutoResize(this)"
+                  onkeydown="aiasOnKeydown(event)"></textarea>
+                <div class="aias-input-actions">
+                  <button class="aias-stop-btn" id="aias-stop-btn" style="display:none;" onclick="aiasStopGeneration()" title="停止生成">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+                    停止
+                  </button>
+                  <button class="aias-send-btn" id="aias-send-btn" onclick="aiasSend()" title="发送">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                  </button>
+                </div>
+              </div>
+              <div class="aias-input-hint" id="aias-input-hint">AI 生成的 SQL 仅供参考，需由 DBA 审阅后手动执行</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ══ Page: 工具管理 ══ -->

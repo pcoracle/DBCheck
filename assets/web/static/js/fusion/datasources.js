@@ -4,10 +4,9 @@
  * Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
  *
  * Fusion page logic: data source management (left tree + right table).
- * Layout and UX adapted from DBCheck v2.6 (MIT License,
- * Copyright (c) 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>),
- * rewritten for the RaccoonX module layout.
- * Reuses the existing RaccoonX data-source modal / test / delete handlers.
+ * Attribution: 布局与交互设计归 MIT License,
+ * Copyright (c) 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com> 所有，
+ * 按 RaccoonX 的模块结构实现，并直接复用现有的数据源弹窗 / 测试 / 删除处理函数。
  */
 (function () {
   'use strict';
@@ -360,7 +359,7 @@
   async function load() {
     try {
       await ensureDbTypes();
-      // 目录接口可能尚未部署（旧版后端）：失败时降级为单层「未分配」，不阻塞数据源列表
+      // 目录接口可能不可用：失败时降级为单层「未分配」，不阻塞数据源列表
       var dirsData = null;
       try {
         var dirsRes = await fetch('/api/pro/dirs', { credentials: 'same-origin' });

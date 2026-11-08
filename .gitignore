@@ -31,6 +31,11 @@ scheduler_jobs.json
 ai_config.json
 dbc_config.json
 .db_key
+# 会话/JWT 密钥（落盘复用，重启不掉登录态）——绝不能进版本库
+.web_secret
+.jwt_secret
+data/.web_secret
+data/.jwt_secret
 flask.log
 dbcheck_article_v*.md
 RELEASE_*.md
@@ -129,6 +134,9 @@ data/user_db/
 data/logs/
 data/scheduler_jobs.json
 data/awr_uploads/
+# AI 巡检助手运行态：工具启停/自定义定义、数据源版本探测记忆
+data/ai_tools.json
+data/ai_ds_versions.json
 reports/
 data_backups/
 scheduler.log

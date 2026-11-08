@@ -4,10 +4,10 @@
  * Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
  *
  * Fusion page: SQL editor (object tree + multi-window editor + result tabs).
- * Base layout kept from the RaccoonX inline styles; tabs / target selectors /
- * object-aware completion / tree context menu / table-property dialog ported
- * from DBCheck v2.6 (MIT License, Copyright (c) 2025-2026 fiyo (Jack Ge)),
- * rewritten for the RaccoonX theme variables.
+ * Base layout follows the RaccoonX inline styles; tabs / target selectors /
+ * object-aware completion / tree context menu / table-property dialog 的交互设计归
+ * MIT License, Copyright (c) 2025-2026 fiyo (Jack Ge) 所有，
+ * 配色一律走 RaccoonX 主题变量。
  */
 
 /* ─── SQL 编辑器 ─── */
@@ -385,7 +385,8 @@
   user-select: none;
   white-space: nowrap;
 }
-/* ══ 以下为 DBCheck v2.6 SQL 编辑器组件样式（页签 / 目标选择器 / 智能提示 / 右键菜单 / 表属性弹窗）══ */
+/* ══ SQL 编辑器组件样式（页签 / 目标选择器 / 智能提示 / 右键菜单 / 表属性弹窗），
+      归属 MIT License, Copyright (c) 2025-2026 fiyo (Jack Ge) ══ */
 .sql-toolbar {
   display: flex;
   align-items: center;
@@ -934,9 +935,10 @@ body.sql-result-fullscreen { overflow: hidden; }
 }
 
 /* ══════════════════════════════════════════════════════════════
-   本轮布局整理：三区（操作栏 / 主体 / 状态栏）+ 窄屏收口
-   —— 之前所有控件挤在一条 toolbar 里，长说明在窄屏被挤成竖排字，
-      而且 --surface-solid 在本仓库未定义，右键菜单背景失效透出背面的文字。
+   布局分区：三区（操作栏 / 主体 / 状态栏）+ 窄屏收口
+   —— 控件全挤在一条 toolbar 里时，长说明在窄屏会被挤成一列竖排字，
+      所以说明文字统一放状态栏并省略号收口；另外 --surface-solid 全站未定义，
+      右键菜单的背景色必须在本页给实值，否则会透出背面文字。
    ══════════════════════════════════════════════════════════════ */
 
 /* 全站 .content 的 36/40 内边距对编辑器是纯浪费：本页紧贴容器边缘 */
@@ -1194,3 +1196,185 @@ body:has(#page-sql-editor.active) > .app-layout .content { padding: 6px 8px 8px;
   color: var(--danger);
 }
 .sql-tree-error-msg { line-height: 1.5; word-break: break-all; }
+
+/* 从搜索结果跳回树时闪一下，避免用户找不到刚刚定位的节点 */
+@keyframes sql-tree-node-flash {
+  0% { background: rgba(0, 200, 160, 0.45); }
+  100% { background: transparent; }
+}
+.sql-tree-node.flash { animation: sql-tree-node-flash 1.6s ease-out; }
+
+/* ══════════════════════════════════════════════════════════════
+   对象快速搜索（Ctrl+K）
+   —— 顶部工具条放不下第二个输入框，所以做成命令面板；
+      结果只在明确搜索时请求，不在树加载时预取整个实例。
+   ══════════════════════════════════════════════════════════════ */
+.sql-tree-search-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 5px;
+}
+.sql-tree-search-btn svg { display: block; }
+
+#sql-obj-search-modal {
+  align-items: flex-start;
+  justify-content: center;
+  padding: 8vh 16px 16px;
+}
+.sql-obj-search-box {
+  width: min(700px, 100%);
+  max-height: 76vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.38);
+  overflow: hidden;
+}
+.sql-obj-search-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 14px 0;
+}
+.sql-obj-search-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.sql-obj-search-scope { height: 28px; max-width: 220px; font-size: 12px; }
+.sql-obj-search-types {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.sql-obj-type-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 0;
+  border-right: 1px solid var(--border);
+  cursor: pointer;
+}
+.sql-obj-type-btn:last-child { border-right: 0; }
+.sql-obj-type-btn:hover { color: var(--text); background: var(--surface2); }
+.sql-obj-type-btn.active {
+  color: var(--accent);
+  background: rgba(0, 200, 160, 0.10);
+  font-weight: 600;
+}
+.sql-obj-search-head .modal-close { margin-left: auto; }
+.sql-obj-search-input {
+  height: 36px;
+  margin: 10px 14px 6px;
+  padding: 6px 10px;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  outline: none;
+}
+.sql-obj-search-input:focus { border-color: var(--accent); }
+.sql-obj-search-status {
+  min-height: 18px;
+  padding: 2px 14px 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.sql-obj-search-status.is-error { color: var(--danger); }
+.sql-obj-search-results {
+  min-height: 96px;
+  max-height: 52vh;
+  overflow: auto;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.sql-obj-search-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px 7px 12px;
+  border-left: 2px solid transparent;
+  cursor: pointer;
+}
+.sql-obj-search-item:hover { background: var(--surface2); }
+.sql-obj-search-item.active {
+  background: rgba(56, 139, 253, 0.14);
+  border-left-color: var(--accent);
+}
+.sql-obj-search-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+}
+.sql-obj-search-name mark {
+  padding: 0 1px;
+  color: inherit;
+  background: rgba(0, 200, 160, 0.22);
+  border-radius: 2px;
+}
+.sql-obj-search-meta {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.sql-obj-search-type {
+  padding: 1px 7px;
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.sql-obj-search-msg {
+  padding: 20px 14px;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-muted);
+}
+.sql-obj-search-msg.is-error { color: var(--danger); }
+.sql-obj-search-all { margin-left: 8px; }
+.sql-obj-search-foot {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 6px 12px;
+  padding: 8px 14px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.sql-obj-search-scope-note { color: var(--warning, var(--text-muted)); }
+/* 聚合搜索里有数据源没连上时，范围提示改成报错色：光加文字容易被当成普通说明 */
+.sql-obj-search-scope-note.is-error { color: var(--danger, var(--warning)); }
+/* 「加载更多」钉在列表底部：几百条命中时让用户不必先拖到底再找按钮 */
+.sql-obj-search-more {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  justify-content: center;
+  padding: 8px 12px 10px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+}
+.sql-obj-search-more .btn { font-size: 11px; }
+
+@media (max-width: 720px) {
+  #sql-obj-search-modal { padding-top: 4vh; }
+  .sql-obj-search-head { padding: 10px 10px 0; }
+  .sql-obj-search-input { margin: 8px 10px 6px; }
+  .sql-obj-search-item { grid-template-columns: minmax(0, 1fr) auto; }
+  .sql-obj-search-meta { display: none; }
+}

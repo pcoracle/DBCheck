@@ -4,13 +4,13 @@
  * Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
  *
  * Fusion page styles: notification settings.
- * Layout and UX adapted from DBCheck v2.6 (MIT License,
- * Copyright (c) 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>),
- * rewritten for the RaccoonX module layout.
+ * Attribution: 布局与交互设计归 MIT License,
+ * Copyright (c) 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com> 所有，
+ * 按 RaccoonX 的模块结构与主题变量实现。
  * All selectors are scoped to #page-notifier to avoid affecting existing pages.
  */
 
-/* 页头沿用目标系统约定的 .page-header > h2，与其他页面同一左边缘 */
+/* 页头用全站约定的 .page-header > h2，与其他页面同一左边缘 */
 #page-notifier .page-header h2 {
   margin: 0;
   font-size: 20px;

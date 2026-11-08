@@ -1,0 +1,69 @@
+<!--
+  SPDX-License-Identifier: Apache-2.0
+  Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
+  Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
+
+  AWR 在线生成（fusion 页面包）：左「数据源 + 快照区间 + 上传」，中「最近文件」，
+  右「在线预览 / Word / AI 诊断」。接口：/api/awr/{snapshots,generate,recent,preview,download,ai_diagnosis}。
+-->
+<div class="page" id="page-awr-gen">
+  <div class="awrg-wrap">
+    <aside class="awrg-side">
+      <div class="awrg-head">
+        <button type="button" class="awrg-mini" onclick="showPage('awr')">← 返回报告</button>
+        <span>在线生成 AWR</span>
+      </div>
+      <label class="awrg-field">数据源（仅 Oracle）
+        <select id="awrg-ds"></select>
+      </label>
+      <label class="awrg-field">时间范围
+        <select id="awrg-days">
+          <option value="1">最近 1 天</option>
+          <option value="7" selected>最近 7 天</option>
+          <option value="30">最近 30 天</option>
+        </select>
+      </label>
+      <label class="awrg-field">开始快照
+        <select id="awrg-start"></select>
+      </label>
+      <label class="awrg-field">结束快照
+        <select id="awrg-end"></select>
+      </label>
+      <div class="awrg-hint">报告时段 = 开始快照的结束时间 → 结束快照的结束时间（与 AWR 报告头一致）</div>
+      <button type="button" class="awrg-primary" id="awrg-generate">生成 AWR 报告</button>
+      <div class="awrg-progress" id="awrg-progress"></div>
+      <div class="awrg-head" style="margin-top:10px;"><span>上传 AWR HTML</span></div>
+      <button type="button" class="awrg-upload-btn" id="awrg-upload-btn">＋ 上传 AWR HTML…</button>
+      <input type="file" id="awrg-upload" accept=".html,.htm" style="display:none;">
+      <div class="awrg-hint" id="awrg-upload-status"></div>
+    </aside>
+
+    <section class="awrg-recent">
+      <div class="awrg-head"><span>最近报告</span>
+        <span class="awrg-actions">
+          <button type="button" class="awrg-mini" id="awrg-select-all">全选</button>
+          <button type="button" class="awrg-mini" id="awrg-batch-delete">批量删除</button>
+          <button type="button" class="awrg-mini" id="awrg-refresh">刷新</button>
+        </span>
+      </div>
+      <div class="awrg-list" id="awrg-recent"></div>
+    </section>
+
+    <section class="awrg-main">
+      <div class="awrg-toolbar">
+        <span class="awrg-title" id="awrg-current">未选择报告</span>
+        <span class="awrg-actions">
+          <button type="button" class="awrg-mini" id="awrg-preview">预览</button>
+          <button type="button" class="awrg-mini" id="awrg-download">下载 HTML</button>
+          <button type="button" class="awrg-mini" id="awrg-maximize">最大化</button>
+          <button type="button" class="awrg-mini" id="awrg-word">生成 Word</button>
+          <button type="button" class="awrg-mini" id="awrg-ai">AI 诊断</button>
+        </span>
+      </div>
+      <div class="awrg-body">
+        <iframe class="awrg-frame" id="awrg-frame" title="AWR 预览"></iframe>
+        <pre class="awrg-ai" id="awrg-ai-box" style="display:none;"></pre>
+      </div>
+    </section>
+  </div>
+</div>

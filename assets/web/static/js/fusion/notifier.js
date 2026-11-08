@@ -4,11 +4,10 @@
  * Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
  *
  * Fusion page logic: notification settings.
- * Layout and UX adapted from DBCheck v2.6 (MIT License,
- * Copyright (c) 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>),
- * rewritten for the RaccoonX module layout.
- * Keeps the existing RaccoonX API contract and adds the v2.6 layout's
- * tab behaviour, CC field, and status messages.
+ * Attribution: 布局与交互设计归 MIT License,
+ * Copyright (c) 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com> 所有，
+ * 按 RaccoonX 的模块结构实现。API 契约沿用现有的通知设置接口，
+ * 页签切换、抄送（CC）字段与状态提示由本页补齐。
  */
 (function () {
   'use strict';

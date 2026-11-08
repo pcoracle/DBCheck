@@ -5,6 +5,23 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" data-page-node-id="CADWKKkq5gXsagOuVXgTwb" />
 <title>{{ product_name }} · {{ product_tagline }}</title>
 <link rel="icon" type="image/x-icon" href="/favicon.ico" data-page-node-id="bFYbzHs6oDCIIMrtvvGXAD">
+<script>
+/* 主题在首次绘制前定好：等到 body 末尾的 initTheme() 再设属性，用户会先看到一整屏
+   深色再翻成浅色（闪屏）。
+   默认是浅色天蓝，但这里必须区分两种「存着 dark」：
+     · 用户自己点过切换 —— 必须尊重，记在 dbcheck-theme-user；
+     · 旧版本代码每次加载自动写入 dark —— 不能当成用户意愿，否则默认主题永远生效不了。
+   没有主动选择标记时一律按新默认走，用户仍可一键切回深色（切了就记住）。 */
+(function () {
+  var chosen = false;
+  try { chosen = localStorage.getItem('dbcheck-theme-user') === '1'; } catch (e) {}
+  var t = 'light';
+  try {
+    if (chosen) t = (localStorage.getItem('dbcheck-theme') === 'dark') ? 'dark' : 'light';
+  } catch (e) {}
+  document.documentElement.setAttribute('data-theme', t);
+})();
+</script>
 <style>
 /* ─── Reset & Base ─── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -26,24 +43,42 @@
   --card-bg:   #141C2E;
   --radius:    12px;
   --trans:     0.22s ease;
+  /* 语义辅助色：结论卡、证据条、风险标签共用这一组，两套主题各给一套值，
+     组件里不再写死色值（写死的后果是切主题就出现「白底白字」）。 */
+  --sky:       #4FC3F7;
+  --accent-soft:#0E2C2A;
+  --sky-soft:  #10283A;
+  --warn-soft: #2A2110;
+  --danger-soft:#2A1414;
+  --code-bg:   #0F1729;
+  --shadow-1:  0 1px 2px rgba(0, 0, 0, .40), 0 12px 30px -16px rgba(0, 0, 0, .60);
 }
 
-/* ─── 浅色主题 ─── */
+/* ─── 浅色主题（默认）───────────────────────────────────────
+   底色带一点天蓝而不是纯灰白：长时间盯屏时冷白底更累，天蓝底对比更柔。
+   主色仍沿用品牌青绿（--accent），天蓝只作信息/高亮辅色（--sky）。 */
 [data-theme="light"] {
-  --bg:        #F8F9FA;
+  --bg:        #F4F8FC;
   --surface:   #FFFFFF;
-  --surface2:  #EEF1F5;
-  --border:    #D1D9E0;
-  --accent:    #00A884;
+  --surface2:  #EAF1F8;
+  --border:    #D5E1EC;
+  --accent:    #0086B8;
   --accent2:   #0A2A6E;
   --warn:      #B45309;
   --danger:    #DC2626;
-  --text:      #0D1426;
-  --text-main: #0D1426;
-  --text-muted:#64748B;
+  --text:      #0D2438;
+  --text-main: #0D2438;
+  --text-muted:#5C7A94;
   --info:      #0A2A6E;
-  --success:   #00A884;
+  --success:   #0F9D58;
   --card-bg:   #FFFFFF;
+  --sky:       #3AA9E0;
+  --accent-soft:#E3F4FB;
+  --sky-soft:  #E8F3FB;
+  --warn-soft: #FDF3E3;
+  --danger-soft:#FDECEC;
+  --code-bg:   #F7FAFD;
+  --shadow-1:  0 1px 2px rgba(13, 36, 56, .05), 0 10px 26px -14px rgba(13, 36, 56, .18);
 }
 
 html { font-size: 15px; }
@@ -499,6 +534,11 @@ async function executeFixSql(taskId, sql) {
 .main {
   margin-left: 260px;
   flex: 1;
+  /* 必须是 0：.main 是 .app-shell（flex row）的弹性项，默认 min-width:auto
+     会被子树里不可收缩的内容顶着长 —— 实测公告条（.announce-text 是 nowrap）
+     一句话就把 638px 视口下的右栏从 363 撑到 532，整篇文档横向溢出到 792px，
+     表现为「页面内容超出当前页面边缘」（.main 的计算值必须是 min-width:0，否则会溢出）。 */
+  min-width: 0;
   display: flex;
   flex-direction: column;
   min-height: 100vh;
@@ -2265,7 +2305,7 @@ async function executeFixSql(taskId, sql) {
 //  i18n 初始化
 // ══════════════════════════════════════════════════════════════
 
-/* ─── App Layout (v2.6.2: 固定右侧 AI 面板) ─── */
+/* ─── App Layout（固定右侧 AI 面板）─── */
 .app-layout {
   /* 容器，不改变原有布局 */
 }
@@ -3485,6 +3525,13 @@ async function executeFixSql(taskId, sql) {
   <link rel="stylesheet" href="/static/css/fusion/datasources.css?v={{ version }}-fusion16">
   <link rel="stylesheet" href="/static/css/fusion/inspection_config.css?v={{ version }}-fusion11">
   <link rel="stylesheet" href="/static/css/fusion/sql_editor.css?v={{ version }}-fusion20">
+  <link rel="stylesheet" href="/static/css/fusion/ds_picker.css?v={{ version }}-fusion5">
+  {% if aias_source_ui %}
+  <link rel="stylesheet" href="/static/css/fusion/aias.css?v={{ version }}-source21">
+  {% else %}
+  <link rel="stylesheet" href="/static/css/fusion/ai_assistant.css?v={{ version }}-fusion17">
+  {% endif %}
+  <link rel="stylesheet" href="/static/css/fusion/awr.css?v={{ version }}-fusion5">
 
   <!-- xterm.js（远程终端） -->
   <link rel="stylesheet" href="/static/css/xterm.css" data-page-node-id="fyVy1GfG9wP7FKcTrz1fR8" />
@@ -7628,6 +7675,9 @@ function wfCloseRunDrawer() {
     <div class="nav-item" onclick="showPage('scheduler')" id="nav-scheduler" data-page-node-id="BSlCHwzlOJ3qBdgaF0YgT8">
       <span class="icon" data-page-node-id="hjANb44koxYAdqr9Nr8bh1"><svg viewBox="0 0 24 24" aria-hidden="true" data-page-node-id="GuPEqoMbBIGPDVLxAtN8pY"><circle cx="12" cy="12" r="9" data-page-node-id="GzmFNJwyPQvn06xwO8yEE8"/><path d="M12 7v5l3 2" data-page-node-id="VViKjkQorDbnkhV5Y7f4Fk"/></svg></span> <span data-i18n="webui.nav_scheduler" data-page-node-id="3VI7yOdHWXuDH2cAPqwJCv">定时巡检</span>
     </div>
+    <div class="nav-item" onclick="showPage('ai-assistant')" id="nav-ai-assistant">
+      <span class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a7 7 0 0 1 7 7c0 2.4-1.2 4.5-3 5.8V19h-8v-3.2A7 7 0 0 1 12 3z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9 22h6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span> <span data-i18n="menu.ai-assistant">AI 巡检助手</span>
+    </div>
     <div class="nav-item" onclick="showPage('dm8-offline')" id="nav-dm8-offline" data-page-node-id="4yY5dhXyA5sxp4lehS4zTZ">
       <span class="icon" data-page-node-id="98N4zT1ljMn1b5gXyo2IC1"><svg viewBox="0 0 24 24" aria-hidden="true" data-page-node-id="8UZJKP6ONufKM5hHrHY1pz"><ellipse cx="12" cy="5" rx="8" ry="3" data-page-node-id="guOfWHH8oFXcEgtN21lGyA"/><path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5" data-page-node-id="n7rQ5sRNuOzAnU88QIwae1"/><path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3" data-page-node-id="wAQrTiSy8vPlNfecB7vpou"/></svg></span> <span data-i18n="webui.nav_dm8_offline" data-page-node-id="QkK3ud1qVQX6BTVJwxJmGf">达梦离线存储检查</span>
     </div>
@@ -10315,6 +10365,18 @@ curl -H "X-API-Key: YOUR_API_KEY" http://localhost:5003/api/v1/inspect/{task_id}
       <!-- ══ Page: SQL 编辑器（fusion 页面包）══ -->
       {% include 'partials/fusion/sql_editor.html' %}
 
+      <!-- ══ Page: AI 巡检助手 ══
+           source（默认）= 助手页完整实现（DOM / JS / CSS 一整套，含 SQL 槽位与批量执行）；
+           fusion        = 另一套模块化实现（保留作对照与回退，见 dbc_config.json 的 ai_assistant_impl） -->
+      {% if aias_source_ui %}
+      {% include 'partials/fusion/aias_page.html' %}
+      {% else %}
+      {% include 'partials/fusion/ai_assistant.html' %}
+      {% endif %}
+
+      <!-- ══ Page: AWR 在线生成（fusion 页面包）══ -->
+      {% include 'partials/fusion/awr.html' %}
+
       {% endif %}
 
 
@@ -11949,6 +12011,9 @@ curl -H "X-API-Key: YOUR_API_KEY" http://localhost:5003/api/v1/inspect/{task_id}
 
       <!-- AWR 报告分析页面 -->
       <div class="page" id="page-awr" style="display:none;" data-page-node-id="vUGmo15f3GfMinGTG2ZvqB">
+      <div style="padding:8px 12px 0;">
+        <button type="button" class="btn btn-primary btn-sm" onclick="showPage('awr-gen')">＋ 在线生成 AWR（选快照）</button>
+      </div>
         <div class="page-content" id="awr-content" data-page-node-id="jG5ztjNk95HFTHtTkIoQ8M">
 
           <!-- 上传区域 -->
@@ -12526,7 +12591,7 @@ function dm8OfflineDownloadReport() {
 function showPage(name) {
   // P0-c：切换页面时关闭自治闭环抽屉（避免 fixed 抽屉残留浮层）
   try { closeAutonomyDrawer(); } catch (e) {}
-  // v2.6.2：更新全局页面变量（供 AI 上下文感知使用）
+  // 更新全局页面变量（供 AI 上下文感知使用）
   _currentPage = name;
   // 切换菜单时把滚动位置复位到顶部：外层滚动容器是文档（body），
   // 若不复位会沿用上一页的 scrollTop，导致新页面打开时滑块位置不对、
@@ -12599,6 +12664,9 @@ function showPage(name) {
     'autonomy': ['安全自治 DBA 闭环', '检测→诊断→提议→审批闸门→执行→复检 的可审计自治闭环（P0-c 看板）'],
     'fleet': ['智能基线 · Smart Baseline', '无监督基线学习 + 漂移检测 + 容量预测：从单点巡检到全库智能（P1）'],
     'xinchuang': [i18n('menu.xinchuang') || '信创合规', i18n('webui.xinchuang_subtitle') || '对纳管实例做信创化程度盘点：国产（信创）占比、国外数据库待替换清单、库型分布。'],
+    'ai-assistant': [i18n('webui.ai_assistant_title') || '🤖 AI 巡检助手', i18n('webui.ai_assistant_desc') || '只读巡检 · 工具取数 · 流式分析 · 建议由 DBA 确认执行'],
+    'ai-tasks': [i18n('webui.ai_tasks_title') || '🗂 AI 对话任务回溯', i18n('webui.ai_tasks_desc') || '回看每一次提问的理解、工具调用与结论'],
+    'tool-mgmt': [i18n('webui.tool_mgmt_title') || '🔧 AI 工具管理', i18n('webui.tool_mgmt_desc') || '管理 AI 巡检助手可调用的只读工具'],
     'run-log': [i18n('menu.run-log') || '运行日志', i18n('webui.run_log_subtitle') || '统一汇聚巡检 / 定时巡检 / 智能诊断 / 监控 的运行日志，可按分类过滤。'],
   };
   const t = titles[name] || [name, ''];
@@ -12656,6 +12724,22 @@ function showPage(name) {
   if (name === 'fleet') loadFleetOverview();
   if (name === 'twin') loadTwinTopology();
 
+  if (name === 'ai-assistant') {
+    if (window.FusionAiAssistant) { window.FusionAiAssistant.enter(); }
+  }
+  if (name === 'ai-tasks') {
+    if (window.FusionAiTasks) { window.FusionAiTasks.enter(); }
+  }
+  if (name === 'awr-gen') {
+    if (window.FusionAwr) { window.FusionAwr.enter(); }
+  }
+  if (name === 'tool-mgmt') {
+    if (window.FusionToolConfig) { window.FusionToolConfig.enter(); }
+  }
+  if (name !== 'ai-assistant' && window.FusionAiAssistant && window.FusionAiAssistant.leave) {
+    // 切走页面时停掉仍在进行的流，避免后台继续跑一次完整分析
+    window.FusionAiAssistant.leave();
+  }
   if (name === 'sql-editor') {
     // fusion 页面包：首次进入加载 CodeMirror + 对象树，再次进入只刷新当前页签的编辑器尺寸
     if (window.FusionSqlEditor) { window.FusionSqlEditor.enter(); }
@@ -12670,6 +12754,8 @@ function showPage(name) {
   if (mainEl) {
     if (name === 'sql-editor') { mainEl.classList.add('sql-editor-active'); }
     else { mainEl.classList.remove('sql-editor-active'); }
+    if (name === 'ai-assistant') { mainEl.classList.add('aias-active'); }
+    else { mainEl.classList.remove('aias-active'); }
   }
 }
 
@@ -20269,12 +20355,18 @@ function toastConfirm(msg) {
 }
 
 function getTheme() {
-  return document.documentElement.getAttribute('data-theme') || 'dark';
+  return document.documentElement.getAttribute('data-theme') || 'light';
 }
 
-function setTheme(theme) {
-  document.documentElement.setAttribute('data-theme', theme || 'dark');
-  localStorage.setItem('dbcheck-theme', theme || 'dark');
+function setTheme(theme, explicit) {
+  theme = (theme === 'dark') ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', theme);
+  try {
+    localStorage.setItem('dbcheck-theme', theme);
+    // 只有用户亲手切换才留这个记号：程序调用（含旧版本每次加载的自动写入）不算意愿，
+    // 否则「默认浅色」对这些浏览器永远生效不了。
+    if (explicit) localStorage.setItem('dbcheck-theme-user', '1');
+  } catch (e) {}
   var btn = document.getElementById('theme-toggle');
   if (btn) btn.textContent = (theme === 'light') ? '🌙' : '☀️';
   // 主题切换后 ECharts 文字颜色需随 CSS 变量刷新
@@ -20289,12 +20381,12 @@ function setTheme(theme) {
 }
 
 function initTheme() {
-  var saved = localStorage.getItem('dbcheck-theme') || 'dark';
-  setTheme(saved);
+  // <head> 已经按「用户是否主动选过」定好 data-theme，这里只同步按钮图标，不再改写选择。
+  setTheme(getTheme());
 }
 
 function toggleTheme() {
-  setTheme(getTheme() === 'dark' ? 'light' : 'dark');
+  setTheme(getTheme() === 'dark' ? 'light' : 'dark', true);
 }
 
 // ─── 顶部公告条：读 /api/announcement（官网远端源，后端定时缓存）；
@@ -22227,7 +22319,7 @@ let chatSpinnerTexts = ['正在巡检', '正在巡检 .', '正在巡检 ..', '�
 let chatSpinnerIdx = 0;
 let chatSessionId = 'default_' + Math.random().toString(36).slice(2, 8);
 
-// ─── Markdown 渲染器 (v2.6.3) ──────────────────────
+// ─── Markdown 渲染器 ──────────────────────────────
 function renderMarkdown(text) {
   if (!text) return '';
   
@@ -22296,7 +22388,7 @@ function _renderMarkdownTable(text) {
   return html;
 }
 
-// ─── 上下文感知 (v2.6.2) ──────────────────────
+// ─── 上下文感知 ────────────────────────────────
 // 全局变量：由 showPage() 更新
 let _currentPage = 'dashboard';
 
@@ -22429,7 +22521,7 @@ function getChatContext() {
     }
   }
 
-  // v2.6.2：page ID → 中文标题（让 AI 回复中文页面名）
+  // page ID → 中文标题（让 AI 回复中文页面名）
   const pageNameMap = {
     'dashboard': '仪表盘',
     'datasource': '数据源管理',
@@ -22791,7 +22883,7 @@ async function sendChatMessage() {
   // 自动获取当前页面上下文
   const context = getChatContext();
 
-  // v2.6.3：使用 SSE 流式接收
+  // 使用 SSE 流式接收
   try {
     console.log('[AI Chat] 发送 SSE 请求...', { message: message.substring(0, 50), session_id: chatSessionId });
     const res = await fetch('/api/chat/stream', {
@@ -23912,7 +24004,7 @@ async function deleteBackupHistory(recordId) {
 
 </script>
 
-<!-- AI Chat Panel (v2.6.2: 固定右侧) -->
+<!-- AI Chat Panel（固定右侧）-->
 <aside class="ai-chat-panel collapsed" id="ai-chat-sidebar" data-page-node-id="iiI6nPIa7A7FFElRiiLTyH">
   <div class="chat-header" style="position:relative" data-page-node-id="lU6QLDalDEZrh6sAr6e0Yc">
     <span style="font-size:20px" data-page-node-id="5b4aY6PZBcTXUCetxLS4Jc">🤖</span>
@@ -26021,6 +26113,17 @@ function mkdirRemote() {
   <script src="/static/js/fusion/datasources.js?v={{ version }}-fusion16"></script>
   <script src="/static/js/fusion/inspection_config.js?v={{ version }}-fusion11"></script>
   <script src="/static/js/fusion/sql_editor.js?v={{ version }}-fusion24"></script>
+  <script src="/static/js/fusion/ds_picker.js?v={{ version }}-fusion5"></script>
+  {% if aias_source_ui %}
+  <!-- 助手页完整实现：消息流 / SQL 块执行与拆分 / 槽位替换 / 批量，接口走 /api/chat/* -->
+  <script src="/static/js/fusion/aias.js?v={{ version }}-source33"></script>
+  {% else %}
+  <script src="/static/js/fusion/ai_sql_slots.js?v={{ version }}-fusion6"></script>
+  <script src="/static/js/fusion/ai_assistant.js?v={{ version }}-fusion26"></script>
+  {% endif %}
+  <script src="/static/js/fusion/ai_tool_config.js?v={{ version }}-fusion2"></script>
+  <script src="/static/js/fusion/ai_tasks.js?v={{ version }}-fusion4"></script>
+  <script src="/static/js/fusion/awr.js?v={{ version }}-fusion5"></script>
 <!-- 底部状态栏 -->
 <div class="status-bar" id="status-bar" data-page-node-id="E0jlA1UaqTA24TltOH3TVC">
   <div class="sb-item sb-brand" data-page-node-id="upIEHjuNpzMJN8eZoS2MXe">

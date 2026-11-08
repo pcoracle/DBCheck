@@ -5,10 +5,10 @@
 
 """SQL 编辑器右键「查看表属性」用的表/视图元信息（字段、索引、行数、大小、注释）。
 
-查询分支移植自 DBCheck v2.6 的 ``api/pro.py`` 表属性接口（MIT License,
-Copyright (c) 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>），改动点：
+归属说明：各方言表属性查询的设计归 MIT License,
+Copyright (c) 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com> 所有。三条约定：
 
-1. 不再自己建连：连接由上层用 ``_open_editor_conn`` 取到后传入，
+1. 不自己建连：连接由上层用 ``_open_editor_conn`` 取到后传入，
    本模块只负责「怎么查」，与 :mod:`modules.sqleditor.metadata` 共用同一套方言族名；
 2. 每个子查询各自 try/except：字典视图在各版本之间的字段差异很大，
    某一项查不到只记进 ``errors``，其余信息照常返回（页面上显示「—」）；

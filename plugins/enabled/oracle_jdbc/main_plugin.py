@@ -29,20 +29,29 @@ class JdbcCursorWrapper:
         self._rowcount = -1
     
     def execute(self, sql):
-        """执行 SQL（自动判断查询/更新）"""
-        sql_upper = sql.strip().upper()
-        if sql_upper.startswith('SELECT') or sql_upper.startswith('WITH'):
-            self.rs = self.stmt.executeQuery(sql)
-            # 获取列信息
+        """执行 SQL：由驱动告知这句有没有结果集，不靠猜首关键词。
+
+        早先的写法是先看语句开头是不是 SELECT/WITH（各插件再补几个自己的关键字），
+        于是 `-- 说明` 开头、带 `/*+ hint */`、`(SELECT ...)` 起头这类**确实是查询**的
+        语句会走 executeUpdate：不报错、也拿不到数据，界面上就成了「查询成功，0 行」，
+        巡检模板里带注释的检查项同样会静默取空。JDBC 自己知道答案：
+        execute() 返回 true 就有结果集，false 才是更新计数。
+        """
+        self.rs = None
+        self.description = None
+        self._rowcount = -1
+        if bool(self.stmt.execute(sql)):
+            self.rs = self.stmt.getResultSet()
             meta = self.rs.getMetaData()
             col_count = meta.getColumnCount()
             self.description = tuple(
-                (meta.getColumnName(i+1), meta.getColumnTypeName(i+1), None, None, None, None, None)
+                (meta.getColumnName(i + 1), meta.getColumnTypeName(i + 1), None, None, None, None, None)
                 for i in range(col_count)
             )
         else:
-            self._rowcount = self.stmt.executeUpdate(sql)
-    
+            self._rowcount = self.stmt.getUpdateCount()
+
+
     def fetchall(self):
         """获取所有行"""
         if not self.rs:

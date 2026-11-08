@@ -82,6 +82,7 @@ INSERT OR IGNORE INTO um_menu(menu_code, menu_name, parent_id, sort_order) VALUE
     ('dm8-offline',      'DM8离线存储检查',   0, 22),
     ('server-inspect',   '服务器巡检',       0, 23),
     ('scheduler',        '任务调度',         0, 24),
+    ('ai-assistant',     'AI 巡检助手',      0, 24),
     ('awr',              'AWR报告',         0, 25),
     ('reports',          '巡检报告',         0, 26),
     ('server-history',   '历史记录',         0, 27),

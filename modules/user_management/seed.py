@@ -27,6 +27,7 @@ menus_data = [
     ('wizard',           'menu.wizard',          0, 21),
     ('server-inspect',   'menu.server-inspect',  0, 22),
     ('scheduler',        'menu.scheduler',       0, 23),
+    ('ai-assistant',     'menu.ai-assistant',    0, 23),
     ('awr',              'menu.awr',             0, 24),
     ('reports',          'menu.reports',         0, 25),
     ('server-history',   'menu.server-history',  0, 26),
@@ -196,28 +197,32 @@ def init_seed_data():
 def sync_menus():
     """每次启动幂等同步菜单到 um_menu（upsert），并对菜单按 ROLE_MENU_MAP 补齐角色授权。
 
-    对新增菜单 INSERT；对已在 um_menu 的现有行也 UPDATE menu_name 为 i18n key
-    （按 menu_code 匹配），使旧的中文 menu_name 在每次启动时被幂等覆盖成 key。
+    以 menus_data 为单一数据源：新增菜单 INSERT；已存在的行只要 menu_name / parent_id /
+    sort_order 任一与种子不一致就 UPDATE 校正，使菜单名（i18n key）、层级与排序在每次
+    启动时都自动对齐种子（旧中文菜单名、错乱的 sort_order 都会被幂等覆盖）。
     绝不删除任何既有授权；数据库不可达时仅告警不阻断启动。
     """
     try:
         db = DBManager()
         menu_model = MenuModel()
-        existing = {m['menu_code']: m for m in db.query_all("SELECT id, menu_code, menu_name FROM um_menu")}
+        existing = {m['menu_code']: m for m in db.query_all(
+            "SELECT id, menu_code, menu_name, parent_id, sort_order FROM um_menu")}
         for code, name, pid, order in menus_data:
             if code not in existing:
                 menu_model.create(code, name, parent_id=pid, sort_order=order)
                 print(f"  [sync] 新增菜单: {code}")
             else:
-                # 幂等覆盖：旧的中文 menu_name 在每次启动时被覆盖成 i18n key
-                if existing[code]['menu_name'] != name:
+                cur = existing[code]
+                # 幂等覆盖：名称/层级/排序任一偏离种子就校正回 menus_data
+                if (cur['menu_name'] != name or cur['parent_id'] != pid
+                        or cur['sort_order'] != order):
                     menu_model.update(
-                        existing[code]['id'],
+                        cur['id'],
                         menu_name=name,
                         parent_id=pid,
                         sort_order=order,
                     )
-                    print(f"  [sync] 更新菜单 menu_name: {code} -> {name}")
+                    print(f"  [sync] 更新菜单: {code} (name={name}, parent={pid}, sort={order})")
 
         role_menu_map = {
             'admin': 'ALL',

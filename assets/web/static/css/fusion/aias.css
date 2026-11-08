@@ -1,0 +1,4287 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
+ * Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
+ *
+ * AI 巡检助手样式：全屏对话页、SQL 代码块与结果区、数据源弹窗、SQL 占位符槽位菜单、
+ * 任务历史与工具链路展示的全部样式。
+ * 版权归属：MIT License, Copyright (c) 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>。
+ *
+ * 两条约定：
+ *   · 不做 #page-ai-assistant 作用域 —— 助手页的弹窗（数据源选择、任务历史、槽位菜单）
+ *     都挂在 document.body 上、不在页面容器里；逐条判断谁该收作用域必然会漏，
+ *     所以整份保持 .aias-* 页面级类名，不加容器前缀。
+ *   · 主题变量差异集中在文件末尾的「变量映射」段补齐（--surface-solid / --row-active-bg
+ *     本仓库没有），只补变量，不改任何一条规则。
+ */
+/* AI 对话面板工具链路 SQL 高亮（trae/workbuddy 风格，仅新增类不改动既有布局）*/
+        .aias-tc-sql { background: #1e1e2e; color: #cdd6f4; padding: 10px 12px; border-radius: 6px; font-family: 'Consolas','Monaco',monospace; font-size: 12px; margin: 8px 0; white-space: pre-wrap; word-break: break-all; line-height: 1.5; border-left: 3px solid #89b4fa; }
+
+/* AI 巡检助手 — 全窗口布局，移除 padding 让对话区占满 */
+.main.aias-active {
+  height: 100vh;
+  min-height: 100vh;
+  overflow: hidden;
+}
+
+.main.aias-active .content {
+  overflow: hidden;
+  padding: 0;
+  height: 100vh;
+}
+
+/* ════════════════════════════════════════════════════════════
+   AI 巡检助手 (AI Assistant) — 全窗口对话界面
+   ════════════════════════════════════════════════════════════ */
+.aias-container {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  position: relative;
+}
+
+/* 侧边栏吸附标签：折叠时显示在右边缘，点击展开 */
+.aias-dock-tab {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 26px;
+  height: 88px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-right: none;
+  border-radius: 8px 0 0 8px;
+  cursor: pointer;
+  z-index: 60;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  box-shadow: -2px 0 10px rgba(0,0,0,0.08);
+  transition: color 0.15s ease, background 0.15s ease;
+  writing-mode: vertical-rl;
+  letter-spacing: 2px;
+  font-size: 12px;
+  padding: 0 4px;
+}
+
+.aias-dock-tab:hover {
+  color: var(--accent);
+  background: var(--surface2);
+}
+
+.aias-sidebar.aias-collapsed ~ .aias-dock-tab {
+  display: flex;
+}
+
+/* 右侧会话列表 */
+.aias-sidebar {
+  width: 260px;
+  min-width: 260px;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  transition: width 0.3s ease, min-width 0.3s ease, opacity 0.3s ease;
+  overflow: hidden;
+  order: 2;
+}
+
+.aias-sidebar.aias-collapsed {
+  width: 0;
+  min-width: 0;
+  opacity: 0;
+}
+
+/* 钉住（占位）模式同样跟随拖出来的宽度 */
+.aias-container.aias-sb-pinned .aias-sidebar {
+  width: var(--sb-w, 260px);
+  min-width: var(--sb-w, 260px);
+}
+
+/* ── 会话列表：悬浮抽屉（默认）──────────────────────────────
+   浮在正文右侧、不挤布局：宽度可拖左缘调整（220~480px，记忆），
+   可「钉住」回到占位式；折叠时整块滑出右缘，只留停靠页签。
+   抽屉打开时刻度尺会左让（见 --mm-inset），不会被抽屉或页签压住。 */
+.aias-container.aias-sb-float .aias-sidebar {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: var(--sb-w, 260px);
+  min-width: 0;
+  opacity: 1;
+  z-index: 55;
+  border-left: 1px solid var(--border);
+  box-shadow: -10px 0 30px rgba(0, 0, 0, .16);
+  transform: translateX(0);
+  transition: transform .22s ease;
+}
+
+.aias-container.aias-sb-float .aias-sidebar.aias-collapsed {
+  width: var(--sb-w, 260px);
+  min-width: 0;
+  opacity: 1;
+  transform: translateX(100%);
+  box-shadow: none;
+  pointer-events: none;
+}
+
+/* 抽屉展开时正文自己让位：整条对话列（顶栏 / 消息区 / 输入区）按抽屉宽度收窄，
+   文字重排而不是被压在面板下面；刻度尺自然落在收窄后的列右缘，不需要额外偏移。 */
+.aias-main {
+  transition: padding-right .22s ease;
+}
+
+.aias-container.aias-sb-float.aias-sb-open .aias-main {
+  padding-right: var(--sb-w, 260px);
+}
+
+/* 左缘拖宽手柄 */
+.aias-sb-resizer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: col-resize;
+  z-index: 2;
+  background: transparent;
+  touch-action: none;
+}
+
+.aias-sb-resizer::after {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 50%;
+  width: 2px;
+  height: 34px;
+  margin-top: -17px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--text-muted) 30%, transparent);
+  transition: background .16s ease, height .16s ease;
+}
+
+.aias-sb-resizer:hover::after,
+.aias-sb-resizer.dragging::after {
+  height: 56px;
+  margin-top: -28px;
+  background: var(--accent);
+}
+
+/* 钉住开关 */
+.aias-sb-pin {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color .15s ease, border-color .15s ease, background .15s ease;
+}
+
+.aias-sb-pin:hover { color: var(--accent); border-color: var(--accent); }
+
+.aias-sb-pin.on {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.aias-sidebar-header {
+  padding: 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.aias-sidebar-header-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.aias-sidebar-collapse-btn {
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.aias-sidebar-collapse-btn:hover {
+  color: var(--accent);
+  background: var(--surface);
+  border-color: var(--accent);
+}
+
+.aias-new-chat-btn {
+  width: 100%;
+  padding: 10px 16px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-hover, #5856eb));
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  transition: all 0.2s ease;
+}
+
+.aias-new-chat-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(99,102,241,0.35);
+}
+
+.aias-session-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.aias-session-item {
+  padding: 10px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-main);
+  margin-bottom: 4px;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.aias-session-item:hover {
+  background: var(--surface2);
+}
+
+.aias-session-item.active {
+  background: rgba(99,102,241,0.12);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.aias-session-item .aias-session-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.15s;
+  flex-shrink: 0;
+}
+
+.aias-session-item:hover .aias-session-actions {
+  opacity: 1;
+}
+
+.aias-session-rename, .aias-session-del {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 13px;
+  padding: 2px 5px;
+  border-radius: 4px;
+  line-height: 1;
+}
+
+.aias-session-rename:hover, .aias-session-del:hover {
+  background: var(--surface2);
+  color: var(--accent);
+}
+
+/* 重命名编辑态 */
+.aias-session-item.editing {
+  display: block;
+  white-space: normal;
+  overflow: visible;
+}
+
+.aias-session-rename-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border: 1px solid var(--accent, #6366f1);
+  border-radius: 6px;
+  font-size: 13px;
+  background: var(--surface, #fff);
+  color: var(--text, #333);
+}
+
+.aias-session-rename-input:focus { outline: none; box-shadow: 0 0 0 2px rgba(99,102,241,0.15); }
+
+.aias-session-rename-actions { margin-top: 6px; display: flex; gap: 6px; }
+
+.aias-session-rename-actions button {
+  padding: 3px 12px; font-size: 12px; border-radius: 6px; cursor: pointer;
+  border: 0.5px solid var(--border, #ccc); background: var(--surface, #fff); color: var(--text, #333);
+}
+
+.aias-session-rename-actions .aias-rename-save { border-color: var(--accent, #6366f1); color: var(--accent, #6366f1); }
+
+.aias-session-rename-actions .aias-rename-save:hover { background: rgba(99,102,241,0.08); }
+
+.aias-sidebar-footer {
+  padding: 12px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.aias-model-info {
+  font-size: 11px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.aias-model-info::before {
+  content: '●';
+  color: #22c55e;
+}
+
+/* 主对话区域 */
+.aias-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+  order: 1;
+}
+
+.aias-topbar {
+  height: 52px;
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  flex-shrink: 0;
+}
+
+.aias-topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.aias-topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.aias-topbar-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.aias-icon-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+}
+
+.aias-icon-btn:hover {
+  background: var(--surface2);
+  color: var(--text-main);
+}
+
+/* 消息区域 */
+.aias-messages {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  scroll-behavior: auto;  /* 流式更新时禁用smooth，避免滚动动画跟不上内容增长 */
+  overflow-anchor: none;  /* 禁用浏览器滚动锚定，防止与手动滚动控制冲突导致跳动 */
+  padding: 0;
+}
+
+.aias-messages::-webkit-scrollbar { width: 6px; }
+
+.aias-messages::-webkit-scrollbar-track { background: transparent; }
+
+.aias-messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+/* ── 对话缩略导航（minimap）──────────────────────────────────
+   右侧只留一小横一小横的刻度线：一条消息一横，横线的长度就是这条的体量、位置就是它在正文里
+   的地方。只有「正在看」那一横转主色，执行报错转红；鼠标扫过去才在左侧浮出这一横对应的对话
+   主题（提问浮自己的问题，回答浮它回答的那个问题）。配色全部走主题变量 + color-mix，
+   深色/浅色都成立；轨道盖在消息自身的右内边距上，不挤窄正文；≤768px 整条收起。 */
+.aias-stream {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  position: relative;
+}
+
+.aias-minimap {
+  position: absolute;
+  top: 0;
+  right: var(--mm-inset, 0px);   /* 会话列表抽屉/停靠页签打开时由 JS 左让，避免被遮挡 */
+  bottom: 0;
+  width: 26px;
+  cursor: pointer;
+  background: transparent;
+  z-index: 12;
+  touch-action: none;
+}
+
+.aias-minimap[hidden] { display: none; }
+
+.aias-minimap-blocks {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  z-index: 2;
+}
+
+/* 一横 = 一个主题：横向在细轨里居中，2px 细线，中性低透明，平时几乎不存在。
+   粗细一律 2px（悬停、在看都不加粗），要变的只有长度和颜色。 */
+.aias-mm-block {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  width: var(--w, 8px);
+  height: 2px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--text-muted) 46%, transparent);
+  transition: width .18s cubic-bezier(.22, 1, .36, 1), background .16s ease, border-radius .16s ease;
+}
+
+.aias-mm-block.in-view {
+  background: color-mix(in srgb, var(--accent) 82%, transparent);
+}
+
+.aias-mm-block[data-kind="error"] {
+  background: color-mix(in srgb, var(--danger) 70%, transparent);
+}
+
+/* 只有鼠标正指着的那一横变长（两边一起伸出去，仍然居中），粗细不变 */
+.aias-mm-block.active {
+  width: calc(var(--w, 8px) + 10px);
+  background: var(--accent);
+}
+
+.aias-mm-block.active[data-kind="error"] { background: var(--danger); }
+
+/* 可视区：一段柔和的主色底，与刻度同轴居中，不画边框（画出来就是「一个奇怪的方框」） */
+.aias-minimap-viewport {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 20px;
+  min-height: 10px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  z-index: 1;
+  pointer-events: none;   /* 命中统一交给轨道本身 */
+}
+
+/* 悬停浮出的对话主题：贴在细轨左侧，单行省略 */
+.aias-mm-tip {
+  position: absolute;
+  right: 32px;
+  max-width: 320px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 9px;
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .20);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-main);
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 30;
+  opacity: 0;
+  transform: translateX(4px);
+  /* top 也进过渡：鼠标在一横一横之间滑动时，浮层是滑过去的，不是跳过去的 */
+  transition: opacity .14s ease, transform .2s cubic-bezier(.22, 1, .36, 1),
+              top .2s cubic-bezier(.22, 1, .36, 1);
+}
+
+.aias-mm-tip.show {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+.aias-mm-tip[hidden] { display: none; }
+
+.aias-mm-tip-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--text-muted) 45%, transparent);
+}
+
+.aias-mm-tip[data-kind="user"] .aias-mm-tip-dot { background: var(--accent); }
+.aias-mm-tip[data-kind="error"] .aias-mm-tip-dot { background: var(--danger); }
+.aias-mm-tip[data-kind="sql"] .aias-mm-tip-dot { background: var(--warn); }
+.aias-mm-tip[data-kind="think"] .aias-mm-tip-dot { background: color-mix(in srgb, var(--text-muted) 70%, transparent); }
+
+.aias-mm-tip-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.aias-mm-tip-meta {
+  flex: none;
+  font-size: 10px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 顶栏开关：关掉时压暗，一眼能看出导航条是被主动收起来的 */
+#aias-minimap-btn.aias-mm-off { opacity: .35; }
+
+.aias-minimap:focus-visible {
+  outline: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  outline-offset: -2px;
+  border-radius: 8px;
+}
+
+/* 跳转后给目标气泡一下短暂描边，确认「落点就是这里」 */
+.aias-msg.aias-mm-flash .aias-msg-text {
+  animation: aias-mm-flash .9s ease-out 1;
+}
+
+@keyframes aias-mm-flash {
+  0% { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 78%, transparent); }
+  100% { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 0%, transparent); }
+}
+
+@media (max-width: 768px) {
+  .aias-minimap { display: none !important; }
+}
+
+.aias-messages::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* 欢迎界面 */
+.aias-welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 40px;
+  text-align: center;
+}
+
+.aias-welcome-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+}
+
+.aias-welcome h2 {
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--text-main);
+  margin: 0 0 8px 0;
+}
+
+.aias-welcome p {
+  font-size: 14px;
+  color: var(--text-muted);
+  margin: 0 0 32px 0;
+}
+
+.aias-suggestion-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+  max-width: 520px;
+  width: 100%;
+}
+
+.aias-suggestion-card {
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-main);
+  transition: all 0.2s ease;
+  text-align: left;
+}
+
+.aias-suggestion-card:hover {
+  border-color: var(--accent);
+  background: rgba(99,102,241,0.05);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.06);
+}
+
+.aias-suggestion-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+}
+
+/* 消息气泡 — 左右对话布局 */
+.aias-msg {
+  max-width: 100%;
+  width: 100%;
+  padding: 16px 24px;
+  display: flex;
+  gap: 12px;
+  position: relative;
+}
+
+/* AI 消息靠左 */
+.aias-msg.ai {
+  justify-content: flex-start;
+}
+
+/* 用户消息靠右 */
+.aias-msg.user {
+  justify-content: flex-end;
+  flex-direction: row-reverse;
+}
+
+.aias-msg-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.aias-msg.user .aias-msg-avatar {
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.aias-msg.ai .aias-msg-avatar {
+  background: linear-gradient(135deg, #06b6d4, #3b82f6);
+  color: #fff;
+}
+
+.aias-msg-content {
+  flex: 1;
+  min-width: 0;
+  max-width: calc(100% - 46px);
+}
+
+/* 用户消息内容靠右对齐 */
+.aias-msg.user .aias-msg-content {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.aias-msg-role {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.aias-msg.user .aias-msg-role {
+  text-align: right;
+}
+
+/* 气泡样式 */
+.aias-msg-text {
+  font-size: 14px;
+  line-height: 1.75;
+  color: var(--text-main);
+  word-wrap: break-word;
+  border-radius: 16px;
+  padding: 12px 16px;
+}
+
+/* AI 气泡 — 左侧浅色背景 */
+.aias-msg.ai .aias-msg-text {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-top-left-radius: 4px;
+}
+
+/* 用户气泡 — 右侧主色背景 */
+.aias-msg.user .aias-msg-text {
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  color: #fff;
+  border-top-right-radius: 4px;
+}
+
+.aias-msg-text p { margin: 0 0 10px 0; }
+
+.aias-msg-text p:last-child { margin-bottom: 0; }
+
+.aias-msg-text pre {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 16px;
+  overflow-x: auto;
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 8px 0;
+}
+
+.aias-msg-text code {
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 13px;
+}
+
+.aias-msg-text :not(pre) > code {
+  background: var(--surface2);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.aias-msg-text ul, .aias-msg-text ol {
+  margin: 6px 0 10px 0;
+  padding-left: 24px;
+}
+
+.aias-msg-text li { margin: 4px 0; }
+
+.aias-msg-text h1, .aias-msg-text h2, .aias-msg-text h3 {
+  margin: 16px 0 8px 0;
+  font-weight: 600;
+}
+
+.aias-msg-text h1 { font-size: 18px; }
+
+.aias-msg-text h2 { font-size: 16px; }
+
+.aias-msg-text h3 { font-size: 15px; }
+
+.aias-msg-text table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 8px 0;
+  font-size: 13px;
+}
+
+.aias-msg-text th, .aias-msg-text td {
+  border: 1px solid var(--border);
+  padding: 8px 12px;
+  text-align: left;
+}
+
+.aias-msg-text th {
+  background: var(--surface2);
+  font-weight: 600;
+}
+
+.aias-msg-text blockquote {
+  border-left: 3px solid var(--accent);
+  padding-left: 12px;
+  margin: 8px 0;
+  color: var(--text-muted);
+}
+
+/* 用户气泡内元素：气泡改成浅底主色字后，代码与链接沿用正文口径即可，
+   原先为「深紫底白字」写的特例会让代码块在浅底上变成白字白底。 */
+.aias-msg.user .aias-msg-text pre {
+  background: var(--code-bg, var(--surface2));
+  border-color: var(--border);
+}
+
+.aias-msg.user .aias-msg-text :not(pre) > code {
+  background: color-mix(in srgb, var(--sky) 16%, var(--surface));
+  color: var(--text-main);
+}
+
+.aias-msg.user .aias-msg-text a {
+  color: var(--accent);
+}
+
+/* ── 工具调用区域样式 ── */
+.aias-msg-text details {
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.aias-msg-text details summary {
+  padding: 8px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  background: var(--surface2);
+  transition: background 0.15s ease;
+  user-select: none;
+}
+
+.aias-msg-text details summary:hover {
+  background: var(--accent-dim, rgba(99,102,241,0.08));
+}
+
+.aias-msg-text details[open] summary {
+  border-bottom: 1px solid var(--border);
+}
+
+.aias-msg-text details > pre {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  max-height: 300px;
+  overflow: auto;
+  font-size: 12px;
+}
+
+.aias-msg-text h3:first-child {
+  margin-top: 0;
+}
+
+.aias-msg-text hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 16px 0;
+}
+
+/* ── 确认卡片 ── */
+.aias-confirm-card {
+  margin: 12px 0;
+  border: 1px solid #f59e0b;
+  border-radius: 12px;
+  overflow: hidden;
+  background: linear-gradient(135deg, rgba(245,158,11,0.06), rgba(251,191,36,0.04));
+  animation: aias-confirm-pulse 2s ease-in-out infinite;
+}
+
+@keyframes aias-confirm-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(245,158,11,0.2); }
+  50% { box-shadow: 0 0 0 6px rgba(245,158,11,0); }
+}
+
+.aias-confirm-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: linear-gradient(135deg, rgba(245,158,11,0.12), rgba(251,191,36,0.08));
+  border-bottom: 1px solid rgba(245,158,11,0.2);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-main, #1a1a2e);
+}
+
+.aias-confirm-icon { font-size: 18px; }
+
+.aias-confirm-options {
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.aias-confirm-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 16px;
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 10px;
+  background: var(--surface, #fff);
+  color: var(--text-main, #1a1a2e);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-align: left;
+}
+
+.aias-confirm-btn:hover {
+  border-color: #6366f1;
+  background: linear-gradient(135deg, rgba(99,102,241,0.08), rgba(139,92,246,0.06));
+  transform: translateX(4px);
+  box-shadow: 0 2px 8px rgba(99,102,241,0.15);
+}
+
+.aias-confirm-btn:active {
+  transform: translateX(2px) scale(0.99);
+}
+
+.aias-confirm-btn-icon { font-size: 16px; flex-shrink: 0; }
+
+.aias-confirm-btn-text { flex: 1; line-height: 1.4; }
+
+.aias-confirm-hint {
+  padding: 8px 16px 12px;
+  font-size: 12px;
+  color: var(--text-muted, #64748b);
+  text-align: center;
+}
+
+/* ── 工具链路可视化 ── */
+.aias-tool-chain {
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.aias-tc-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: linear-gradient(135deg, rgba(99,102,241,0.08), rgba(139,92,246,0.06));
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.aias-tc-header .aias-tc-icon {
+  font-size: 16px;
+}
+
+.aias-tc-header .aias-tc-count {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: var(--surface2);
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+.aias-tc-reasoning {
+  padding: 8px 14px;
+  font-size: 12px;
+  color: var(--text-muted);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  font-style: italic;
+  line-height: 1.6;
+}
+
+.aias-tc-reasoning::before {
+  content: '💡 ';
+  font-style: normal;
+}
+
+.aias-tc-steps {
+  padding: 8px 0;
+}
+
+.aias-tc-step {
+  position: relative;
+  padding: 0 14px 0 44px;
+  margin: 0;
+}
+
+.aias-tc-step:not(:last-child)::before {
+  content: '';
+  position: absolute;
+  left: 19px;
+  top: 24px;
+  bottom: -4px;
+  width: 2px;
+  background: var(--border);
+}
+
+.aias-tc-step-num {
+  position: absolute;
+  left: 10px;
+  top: 6px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--surface2);
+  border: 2px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  z-index: 1;
+}
+
+.aias-tc-step.running .aias-tc-step-num {
+  border-color: #6366f1;
+  color: #6366f1;
+  animation: aias-tc-pulse 1.2s ease-in-out infinite;
+}
+
+.aias-tc-step.success .aias-tc-step-num {
+  border-color: #10b981;
+  background: #10b981;
+  color: #fff;
+}
+
+.aias-tc-step.error .aias-tc-step-num {
+  border-color: #ef4444;
+  background: #ef4444;
+  color: #fff;
+}
+
+@keyframes aias-tc-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(99,102,241,0.3); }
+  50% { box-shadow: 0 0 0 6px rgba(99,102,241,0); }
+}
+
+.aias-tc-step-body {
+  padding: 6px 0 10px;
+}
+
+.aias-tc-step-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.aias-tc-step-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main);
+  font-family: 'Consolas', 'Monaco', monospace;
+}
+
+.aias-tc-step-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.aias-tc-step-badge.pending {
+  background: rgba(156,163,175,0.15);
+  color: #9ca3af;
+}
+
+.aias-tc-step-badge.running {
+  background: rgba(99,102,241,0.12);
+  color: #6366f1;
+}
+
+.aias-tc-step-badge.success {
+  background: rgba(16,185,129,0.12);
+  color: #10b981;
+}
+
+.aias-tc-step-badge.error {
+  background: rgba(239,68,68,0.12);
+  color: #ef4444;
+}
+
+.aias-tc-step-duration {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+.aias-tc-step-args {
+  margin-top: 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.aias-tc-step-args summary {
+  padding: 5px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: var(--surface2);
+  user-select: none;
+}
+
+.aias-tc-step-args summary:hover {
+  background: var(--accent-dim, rgba(99,102,241,0.08));
+}
+
+.aias-tc-step-args pre {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  max-height: 280px;
+  overflow: auto;
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 8px 12px;
+  background: var(--surface);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.aias-tc-step-result {
+  margin-top: 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.aias-tc-step-result summary {
+  padding: 5px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: var(--surface2);
+  user-select: none;
+}
+
+.aias-tc-step-result summary:hover {
+  background: var(--accent-dim, rgba(99,102,241,0.08));
+}
+
+.aias-tc-step-result pre {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  max-height: 280px;
+  overflow: auto;
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 8px 12px;
+}
+
+.aias-tc-analyzing {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  background: linear-gradient(135deg, rgba(16,185,129,0.05), rgba(99,102,241,0.05));
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.aias-tc-analyzing .aias-tc-spin {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border);
+  border-top-color: #6366f1;
+  border-radius: 50%;
+  animation: aias-tc-spin 0.8s linear infinite;
+}
+
+@keyframes aias-tc-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* 模板检查进度条（run_template_check） */
+.aias-tc-progress {
+  margin: 8px 0 2px;
+  padding: 8px 10px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.aias-tc-progress-bar {
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+
+.aias-tc-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #6366f1, #06b6d4);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.aias-tc-progress-text {
+  font-size: 12px;
+  color: var(--text-main);
+  line-height: 1.5;
+}
+
+.aias-tc-progress-chapter {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.aias-tc-progress-desc {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+  margin-top: 4px;
+  max-height: 130px;
+  overflow-y: auto;
+  font-family: 'Consolas', 'Courier New', monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ── AI 回复 SQL 一键执行 ── */
+.aias-sql-exec-wrap {
+  margin: 6px 0 12px 0;
+}
+
+.aias-sql-exec-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(76, 175, 80, 0.12);
+  color: #4caf50;
+  border: 1px solid rgba(76, 175, 80, 0.35);
+  border-radius: 6px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.aias-sql-exec-btn:hover {
+  background: rgba(76, 175, 80, 0.22);
+}
+
+.aias-sql-batch-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(99, 102, 241, 0.12);
+  color: #6366f1;
+  border: 1px solid rgba(99, 102, 241, 0.35);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.aias-sql-batch-btn:hover {
+  background: rgba(99, 102, 241, 0.22);
+}
+
+/* AI 修复按钮（执行 SQL 报错后显示） */
+.aias-sql-fix-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 8px;
+  background: rgba(88, 166, 255, 0.12);
+  color: #58a6ff;
+  border: 1px solid rgba(88, 166, 255, 0.35);
+  border-radius: 6px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.aias-sql-fix-btn:hover {
+  background: rgba(88, 166, 255, 0.22);
+}
+
+/* SQL 代码块右上角悬浮复制按钮（浅色底 → 幽灵态：白底片 + 主色图标，悬停填主色） */
+pre.aias-sql-pre { position: relative; }
+
+/* ── 所有围栏代码块都挂 .aias-code-pre（可执行的额外再挂 .aias-sql-pre）──
+   为什么：复制曾经跟"能不能执行"绑在一起 —— 块不是可执行的只读查询时整块退化成裸 <pre>，
+   连复制按钮都没有。DDL（`ALTER DATABASE ...`）/ 运维脚本 / 配置片段全部中招，用户只能手动拖选。
+   复制是纯前端动作、零风险，必须与"可执行"解耦。 */
+pre.aias-code-pre { position: relative; }
+
+.aias-code-pre:hover .aias-pre-copy-btn { opacity: 1; }
+
+.aias-code-pre:hover .aias-pre-restore-btn { opacity: 1; }
+
+.aias-code-pre:hover .aias-pre-restore-btn.is-idle { opacity: 0.34; }
+
+/* ── 数据源版本一览面板 ──
+   回答"当前系统配置了哪些版本的数据源"。版本全部由系统实探（无需手工配置），
+   这里只做展示 + 一个"重新探测"。浮层用 surface-solid，避免深色主题透底叠影。 */
+.aias-ver-modal {
+  position: fixed; inset: 0; z-index: 10100;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.aias-ver-content {
+  width: 620px; max-width: calc(100vw - 40px); max-height: 76vh;
+  display: flex; flex-direction: column;
+  background: var(--surface-solid, #ffffff);
+  color: var(--text-main, #1f2328);
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.14));
+  border-radius: 10px; box-shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
+}
+
+.aias-ver-header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 14px; border-bottom: 1px solid var(--border, rgba(0, 0, 0, 0.1));
+}
+
+.aias-ver-title { font-size: 14px; font-weight: 600; }
+
+.aias-ver-summary {
+  flex: 1 1 auto; min-width: 0; font-size: 12px; color: var(--text-muted, #656d76);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.aias-ver-body { padding: 10px 14px 4px; overflow: auto; }
+
+.aias-ver-hint { font-size: 11.5px; color: var(--text-muted, #656d76); margin-bottom: 8px; line-height: 1.5; }
+
+.aias-ver-row {
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.1));
+  border-left: 3px solid var(--border, rgba(0, 0, 0, 0.12));
+  border-radius: 7px; padding: 7px 9px; margin-bottom: 6px;
+}
+
+.aias-ver-row.is-target { border-left-color: #0969da; background: rgba(88, 166, 255, 0.06); }
+
+.aias-ver-row.is-fail { border-left-color: #d97706; background: rgba(217, 119, 6, 0.07); }
+
+.aias-ver-row-top { display: flex; align-items: center; gap: 7px; }
+
+.aias-ver-name {
+  font-size: 12.5px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.aias-ver-tag {
+  flex: 0 0 auto; font-size: 10.5px; padding: 0 6px; border-radius: 4px;
+  background: rgba(88, 166, 255, 0.14); color: #0969da;
+}
+
+.aias-ver-label {
+  flex: 0 0 auto; font-size: 11.5px; font-weight: 600; color: #0969da;
+  background: rgba(88, 166, 255, 0.10); border: 1px solid rgba(88, 166, 255, 0.28);
+  border-radius: 5px; padding: 0 7px;
+}
+
+.aias-ver-row.is-fail .aias-ver-label { color: #b45309; background: rgba(217, 119, 6, 0.10); border-color: rgba(217, 119, 6, 0.32); }
+
+.aias-ver-ver {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+  color: var(--text-muted, #656d76); margin-top: 3px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.aias-ver-meta { font-size: 10.5px; color: var(--text-muted, #656d76); margin-top: 2px; }
+
+.aias-ver-err { font-size: 11px; color: #b45309; margin-top: 3px; }
+
+.aias-ver-foot {
+  display: flex; justify-content: flex-end; gap: 8px;
+  padding: 10px 14px; border-top: 1px solid var(--border, rgba(0, 0, 0, 0.1));
+}
+
+.aias-ver-foot button {
+  padding: 5px 12px; font-size: 12px; cursor: pointer; border-radius: 6px;
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.15));
+  background: var(--surface2, rgba(0, 0, 0, 0.05)); color: var(--text-main, #1f2328);
+}
+
+.aias-ver-foot button:hover { background: rgba(88, 166, 255, 0.16); }
+
+.aias-ver-foot button[disabled] { opacity: 0.5; cursor: not-allowed; }
+
+/* 「0 行 + 语句里还有占位符」的归因提示：避免把"占位符没换"误当成"库里没数据" */
+.aias-zero-row-hint {
+  margin-top: 6px; padding: 6px 9px; border-radius: 6px;
+  font-size: 11.5px; line-height: 1.55; color: #b45309;
+  background: rgba(217, 119, 6, 0.10);
+  border: 1px solid rgba(217, 119, 6, 0.35);
+}
+
+.aias-zero-row-hint code {
+  background: rgba(217, 119, 6, 0.14); border-radius: 4px; padding: 0 5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* 非执行块的「含占位符」提示（没有执行按钮可依附时，挂在代码块下方） */
+.aias-slot-left-hint.is-below { display: block; width: fit-content; margin: 2px 0 8px; }
+
+/* ── 执行前「方言预检」警示条 ──
+   目标库版本不支持这条 SQL 里的语法（如 11g 遇到 FETCH FIRST）时，
+   在代码块**上方**先给结论 + 确定性的一键改写入口，避免"执行→报错→AI 修复"来回折腾 */
+.aias-dialect-warn {
+  margin: 8px 0 6px; padding: 8px 10px; border-radius: 7px;
+  font-size: 12px; line-height: 1.55;
+  color: #b45309;
+  background: rgba(217, 119, 6, 0.10);
+  border: 1px solid rgba(217, 119, 6, 0.38);
+}
+
+.aias-dialect-head { font-weight: 600; }
+
+.aias-dialect-body { margin-top: 3px; color: var(--text-main, #1f2328); }
+
+.aias-dialect-alt { margin-top: 4px; color: var(--text-muted, #656d76); font-size: 11px; }
+
+.aias-dialect-alt code {
+  background: rgba(88, 166, 255, 0.12); color: #0969da;
+  padding: 1px 5px; border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap; word-break: break-all;
+}
+
+.aias-dialect-actions { display: flex; gap: 6px; margin-top: 7px; }
+
+.aias-dialect-actions button {
+  padding: 3px 10px; font-size: 11px; cursor: pointer; border-radius: 5px;
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.15));
+  background: var(--surface2, rgba(0, 0, 0, 0.05));
+  color: var(--text-main, #1f2328);
+}
+
+.aias-dialect-actions button:hover { background: rgba(88, 166, 255, 0.16); }
+
+/* 「一键改写」是主操作 → 绿色；用更高特异性覆盖上面的默认样式（不用 !important） */
+.aias-dialect-actions button.aias-dialect-fix {
+  background: rgba(76, 175, 80, 0.14); color: #2e7d32;
+  border-color: rgba(76, 175, 80, 0.42);
+}
+
+.aias-dialect-actions button.aias-dialect-fix:hover { background: rgba(76, 175, 80, 0.24); }
+
+.aias-dialect-actions button.aias-dialect-fix[disabled] { opacity: 0.5; cursor: not-allowed; }
+
+.aias-pre-copy-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.88);
+  color: #58a6ff;
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.12));
+  border-radius: 6px;
+  cursor: pointer;
+  /* 常驻可见（弱化）—— 与 .sql-pre-copy-btn / .aias-tc-copy-btn 保持一致。
+     曾是 opacity:0 + 悬停浮现，实测用户完全发现不了按钮。 */
+  opacity: 0.62;
+  transition: all 0.2s;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+}
+
+.aias-sql-pre:hover .aias-pre-copy-btn { opacity: 1; }
+
+.aias-pre-copy-btn:hover {
+  background: #58a6ff;
+  color: #fff;
+  opacity: 1;
+}
+
+.aias-pre-copy-btn.copied {
+  opacity: 1;
+  color: #4caf50;
+  background: rgba(255, 255, 255, 0.95);
+  border-color: rgba(76, 175, 80, 0.45);
+}
+
+/* ── 「恢复原始 SQL」按钮（复制按钮左侧，同一套幽灵态样式）──
+   做替换做废了不用去菜单里找，直接在 SQL 框右上角一键还原。 */
+.aias-pre-restore-btn {
+  position: absolute;
+  top: 8px;
+  right: 42px;              /* 复制按钮 28px + 间距 6px */
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.88);
+  color: #d97706;
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.12));
+  border-radius: 6px;
+  cursor: pointer;
+  opacity: 0.62;
+  transition: all 0.2s;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+}
+
+.aias-sql-pre:hover .aias-pre-restore-btn { opacity: 1; }
+
+.aias-pre-restore-btn:hover {
+  background: #d97706;
+  color: #fff;
+  opacity: 1;
+}
+
+/* 没有可恢复的替换 → 弱化并禁用（避免"点了没反应"的困惑） */
+.aias-pre-restore-btn.is-idle {
+  opacity: 0.3;
+  cursor: not-allowed;
+  color: var(--text-muted, #8b949e);
+}
+
+.aias-sql-pre:hover .aias-pre-restore-btn.is-idle { opacity: 0.34; }
+
+.aias-pre-restore-btn.is-idle:hover {
+  background: rgba(255, 255, 255, 0.88);
+  color: var(--text-muted, #8b949e);
+}
+
+.aias-pre-restore-btn.done {
+  opacity: 1;
+  color: #4caf50;
+  background: rgba(255, 255, 255, 0.95);
+  border-color: rgba(76, 175, 80, 0.45);
+}
+
+.aias-pre-restore-btn .ic-check { display: none; }
+
+.aias-pre-restore-btn.done .ic-restore { display: none; }
+
+.aias-pre-restore-btn.done .ic-check { display: block; }
+
+.aias-pre-copy-btn .ic-check { display: none; }
+
+.aias-pre-copy-btn.copied .ic-copy { display: none; }
+
+.aias-pre-copy-btn.copied .ic-check { display: block; }
+
+/* 工具链 / 结果框内的复制按钮（右上角，常驻可见弱化 + 悬停提亮）
+   配色必须随主题自适应：结果框底色深色主题是 rgba(255,255,255,0.08)（深底），
+   浅色主题是 rgba(255,255,255,0.85)（浅底）——写死单一配色会让某一种主题下按钮彻底看不见。 */
+.aias-tc-sql { position: relative; }
+
+.aias-tc-copy-btn {
+  --cc-bg:        rgba(255, 255, 255, 0.14);
+  --cc-bg-hover:  rgba(255, 255, 255, 0.28);
+  --cc-fg:        #cdd6f4;
+  --cc-fg-hover:  #ffffff;
+  --cc-border:    rgba(255, 255, 255, 0.28);
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--cc-bg);
+  color: var(--cc-fg);
+  border: 1px solid var(--cc-border);
+  border-radius: 6px;
+  cursor: pointer;
+  /* 常驻可见（弱化）—— 曾 opacity:0 + 悬停浮现，实测用户完全发现不了复制按钮 */
+  opacity: 0.6;
+  transition: all 0.2s;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.10);
+}
+
+[data-theme="light"] .aias-tc-copy-btn {
+  --cc-bg:       rgba(255, 255, 255, 0.95);
+  --cc-bg-hover: #0969da;
+  --cc-fg:       #0969da;
+  --cc-fg-hover: #ffffff;
+  --cc-border:   rgba(30, 58, 95, 0.18);
+}
+
+/* 深底上承载 pre 的宿主（工具链「执行结果」框等） */
+.aias-pre-host { position: relative; }
+
+.aias-tc-sql:hover .aias-tc-copy-btn,
+.aias-pre-host:hover .aias-tc-copy-btn { opacity: 1; }
+
+.aias-tc-copy-btn:hover { background: var(--cc-bg-hover); color: var(--cc-fg-hover); opacity: 1; }
+
+.aias-tc-copy-btn .ic-check { display: none; }
+
+.aias-tc-copy-btn.copied {
+  color: #4caf50;
+  border-color: rgba(76, 175, 80, 0.5);
+  opacity: 1;
+}
+
+.aias-tc-copy-btn.copied .ic-copy { display: none; }
+
+.aias-tc-copy-btn.copied .ic-check { display: block; }
+
+/* 关键结果框操作条：复制结果 + 基于结果继续追问
+   设计约定：**常驻可见**（曾用 opacity:0 + 悬停浮现，实测用户完全发现不了按钮 →
+   等于功能不存在）。默认弱化显示（低对比，不干扰阅读），悬停整块结果时提亮。 */
+.aias-result-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-tertiary, rgba(0, 0, 0, 0.10));
+  opacity: 1;
+}
+
+.aias-result-btn {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(88, 166, 255, 0.08);
+  color: #58a6ff;
+  border: 1px solid rgba(88, 166, 255, 0.28);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+  opacity: 0.62;
+}
+
+.aias-msg-text:hover .aias-result-btn,
+.aias-result-actions:hover .aias-result-btn { opacity: 1; }
+
+.aias-result-btn:hover { background: rgba(88, 166, 255, 0.20); }
+
+.aias-result-btn .ic-check { display: none; }
+
+.aias-result-btn.copied {
+  color: #4caf50;
+  border-color: rgba(76, 175, 80, 0.45);
+  background: rgba(76, 175, 80, 0.12);
+}
+
+.aias-result-btn.copied .ic-copy { display: none; }
+
+.aias-result-btn.copied .ic-check { display: block; }
+
+.aias-followup-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: 100%;
+  margin-top: 4px;
+}
+
+.aias-followup-chip {
+  max-width: 100%;
+  text-align: left;
+  background: var(--surface2, #f5f7fa);
+  color: var(--text, #2c2c2a);
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.12));
+  border-radius: 14px;
+  padding: 5px 12px;
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.aias-followup-chip:hover {
+  background: rgba(88, 166, 255, 0.12);
+  border-color: rgba(88, 166, 255, 0.45);
+  color: #185fa5;
+}
+
+.aias-followup-loading { font-size: 12px; color: var(--text-secondary, #888780); }
+
+.aias-sql-fix-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.aias-sql-fix-note {
+  color: #58a6ff;
+  font-size: 12px;
+  margin-bottom: 6px;
+  padding: 5px 10px;
+  background: rgba(88, 166, 255, 0.08);
+  border-radius: 6px;
+}
+
+.aias-sql-result {
+  margin-top: 6px;
+}
+
+.aias-sql-result-loading {
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 6px 0;
+}
+
+.aias-sql-result-ok {
+  color: #4caf50;
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+
+.aias-sql-override-tag {
+  margin: 4px 0 8px;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: #d97706;
+  background: rgba(217, 119, 6, 0.10);
+  border: 1px solid rgba(217, 119, 6, 0.30);
+  border-radius: 5px;
+  display: block;
+}
+
+.aias-sql-rewrite-tag {
+  margin: 4px 0 8px;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: #2563eb;
+  background: rgba(37, 99, 235, 0.08);
+  border: 1px solid rgba(37, 99, 235, 0.28);
+  border-radius: 5px;
+  display: block;
+}
+
+/* 批量执行汇总对比表 */
+.aias-batch-summary { margin: 6px 0 8px; padding: 6px 10px; font-size: 12px; border-radius: 5px; }
+
+.aias-batch-summary { color: #4caf50; background: rgba(76, 175, 80, 0.10); }
+
+.aias-batch-summary.has-err { color: #d97706; background: rgba(217, 119, 6, 0.10); }
+
+.aias-batch-table { border-collapse: collapse; width: 100%; font-size: 11px; margin-top: 4px; }
+
+.aias-batch-table th { background: var(--surface-solid, #f5f7fa); text-align: left; padding: 6px 8px; border: 1px solid var(--border, #e5e5e5); font-weight: 600; position: sticky; top: 0; z-index: 1; }
+
+.aias-batch-table td { padding: 6px 8px; border: 1px solid var(--border, #eef0f3); }
+
+.aias-batch-table tr.is-err td { color: #c62828; background: rgba(244, 67, 54, 0.05); }
+
+.aias-batch-ds { font-weight: 600; }
+
+.aias-batch-detail { font-size: 11px; padding: 2px 8px; border: 0.5px solid var(--accent, #6366f1); color: var(--accent, #6366f1); background: transparent; border-radius: 999px; cursor: pointer; }
+
+.aias-batch-detail:hover { background: rgba(99, 102, 241, 0.1); }
+
+.aias-batch-stop { display: inline-block; margin: 8px 0 4px; padding: 4px 10px; font-size: 11px; border: 0.5px solid #d97706; color: #d97706; background: transparent; border-radius: 999px; cursor: pointer; }
+
+.aias-batch-status { font-size: 11px; color: var(--text-secondary, #888); margin-top: 6px; }
+
+.aias-batch-detail-panels { margin-top: 8px; }
+
+.aias-batch-detail-panel { margin: 6px 0; padding: 8px 10px; border: 0.5px solid var(--border, #e5e5e5); border-radius: 6px; background: var(--surface, #fff); }
+
+.aias-batch-detail-head { font-size: 12px; font-weight: 600; margin-bottom: 6px; }
+
+.aias-batch-mini-table-wrap { max-height: 220px; overflow: auto; }
+
+.aias-batch-stmt { font-size: 11px; line-height: 1.7; color: var(--text, #333); word-break: break-all; }
+
+.aias-batch-err { font-size: 11px; color: #c62828; }
+
+.aias-sql-var-hint {
+  color: var(--accent);
+  font-size: 12px;
+  margin-bottom: 6px;
+  padding: 5px 10px;
+  background: rgba(76, 175, 80, 0.08);
+  border-radius: 6px;
+}
+
+.aias-sql-var-hint code {
+  background: rgba(76, 175, 80, 0.15);
+  color: var(--accent);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+/* ── SQL 占位符右键替换菜单 ──
+   在 SQL 框上点右键弹出；配色随主题（浅色主题下用实色浅底，避免透底叠影） */
+.aias-slot-menu {
+  position: fixed;
+  z-index: 10060;
+  width: 380px;
+  max-width: calc(100vw - 24px);
+  max-height: min(74vh, 560px);
+  display: flex; flex-direction: column;
+  background: var(--surface-solid, #ffffff);
+  color: var(--text-main, #1f2328);
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.14));
+  border-radius: 10px;
+  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.30);
+  padding: 8px;
+  font-size: 12px;
+}
+
+.aias-slot-menu-head {
+  display: flex; align-items: center; gap: 6px; flex: 0 0 auto;
+  font-weight: 600; margin-bottom: 6px; color: var(--text-main, #1f2328);
+  white-space: nowrap;            /* 标题不折行（"SQL 占位符"被挤成两行很难看） */
+}
+
+.aias-slot-menu-head .aias-slot-count {
+  font-weight: 400; color: var(--text-muted, #656d76);
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* 工具条：全部用推荐值 / 全部撤销 / 撤销快捷键 —— 图标按钮、幽灵态、常驻可见
+   （不要用「图标 + 文字」的长条按钮：槽位一多菜单就被撑爆，这正是之前"很难用"的主因） */
+.aias-slot-tools { display: flex; align-items: center; gap: 5px; flex: 0 0 auto; margin-bottom: 6px; }
+
+.aias-slot-tools .aias-slot-tools-gap { flex: 1 1 auto; }
+
+/* 通用图标按钮（AI 助手内的紧凑操作：占位符菜单 / 多语句拆分头栏共用）
+   纯内联 SVG + tooltip + aria-label，幽灵态、常驻可见 —— 不用"图标+文字"长条按钮 */
+.aias-ibtn {
+  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; padding: 0; cursor: pointer; border-radius: 5px;
+  background: var(--surface2, rgba(0, 0, 0, 0.05));
+  color: var(--text-muted, #656d76);
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.15));
+}
+
+.aias-ibtn:hover { background: rgba(88, 166, 255, 0.16); color: #0969da; border-color: rgba(88, 166, 255, 0.45); }
+
+.aias-ibtn.danger:hover { background: rgba(217, 119, 6, 0.16); color: #b45309; border-color: rgba(217, 119, 6, 0.40); }
+
+.aias-ibtn.ok { color: #2e7d32; border-color: rgba(76, 175, 80, 0.42); background: rgba(76, 175, 80, 0.12); }
+
+.aias-ibtn.ok:hover { background: rgba(76, 175, 80, 0.22); color: #2e7d32; border-color: rgba(76, 175, 80, 0.55); }
+
+.aias-ibtn[disabled] { opacity: 0.34; cursor: not-allowed; }
+
+.aias-ibtn[disabled]:hover {
+  background: var(--surface2, rgba(0, 0, 0, 0.05));
+  color: var(--text-muted, #656d76); border-color: var(--border, rgba(0, 0, 0, 0.15));
+}
+
+/* 列表区：整块**唯一**可滚动的区域 —— 头部/提示/底部按钮始终留在视野里 */
+.aias-slot-list { flex: 1 1 auto; overflow: auto; margin: 0 -2px; padding: 0 2px; }
+
+.aias-slot-row {
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.10));
+  border-left: 3px solid var(--border, rgba(0, 0, 0, 0.12));
+  border-radius: 7px; padding: 5px 7px; margin-bottom: 5px;
+}
+
+.aias-slot-row:last-child { margin-bottom: 0; }
+
+.aias-slot-row.is-done { border-left-color: #2e7d32; background: rgba(76, 175, 80, 0.07); }
+
+.aias-slot-rowtop { display: flex; align-items: center; gap: 6px; }
+
+.aias-slot-idx {
+  flex: 0 0 auto; min-width: 15px; height: 15px; line-height: 15px; text-align: center;
+  border-radius: 4px; font-size: 10px; font-weight: 600;
+  background: rgba(88, 166, 255, 0.14); color: #0969da;
+}
+
+.aias-slot-row.is-done .aias-slot-idx { background: rgba(76, 175, 80, 0.18); color: #2e7d32; }
+
+.aias-slot-raw {
+  display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1 1 auto;
+}
+
+.aias-slot-raw code {
+  background: rgba(88, 166, 255, 0.14); color: #0969da;
+  padding: 1px 6px; border-radius: 4px; font-size: 11px;
+  max-width: 168px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.aias-slot-role {
+  color: var(--text-muted, #656d76); font-size: 10.5px;
+  max-width: 132px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.aias-slot-sug {
+  display: flex; align-items: center; gap: 6px; margin-top: 4px;
+}
+
+.aias-slot-sug button {
+  flex: 0 0 auto; padding: 2px 7px; cursor: pointer; font-size: 11px;
+  background: rgba(88, 166, 255, 0.10); color: #0969da;
+  border: 1px solid rgba(88, 166, 255, 0.35); border-radius: 5px;
+  max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.aias-slot-sug button:hover { background: #0969da; color: #fff; }
+
+.aias-slot-search {
+  width: 100%; box-sizing: border-box; padding: 5px 7px; margin-bottom: 5px;
+  background: var(--surface2, rgba(0, 0, 0, 0.04));
+  color: var(--text-main, #1f2328);
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.15));
+  border-radius: 5px; font-size: 12px; outline: none;
+}
+
+.aias-slot-search:focus { border-color: #0969da; }
+
+/* ── 就地手工录入（右键后直接打字，不必先点"选择值"）── */
+.aias-slot-entry {
+  display: flex; align-items: center; gap: 4px; margin-top: 5px;
+}
+
+.aias-slot-entry-input {
+  flex: 1 1 auto; min-width: 0; box-sizing: border-box; height: 26px; padding: 0 7px;
+  background: var(--surface2, rgba(0, 0, 0, 0.04));
+  color: var(--text-main, #1f2328);
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.18));
+  border-radius: 5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+  outline: none;
+}
+
+.aias-slot-entry-input:focus { border-color: #0969da; background: rgba(88, 166, 255, 0.06); }
+
+.aias-slot-entry-input.is-bad { border-color: #d97706; }
+
+/* 插入方式开关（图标按钮，配合 .aias-slot-ibtn 使用）：
+   字面量 = 自动加引号并转义；原样 = 一个字符都不改（表达式 / 多值 / 已带引号） */
+.aias-slot-mode.raw { color: #b45309; border-color: rgba(217, 119, 6, 0.40); background: rgba(217, 119, 6, 0.12); }
+
+/* 插入预览：让用户看到"到底会插进去什么"，避免引号惊喜 */
+.aias-slot-preview {
+  margin-top: 3px; font-size: 10.5px; color: var(--text-muted, #656d76);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.aias-slot-preview b { color: #0969da; font-weight: 600; }
+
+.aias-slot-cands { max-height: 240px; overflow: auto; }
+
+/* 槽位元信息行（列名等）：一行、超长省略，不占视觉重量 */
+.aias-slot-meta {
+  margin-top: 3px; font-size: 10px; color: var(--text-muted, #656d76);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* 快捷键提示：常驻在底部，让"回车/方向键/Ctrl+Z"可被发现 */
+.aias-slot-keys { font-size: 10px; color: var(--text-muted, #656d76); margin-left: auto; }
+
+.aias-slot-cand {
+  padding: 4px 7px; border-radius: 5px; cursor: pointer;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  display: flex; align-items: center; gap: 8px;
+}
+
+.aias-slot-cand:hover { background: rgba(88, 166, 255, 0.16); }
+
+/* 候选的说明（时间预设的"近 24 小时"这类）；值本身才是可粘贴的内容 */
+.aias-slot-cand-label {
+  flex: 0 0 auto; color: var(--text-muted, #656d76); font-size: 10.5px;
+  background: rgba(88, 166, 255, 0.10); border-radius: 4px; padding: 0 5px;
+}
+
+.aias-slot-cand-val { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
+
+/* 字段值校验结果：填错时当场提示，而不是等执行出 0 行再猜 */
+.aias-slot-verify {
+  font-size: 11px; line-height: 1.5; padding: 5px 7px; margin: 4px 0;
+  border-radius: 5px; color: var(--text-main, #1f2328);
+  background: rgba(88, 166, 255, 0.10);
+  border: 1px solid rgba(88, 166, 255, 0.30);
+}
+
+.aias-slot-verify.warn {
+  color: #b45309; background: rgba(217, 119, 6, 0.10);
+  border-color: rgba(217, 119, 6, 0.35);
+}
+
+.aias-slot-verify-picks {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 5px;
+  margin-top: 5px; font-size: 11px; color: var(--text-muted, #656d76);
+}
+
+.aias-slot-verify-picks button {
+  padding: 2px 7px; font-size: 11px; cursor: pointer; border-radius: 5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: rgba(88, 166, 255, 0.10); color: #0969da;
+  border: 1px solid rgba(88, 166, 255, 0.35);
+  max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.aias-slot-verify-picks button:hover { background: #0969da; color: #fff; }
+
+.aias-slot-hint { color: var(--text-muted, #656d76); font-size: 11px; padding: 4px 2px; }
+
+.aias-slot-err { color: #ef4444; font-size: 11px; padding: 4px 2px; }
+
+.aias-slot-actions { display: flex; gap: 6px; margin-top: 7px; }
+
+.aias-slot-actions button {
+  padding: 4px 10px; font-size: 11px; cursor: pointer; border-radius: 5px;
+  background: var(--surface2, rgba(0, 0, 0, 0.05));
+  color: var(--text-main, #1f2328);
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.15));
+}
+
+.aias-slot-actions button:hover { background: rgba(88, 166, 255, 0.16); }
+
+/* 提示：SQL 框有未替换占位符时，执行按钮旁给个可见提示 */
+.aias-slot-left-hint {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; color: #d97706; margin-left: 8px;
+  background: rgba(217, 119, 6, 0.12);
+  border: 1px solid rgba(217, 119, 6, 0.35);
+  border-radius: 5px; padding: 2px 7px; cursor: pointer;
+}
+
+.aias-slot-left-hint:hover { background: rgba(217, 119, 6, 0.22); }
+
+/* 已替换的值：绿色高亮（就地替换后便于核对） */
+mark.aias-slot-filled {
+  background: rgba(76, 175, 80, 0.22);
+  color: inherit; padding: 0 1px; border-radius: 3px;
+}
+
+/* ── 多语句执行结果（一个框里多条语句，逐条分块展示）── */
+.aias-sql-multi-summary {
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  margin-bottom: 8px;
+  color: #4caf50;
+  background: rgba(76, 175, 80, 0.08);
+}
+
+.aias-sql-multi-summary.has-err {
+  color: #d97706;
+  background: rgba(217, 119, 6, 0.10);
+}
+
+.aias-sql-stmt-block {
+  border: 1px solid var(--border);
+  border-left: 3px solid rgba(76, 175, 80, 0.55);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+
+.aias-sql-stmt-block.err { border-left-color: rgba(239, 68, 68, 0.6); }
+
+.aias-sql-stmt-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.aias-sql-stmt-no { font-size: 12px; font-weight: 600; color: var(--text-main); }
+
+.aias-sql-stmt-badge { font-size: 11px; color: #4caf50; }
+
+.aias-sql-stmt-block.err .aias-sql-stmt-badge { color: #ef4444; }
+
+.aias-sql-stmt-ms { font-size: 11px; color: var(--text-muted); margin-left: auto; }
+
+.aias-sql-stmt-sql {
+  font-size: 11px;
+  line-height: 1.45;
+  background: var(--surface2, rgba(0, 0, 0, 0.04));
+  border-radius: 4px;
+  padding: 6px 8px;
+  margin: 0 0 6px 0;
+  max-height: 140px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ── 多语句「语句级拆分」：一个框里多条语句时，把每条拆成独立子块 ──
+   为什么必须拆：批量执行是"遇错即停"，第 2 条失败后想改好再跑，
+   若不拆就得把已经跑过的第 1 条（可能很重）再跑一遍 —— 对生产库这是不可接受的。
+   拆分口径与执行口径**共用后端同一个拆分器**，看到的条数 == 会执行的条数。 */
+.aias-sql-split {
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.12));
+  border-radius: 8px;
+  padding: 8px;
+  margin: 6px 0 12px 0;
+  background: var(--surface2, rgba(0, 0, 0, 0.02));
+}
+
+.aias-sql-split-head {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  margin-bottom: 7px; font-size: 12px;
+}
+
+.aias-sql-split-title { font-weight: 600; color: var(--text-main, #1f2328); }
+
+.aias-sql-split-note { flex: 1 1 auto; min-width: 0; color: var(--text-muted, #656d76); font-size: 11px; }
+
+.aias-dialect-badge {
+  flex: 0 0 auto; height: 18px; line-height: 18px; padding: 0 8px; margin: 0 4px;
+  border-radius: 999px; font-size: 11px; white-space: nowrap;
+  background: rgba(88, 166, 255, 0.12); color: #0969da;
+}
+
+.aias-dialect-badge.is-unknown { background: rgba(246, 160, 0, 0.16); color: #9a6700; }
+
+.aias-dialect-badge.is-loading { opacity: .68; }
+
+.aias-row-limit {
+  flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px;
+  margin: 0 4px; font-size: 11px; color: var(--text-muted, #656d76); white-space: nowrap;
+}
+
+.aias-row-limit input[type="number"] {
+  width: 58px; height: 20px; padding: 1px 4px; box-sizing: border-box;
+  border: 0.5px solid var(--border, #ccc); border-radius: 5px;
+  font-size: 11px; color: var(--text, #333); background: var(--surface, #fff);
+}
+
+.aias-row-limit input[type="number"]:focus { outline: none; border-color: var(--primary, #3b82f6); }
+
+.aias-sql-exec-wrap .aias-row-limit { margin: 0 8px 0 4px; }
+
+/* 全局行数上限（输入框上方胶囊旁）：推到胶囊栏最右，全会话共用 */
+.aias-ds-capsule-bar .aias-global-row-limit { margin-left: auto; margin-right: 0; }
+
+.aias-sql-split-item { display: flex; gap: 7px; margin-bottom: 9px; }
+
+.aias-sql-split-item:last-child { margin-bottom: 0; }
+
+.aias-sql-split-no {
+  flex: 0 0 auto; width: 17px; height: 17px; line-height: 17px; text-align: center;
+  border-radius: 4px; font-size: 10.5px; font-weight: 600; margin-top: 3px;
+  background: rgba(88, 166, 255, 0.14); color: #0969da;
+}
+
+.aias-sql-split-body { flex: 1 1 auto; min-width: 0; }
+
+.aias-sql-split-body pre.aias-sql-pre { margin: 0; }
+
+.aias-sql-split-body .aias-sql-exec-wrap { margin: 6px 0 0 0; }
+
+.aias-sql-split-item.is-static .aias-sql-split-no { background: rgba(0, 0, 0, 0.06); color: var(--text-muted, #656d76); }
+
+.aias-sql-split-item.is-static pre.aias-code-pre { margin: 0; opacity: .9; }
+
+.aias-sql-static-tip {
+  font-size: 11px; color: var(--text-muted, #656d76);
+  margin: 4px 0 0; padding-left: 2px;
+}
+
+.aias-sql-result-error {
+  color: #ef4444;
+  font-size: 12px;
+  padding: 6px 10px;
+  background: rgba(239, 68, 68, 0.08);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.aias-sql-result-table-wrap {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 6px 6px;
+  margin-top: 6px;
+}
+
+.aias-repair-box {
+  margin-top: 6px; padding: 8px 10px;
+  background: rgba(59, 130, 246, 0.06);
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  border-radius: 6px;
+  font-size: 12px; line-height: 1.7;
+  word-break: break-all;
+}
+
+.aias-repair-box code {
+  background: rgba(59, 130, 246, 0.12); color: #1d4ed8;
+  border-radius: 4px; padding: 1px 4px; font-size: 11px;
+}
+
+.aias-repair-obj { margin-bottom: 4px; }
+
+.aias-repair-cols {
+  margin-top: 2px; color: var(--text-muted, #656d76);
+  max-height: 96px; overflow: auto; white-space: normal;
+}
+
+.aias-repair-sug { margin-top: 4px; color: #047857; }
+
+.aias-repair-tip { margin-top: 4px; color: var(--text-muted, #656d76); font-size: 11px; }
+
+.aias-sql-result-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+}
+
+.aias-sql-result-table th {
+  /* 保留原绿色表头，但改为不透明实底（color-mix 混合绿色与表面色），
+     避免滚动时数据透过半透明表头形成重影 */
+  background: color-mix(in srgb, var(--accent, #2ea043) 16%, var(--surface-solid));
+  color: var(--text-primary);
+  padding: 6px 10px;
+  text-align: left;
+  font-weight: 600;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  white-space: nowrap;
+}
+
+.aias-sql-result-table td {
+  padding: 5px 10px;
+  border-top: 1px solid var(--border);
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+/* 结果表格工具条（列/行数 + 最大化按钮） */
+.aias-sql-result-maxbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.aias-sql-result-maxtip {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.aias-sql-result-maxbtn {
+  font-size: 11px;
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface2);
+  color: var(--text);
+  cursor: pointer;
+  transition: background .15s ease;
+  white-space: nowrap;
+}
+
+.aias-sql-result-maxbtn:hover {
+  background: color-mix(in srgb, var(--accent2, #388bfd) 15%, var(--surface-solid));
+  border-color: var(--accent2);
+}
+
+/* 结果表格滚动容器：限高 + 横向/纵向滚动（最大化前的默认形态） */
+.aias-sql-result-table-scroll {
+  max-height: 260px;
+  overflow: auto;
+}
+
+/* ── 最大化全屏遮罩 ── */
+.aias-result-max-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 99999;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg, #0f172a);
+  animation: aiasMaxFade .15s ease;
+}
+
+@keyframes aiasMaxFade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.aias-result-max-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  background: var(--surface-solid, #141b2d);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.aias-result-max-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.aias-result-max-close {
+  font-size: 12px;
+  padding: 4px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all .15s ease;
+}
+
+.aias-result-max-close:hover {
+  color: var(--danger, #f85149);
+  border-color: var(--danger, #f85149);
+  background: rgba(248, 81, 73, 0.08);
+}
+
+/* 分栏时的「明细位置」切换：靠右贴着关闭按钮，accent 色提示这是个布局控件 */
+.aias-split-toggle {
+  margin-left: auto;
+  margin-right: 10px;
+  font-size: 12px;
+  padding: 4px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--accent);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all .15s ease;
+}
+
+.aias-split-toggle:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.aias-result-max-body {
+  flex: 1;
+  overflow: auto;
+  padding: 16px 20px;
+}
+
+.aias-result-max-body .aias-sql-result-table {
+  font-size: 12.5px;
+}
+
+.aias-result-max-body .aias-sql-result-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: color-mix(in srgb, var(--accent, #2ea043) 16%, var(--surface-solid));
+}
+
+.aias-result-max-body .aias-sql-result-table td,
+.aias-result-max-body .aias-sql-result-table th {
+  padding: 7px 12px;
+  white-space: nowrap;
+}
+
+.aias-sql-null {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* ── 数据源选择弹窗 ── */
+.aias-ds-modal {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 99999;
+}
+
+.aias-ds-modal-content {
+  background: var(--bg-primary, #fff);
+  border-radius: 12px;
+  width: 420px;
+  max-width: 90vw;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.2);
+  overflow: hidden;
+}
+
+.aias-ds-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.aias-ds-modal-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.aias-ds-modal-close {
+  background: none;
+  border: none;
+  font-size: 16px;
+  cursor: pointer;
+  color: var(--text-muted);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.aias-ds-modal-close:hover {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.aias-ds-modal-body {
+  padding: 10px;
+  overflow-y: auto;
+  max-height: 50vh;
+}
+
+.aias-ds-item {
+  padding: 10px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s;
+  margin-bottom: 4px;
+}
+
+.aias-ds-item:hover {
+  background: rgba(76, 175, 80, 0.1);
+}
+
+.aias-ds-item-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+/* 多选批量执行弹窗 */
+.aias-ds-multi-note { padding: 8px 18px 0; font-size: 11px; color: var(--text-secondary, #888); line-height: 1.6; }
+
+.aias-ds-multi-note b { color: var(--accent, #6366f1); }
+
+.aias-ds-multi-group { margin-bottom: 6px; }
+
+.aias-ds-multi-grouphead { display: flex; align-items: center; justify-content: space-between; padding: 4px 2px; }
+
+.aias-ds-multi-type { font-size: 12px; font-weight: 600; color: var(--text-primary, #333); }
+
+.aias-ds-multi-selectall { font-size: 11px; padding: 2px 8px; border: 0.5px solid var(--accent, #6366f1); color: var(--accent, #6366f1); background: transparent; border-radius: 999px; cursor: pointer; }
+
+.aias-ds-multi-selectall:hover:not(:disabled) { background: rgba(99, 102, 241, 0.1); }
+
+.aias-ds-multi-selectall:disabled { opacity: 0.35; cursor: not-allowed; }
+
+.aias-ds-multi-item { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 7px; cursor: pointer; margin-bottom: 2px; transition: background 0.15s; }
+
+.aias-ds-multi-item:hover { background: rgba(76, 175, 80, 0.08); }
+
+.aias-ds-multi-item.is-on { background: rgba(76, 175, 80, 0.12); }
+
+.aias-ds-multi-item.is-off { opacity: 0.45; cursor: not-allowed; }
+
+.aias-ds-multi-item input { accent-color: #4caf50; }
+
+.aias-ds-multi-item-name { font-size: 13px; font-weight: 500; color: var(--text-primary, #333); }
+
+.aias-ds-multi-item-meta { font-size: 11px; color: var(--text-secondary, #888); margin-left: auto; white-space: nowrap; }
+
+.aias-ds-multi-foot { display: flex; align-items: center; gap: 8px; justify-content: flex-end; padding: 10px 18px; border-top: 1px solid var(--border, #e5e5e5); }
+
+.aias-ds-multi-count { font-size: 12px; color: var(--text-secondary, #888); margin-right: auto; }
+
+.aias-ds-multi-cancel { padding: 5px 12px; font-size: 12px; border: 0.5px solid var(--border, #e5e5e5); background: transparent; border-radius: 6px; cursor: pointer; color: var(--text-secondary, #888); }
+
+.aias-ds-multi-cancel:hover { background: rgba(0,0,0,0.05); }
+
+.aias-ds-multi-ok { padding: 5px 14px; font-size: 12px; font-weight: 600; border: none; background: var(--accent, #6366f1); color: #fff; border-radius: 6px; cursor: pointer; }
+
+.aias-ds-multi-ok:hover { opacity: 0.9; }
+
+.aias-ds-item-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.aias-ds-empty {
+  text-align: center;
+  color: var(--text-muted);
+  padding: 20px;
+  font-size: 13px;
+}
+
+/* 巡检任务跟踪链接 */
+.aias-tc-task-link {
+  margin-top: 6px;
+}
+
+.aias-task-track-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.aias-task-track-btn:hover {
+  opacity: 0.85;
+}
+
+/* 巡检任务跟踪弹窗 */
+.aias-task-track-modal {
+  display: none;
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.5);
+  z-index: 10000;
+  align-items: center;
+  justify-content: center;
+}
+
+.aias-tt-content {
+  background: var(--bg, #fff);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+  width: 600px;
+  max-width: 90vw;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.aias-tt-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border, #e5e7eb);
+  background: var(--surface2, #f3f4f6);
+}
+
+.aias-tt-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-main, #1f2937);
+}
+
+.aias-tt-close {
+  background: none;
+  border: none;
+  font-size: 18px;
+  cursor: pointer;
+  color: var(--text-muted, #6b7280);
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+.aias-tt-close:hover {
+  background: var(--surface, #f9fafb);
+}
+
+.aias-tt-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+}
+
+.aias-tt-loading {
+  text-align: center;
+  color: var(--text-muted, #6b7280);
+  padding: 30px;
+  font-size: 14px;
+}
+
+.aias-tt-status {
+  font-size: 16px;
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+
+.aias-tt-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted, #6b7280);
+  margin: 12px 0 6px 0;
+}
+
+.aias-tt-log {
+  background: var(--surface, #f9fafb);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 6px;
+  padding: 8px 12px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.aias-tt-log-line {
+  font-size: 12px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  color: var(--text-main, #1f2937);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.aias-tt-report {
+  margin-top: 14px;
+  padding: 12px 14px;
+  background: rgba(34,197,94,0.08);
+  border: 1px solid rgba(34,197,94,0.2);
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.aias-tt-error {
+  color: #ef4444;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 12px;
+  text-align: center;
+}
+
+.aias-tt-error-detail {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: rgba(239,68,68,0.08);
+  border: 1px solid rgba(239,68,68,0.2);
+  border-radius: 6px;
+  font-size: 12px;
+  color: #ef4444;
+}
+
+.aias-tt-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--border, #e5e7eb);
+  background: var(--surface2, #f3f4f6);
+}
+
+/* AI巡检任务历史弹窗 */
+.aias-task-history-modal {
+  display: none;
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.5);
+  z-index: 10001;
+  align-items: center;
+  justify-content: center;
+}
+
+.aias-th-content {
+  background: var(--bg, #fff);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+  width: 760px;
+  max-width: 92vw;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.aias-th-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border, #e5e7eb);
+  background: var(--surface2, #f3f4f6);
+}
+
+.aias-th-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-main, #1f2937);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.aias-th-close {
+  background: none;
+  border: none;
+  font-size: 18px;
+  cursor: pointer;
+  color: var(--text-muted, #6b7280);
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+.aias-th-close:hover { background: var(--surface, #f9fafb); }
+
+.aias-th-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+}
+
+.aias-th-empty {
+  text-align: center;
+  color: var(--text-muted, #6b7280);
+  padding: 48px 20px;
+  font-size: 14px;
+}
+
+.aias-th-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 10px;
+  margin-bottom: 8px;
+  transition: all 0.2s;
+  background: var(--surface, #fff);
+}
+
+.aias-th-item:hover {
+  border-color: var(--border-hover, #d1d5db);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+
+.aias-th-item-status {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.aias-th-item-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.aias-th-item-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main, #1f2937);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.aias-th-item-meta {
+  font-size: 11px;
+  color: var(--text-muted, #6b7280);
+  margin-top: 3px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.aias-th-item-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.aias-th-item-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.aias-th-item-btn {
+  font-size: 11px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border, #e5e7eb);
+  background: var(--surface, #fff);
+  color: var(--text-main, #1f2937);
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.aias-th-item-btn:hover {
+  background: var(--surface2, #f3f4f6);
+}
+
+.aias-th-item-btn.primary {
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  color: #fff;
+  border: none;
+}
+
+/* 运行中任务高亮 */
+.aias-th-item-running {
+  border-color: rgba(245,158,11,0.3);
+  background: rgba(245,158,11,0.03);
+}
+
+/* 进度展示区域 */
+.aias-th-progress {
+  margin-top: 8px;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.aias-th-progress-bar {
+  height: 4px;
+  background: var(--surface2, #f3f4f6);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.aias-th-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #f59e0b, #f97316);
+  border-radius: 2px;
+  animation: aias-th-progress-pulse 1.5s ease-in-out infinite;
+  width: 40%;
+}
+
+@keyframes aias-th-progress-pulse {
+  0% { width: 20%; opacity: 0.6; }
+  50% { width: 60%; opacity: 1; }
+  100% { width: 20%; opacity: 0.6; }
+}
+
+.aias-th-progress-logs {
+  margin-top: 6px;
+  max-height: 80px;
+  overflow-y: auto;
+  font-size: 11px;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  color: var(--text-muted, #6b7280);
+  line-height: 1.5;
+}
+
+.aias-th-progress-log {
+  padding: 2px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.aias-th-progress-log:last-child {
+  color: var(--text-main, #1f2937);
+  font-weight: 500;
+}
+
+.aias-th-error-msg {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #dc2626;
+  background: rgba(239,68,68,0.06);
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(239,68,68,0.15);
+}
+
+.aias-th-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 20px;
+  border-top: 1px solid var(--border, #e5e7eb);
+  background: var(--surface2, #f3f4f6);
+}
+
+.aias-th-count {
+  font-size: 12px;
+  color: var(--text-muted, #6b7280);
+}
+
+/* 消息操作按钮组 */
+.aias-msg-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 8px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.aias-msg.user .aias-msg-actions {
+  justify-content: flex-end;
+}
+
+.aias-msg:hover .aias-msg-actions {
+  opacity: 1;
+}
+
+.aias-action-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.15s ease;
+}
+
+.aias-action-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(99,102,241,0.05);
+}
+
+/* 编辑用户消息 */
+.aias-edit-area {
+  display: none;
+  /* 用户消息列是 flex-direction: column + align-items: flex-end，子项默认收缩贴合内容。
+     编辑区不显式拉伸就只有 textarea 的默认 20 列宽（实测 174px），十几行内容会被挤成
+     一两千 px 高，看着就是「编辑框不在原位、只剩一条长滚动条」。撑满内容列后，
+     textarea 的框高才等于内容真正占的行数。 */
+  width: 100%;
+  align-self: stretch;
+}
+
+.aias-edit-area.active {
+  display: block;
+}
+
+.aias-edit-textarea {
+  width: 100%;
+  /* 撑满编辑区后，内边距和边框必须算在 100% 之内，否则整块比消息列宽 30px，
+     消息区会多出一条横向滚动条。 */
+  box-sizing: border-box;
+  min-height: 60px;
+  padding: 10px 14px;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  color: var(--text-main);
+  font-size: 14px;
+  line-height: 1.6;
+  resize: vertical;
+  outline: none;
+  font-family: inherit;
+}
+
+.aias-edit-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  justify-content: flex-end;
+}
+
+.aias-edit-btn {
+  padding: 6px 16px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  transition: all 0.15s ease;
+}
+
+.aias-edit-btn.save {
+  background: var(--accent);
+  color: #fff;
+}
+
+.aias-edit-btn.save:hover { opacity: 0.9; }
+
+.aias-edit-btn.cancel {
+  background: var(--surface2);
+  color: var(--text-main);
+  border: 1px solid var(--border);
+}
+
+/* 正在输入指示器 */
+.aias-typing {
+  display: flex;
+  gap: 4px;
+  padding: 8px 0;
+}
+
+.aias-typing span {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  animation: aias-bounce 1.4s ease-in-out infinite;
+}
+
+.aias-typing span:nth-child(2) { animation-delay: 0.2s; }
+
+.aias-typing span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes aias-bounce {
+  0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+  40% { transform: scale(1); opacity: 1; }
+}
+
+/* AI 思考过程区块 */
+.aias-thinking {
+  margin-bottom: 12px;
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--surface, #f9fafb);
+  transition: all 0.3s ease;
+}
+
+.aias-thinking-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted, #6b7280);
+  background: linear-gradient(135deg, rgba(99,102,241,0.06), rgba(139,92,246,0.04));
+  transition: background 0.2s;
+}
+
+.aias-thinking-header:hover {
+  background: linear-gradient(135deg, rgba(99,102,241,0.1), rgba(139,92,246,0.06));
+}
+
+.aias-thinking-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 14px;
+}
+
+.aias-thinking-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(99,102,241,0.2);
+  border-top-color: #6366f1;
+  border-radius: 50%;
+  animation: aias-spin 0.8s linear infinite;
+}
+
+@keyframes aias-spin {
+  to { transform: rotate(360deg); }
+}
+
+.aias-thinking-toggle {
+  margin-left: auto;
+  font-size: 11px;
+  transition: transform 0.3s;
+}
+
+.aias-thinking.collapsed .aias-thinking-toggle {
+  transform: rotate(-90deg);
+}
+
+.aias-thinking-body {
+  padding: 10px 14px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text-muted, #6b7280);
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border, #e5e7eb);
+  transition: max-height 0.3s ease, opacity 0.3s ease, padding 0.3s ease;
+}
+
+.aias-thinking.collapsed .aias-thinking-body {
+  max-height: 0;
+  opacity: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  border-top: none;
+  overflow: hidden;
+}
+
+.aias-thinking-done-icon {
+  color: #22c55e;
+  font-size: 14px;
+}
+
+/* 新内容滚动提示 */
+.aias-scroll-prompt {
+  position: absolute;
+  bottom: 140px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--accent);
+  color: #fff;
+  padding: 8px 20px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(99,102,241,0.4);
+  z-index: 10;
+  animation: aias-pulse 2s ease-in-out infinite;
+  transition: opacity 0.2s ease;
+}
+
+@keyframes aias-pulse {
+  0%, 100% { box-shadow: 0 4px 16px rgba(99,102,241,0.3); }
+  50% { box-shadow: 0 4px 24px rgba(99,102,241,0.5); }
+}
+
+/* 输入区域 */
+.aias-input-area {
+  padding: 12px 24px 16px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.aias-ds-capsule-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 0 2px;
+  user-select: none;
+}
+
+.aias-ds-capsule {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  font-size: 12px;
+  color: var(--text-main, #333);
+  background: rgba(99, 102, 241, 0.10);
+  border: 1px solid rgba(99, 102, 241, 0.35);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.2s ease, box-shadow 0.2s ease;
+  max-width: 260px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.aias-ds-capsule:hover { background: rgba(99, 102, 241, 0.18); box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.08); }
+
+.aias-ds-capsule.is-empty { color: var(--text-secondary, #888); background: rgba(128, 128, 128, 0.08); border-color: var(--border, #e5e5e5); }
+
+.aias-ds-capsule-name { font-weight: 600; }
+
+.aias-ds-capsule-caret { font-size: 10px; color: var(--text-secondary, #888); }
+
+.aias-ds-capsule-tip { font-size: 11px; color: var(--text-secondary, #888); }
+
+.aias-input-wrapper {
+  max-width: 100%;
+  width: 100%;
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 8px 10px;
+  transition: border-color 0.2s ease;
+}
+
+.aias-input-wrapper:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(99,102,241,0.1);
+}
+
+.aias-input {
+  flex: 1;
+  background: none;
+  border: none;
+  color: var(--text-main);
+  font-size: 14px;
+  font-family: inherit;
+  line-height: 1.6;
+  resize: none;
+  outline: none;
+  max-height: 200px;
+  padding: 6px 8px;
+}
+
+.aias-input::placeholder {
+  color: var(--text-muted);
+}
+
+.aias-input-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.aias-send-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, var(--accent), #8b5cf6);
+  border: none;
+  color: #fff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.aias-send-btn:hover {
+  transform: scale(1.05);
+  box-shadow: 0 4px 12px rgba(99,102,241,0.4);
+}
+
+.aias-send-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.aias-stop-btn {
+  padding: 8px 16px;
+  border-radius: 10px;
+  background: rgba(239,68,68,0.1);
+  border: 1px solid rgba(239,68,68,0.3);
+  color: #ef4444;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.aias-stop-btn:hover {
+  background: rgba(239,68,68,0.2);
+}
+
+.aias-input-hint {
+  max-width: 100%;
+  margin: 8px auto 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+/* 流式光标 */
+.aias-cursor {
+  display: inline-block;
+  width: 8px;
+  height: 16px;
+  background: var(--accent);
+  border-radius: 2px;
+  animation: aias-cursor-blink 1s ease-in-out infinite;
+  vertical-align: text-bottom;
+  margin-left: 2px;
+}
+
+@keyframes aias-cursor-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* ── AI-DBA 对话式下钻分析（与AI巡检助手统一风格） ── */
+.aias-drilldown {
+  margin-top: 16px;
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--surface, #fff);
+  display: flex;
+  flex-direction: column;
+}
+
+.aias-drilldown-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: linear-gradient(135deg, rgba(99,102,241,0.06), rgba(139,92,246,0.06));
+  border-bottom: 1px solid var(--border, #e5e7eb);
+}
+
+.aias-drilldown-icon { font-size: 18px; }
+
+.aias-drilldown-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-main, #1f2937);
+}
+
+.aias-drilldown-hint {
+  font-size: 12px;
+  color: var(--text-muted, #6b7280);
+  margin-left: auto;
+}
+
+.aias-drilldown-history {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0;
+  max-height: 420px;
+  min-height: 200px;
+  background: var(--bg, #fafafa);
+}
+
+.aias-drilldown-history::-webkit-scrollbar { width: 6px; }
+
+.aias-drilldown-history::-webkit-scrollbar-track { background: transparent; }
+
+.aias-drilldown-history::-webkit-scrollbar-thumb { background: var(--border, #e5e7eb); border-radius: 3px; }
+
+.aias-drilldown-history::-webkit-scrollbar-thumb:hover { background: var(--text-muted, #6b7280); }
+
+/* 消息条目 — 与 aias-msg 统一 */
+.aias-drilldown-msg {
+  max-width: 820px;
+  margin: 0 auto;
+  padding: 12px 20px;
+  display: flex;
+  gap: 12px;
+  position: relative;
+}
+
+.aias-drilldown-msg.ai { justify-content: flex-start; }
+
+.aias-drilldown-msg.user {
+  justify-content: flex-end;
+  flex-direction: row-reverse;
+}
+
+.aias-drilldown-msg-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.aias-drilldown-msg.user .aias-drilldown-msg-avatar {
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  color: #fff;
+  font-size: 14px;
+}
+
+.aias-drilldown-msg.ai .aias-drilldown-msg-avatar {
+  background: linear-gradient(135deg, #06b6d4, #3b82f6);
+  color: #fff;
+}
+
+.aias-drilldown-msg-content {
+  flex: 1;
+  min-width: 0;
+  max-width: calc(100% - 46px);
+  font-size: 14px;
+  line-height: 1.75;
+  color: var(--text-main, #1f2937);
+  word-wrap: break-word;
+  border-radius: 16px;
+  padding: 12px 16px;
+}
+
+.aias-drilldown-msg.ai .aias-drilldown-msg-content {
+  background: var(--surface2, #f3f4f6);
+  border: 1px solid var(--border, #e5e7eb);
+  border-top-left-radius: 4px;
+}
+
+.aias-drilldown-msg.user .aias-drilldown-msg-content {
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  color: #fff;
+  border-top-right-radius: 4px;
+}
+
+/* markdown 内容渲染 */
+.aias-drilldown-msg-content p { margin: 0 0 10px 0; }
+
+.aias-drilldown-msg-content p:last-child { margin-bottom: 0; }
+
+.aias-drilldown-msg-content pre {
+  background: rgba(0,0,0,0.06);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 8px;
+  padding: 12px 16px;
+  overflow-x: auto;
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 8px 0;
+}
+
+.aias-drilldown-msg-content code {
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 13px;
+}
+
+.aias-drilldown-msg-content :not(pre) > code {
+  background: rgba(0,0,0,0.06);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.aias-drilldown-msg-content ul, .aias-drilldown-msg-content ol {
+  margin: 6px 0;
+  padding-left: 20px;
+}
+
+.aias-drilldown-msg-content li { margin: 4px 0; }
+
+.aias-drilldown-msg-content h1, .aias-drilldown-msg-content h2, .aias-drilldown-msg-content h3 {
+  margin: 12px 0 6px 0;
+  font-weight: 700;
+}
+
+.aias-drilldown-msg-content h1 { font-size: 18px; }
+
+.aias-drilldown-msg-content h2 { font-size: 16px; }
+
+.aias-drilldown-msg-content h3 { font-size: 15px; }
+
+.aias-drilldown-msg-content table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  width: 100%;
+}
+
+.aias-drilldown-msg-content th, .aias-drilldown-msg-content td {
+  border: 1px solid var(--border, #e5e7eb);
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+.aias-drilldown-msg-content th {
+  background: var(--surface2, #f3f4f6);
+  font-weight: 700;
+}
+
+.aias-drilldown-msg-content blockquote {
+  border-left: 3px solid var(--accent, #6366f1);
+  margin: 8px 0;
+  padding: 4px 12px;
+  color: var(--text-muted, #6b7280);
+}
+
+/* 输入区域 */
+.aias-drilldown-input-area {
+  display: flex;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border, #e5e7eb);
+  background: var(--surface, #fff);
+}
+
+.aias-drilldown-input {
+  flex: 1;
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 12px;
+  padding: 10px 14px;
+  font-size: 14px;
+  font-family: inherit;
+  resize: none;
+  outline: none;
+  background: var(--bg, #fff);
+  color: var(--text-main, #1f2937);
+  line-height: 1.5;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  max-height: 120px;
+}
+
+.aias-drilldown-input:focus {
+  border-color: var(--accent, #6366f1);
+  box-shadow: 0 0 0 3px rgba(99,102,241,0.12);
+}
+
+.aias-drilldown-input::placeholder { color: var(--text-muted, #9ca3af); }
+
+.aias-drilldown-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.aias-drilldown-send {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, var(--accent, #6366f1), #8b5cf6);
+  border: none;
+  color: #fff;
+  font-size: 18px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: all 0.2s ease;
+}
+
+.aias-drilldown-send:hover {
+  transform: scale(1.05);
+  box-shadow: 0 4px 12px rgba(99,102,241,0.4);
+}
+
+.aias-drilldown-send:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+/* 快捷标签 */
+.aias-drilldown-quick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 16px 12px;
+  border-top: 1px solid var(--border, #e5e7eb);
+  background: var(--surface, #fff);
+}
+
+.aias-drilldown-quick:empty { display: none; }
+
+.aias-drilldown-quick-tag {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  background: var(--surface2, #f3f4f6);
+  border: 1px solid var(--border, #e5e7eb);
+  color: var(--text-main, #1f2937);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.aias-drilldown-quick-tag:hover {
+  background: rgba(99,102,241,0.1);
+  border-color: var(--accent, #6366f1);
+  color: var(--accent, #6366f1);
+}
+
+/* 打字动画指示器 — 与 aias-typing 统一 */
+.aias-drilldown-typing {
+  display: flex;
+  gap: 4px;
+  padding: 8px 0;
+}
+
+.aias-drilldown-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted, #6b7280);
+  animation: aias-drilldown-bounce 1.4s ease-in-out infinite;
+}
+
+.aias-drilldown-dot:nth-child(2) { animation-delay: 0.2s; }
+
+.aias-drilldown-dot:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes aias-drilldown-bounce {
+  0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+  40% { transform: scale(1); opacity: 1; }
+}
+
+/* 流式光标 */
+.aias-drilldown-cursor {
+  display: inline-block;
+  width: 8px;
+  height: 16px;
+  background: var(--accent, #6366f1);
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  animation: aias-drilldown-blink 1s steps(2) infinite;
+  border-radius: 1px;
+}
+
+@keyframes aias-drilldown-blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
+
+/* 对话式下钻 - 思考过程样式 */
+.aias-drilldown-thinking {
+  margin-bottom: 10px;
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface2, #f3f4f6);
+  transition: all 0.3s ease;
+}
+
+.aias-drilldown-thinking-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted, #6b7280);
+  background: linear-gradient(135deg, rgba(99,102,241,0.08), rgba(139,92,246,0.05));
+  user-select: none;
+  cursor: pointer;
+}
+
+.aias-drilldown-thinking-header:hover {
+  background: linear-gradient(135deg, rgba(99,102,241,0.12), rgba(139,92,246,0.08));
+}
+
+.aias-drilldown-thinking-icon {
+  font-size: 13px;
+}
+
+.aias-drilldown-thinking-body {
+  padding: 8px 12px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text-muted, #6b7280);
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 250px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border, #e5e7eb);
+  transition: max-height 0.3s ease, opacity 0.3s ease, padding 0.3s ease;
+}
+
+.aias-drilldown-thinking-done .aias-drilldown-thinking-body {
+  max-height: 300px;
+  opacity: 1;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+/* ── 最大化：报告主体 + 对话式下钻 按视口自适应分配空间 ──
+   链路：.ai-dba-modal-body(flex 纵向) → #ai-dba-report-container(flex 纵向, 不被压缩, 至少一屏)
+        → .aias-drilldown(确定高度 = 一屏) → .aias-drilldown-history(内部滚动)
+   浏览器窗口继续拖拽/最大化时纯 CSS 重排，无需 JS 监听 resize。 */
+.ai-dba-modal.maximized .ai-dba-modal-body {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
+
+/* 下钻面板在最大化时统一撑为一屏（100vh 减去弹窗头/面板头/输入区留白），
+   与报告长短、对话多少解耦：面板内滚动、输入框常显，窗口继续缩放时随之重算 */
+.ai-dba-modal.maximized .aias-drilldown {
+  flex: 0 0 auto;
+  height: calc(100vh - 168px);
+  min-height: 360px;
+}
+
+.ai-dba-modal.maximized .aias-drilldown-history {
+  max-height: none;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+/* 消息列原为 820px 定宽，最大化后跟随窗宽放宽 */
+.ai-dba-modal.maximized .aias-drilldown-msg {
+  max-width: min(1180px, 92%);
+}
+
+/* 诊断详情内 Markdown 渲染（AI 结论 / AI 对话）的表格、代码框、列表样式 —— 与 .aias-msg-text 对齐 */
+.diag-finding-ai-a table,
+.diag-ai-msg-content table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 8px 0;
+  font-size: 12.5px;
+}
+
+.diag-finding-ai-a pre:not(.aias-sql-pre),
+.diag-ai-msg-content pre:not(.aias-sql-pre) {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  font-size: 12.5px;
+  line-height: 1.5;
+  margin: 8px 0;
+}
+
+/* ── 主题变量映射（补齐两个本仓库没有的变量名，不改任何规则）── */
+:root {
+  --surface-solid: var(--surface);
+  --row-active-bg: color-mix(in srgb, var(--accent) 14%, var(--surface));
+}
+
+/* ── 窄屏与矮屏适配（响应式断点按旧实现原样保留）──
+   没有这一段的话，宽度一小侧栏就与主列并排挤压：主列只剩一百来像素，
+   输入区被折成好几行撑高、消息区塌成一条，整个页面看起来是坏的。
+   ≤768px：会话列表改成右侧绝对定位浮层（点开关弹出），主列占满整幅宽度；
+   ≤720px 高：钻取面板给出最小高度，避免被压到看不见。 */
+@media (max-width: 768px) {
+  .aias-sidebar {
+    position: absolute;
+    z-index: 100;
+    height: 100%;
+    right: 0;
+    box-shadow: -4px 0 24px rgba(0, 0, 0, .1);
+  }
+  /* 窄屏本来就没有可让的宽度：抽屉保持纯浮层，正文不再被 padding 挤窄 */
+  .aias-container.aias-sb-float.aias-sb-open .aias-main { padding-right: 0; }
+  .aias-suggestion-grid { grid-template-columns: 1fr; }
+  .aias-msg { padding: 16px 12px; }
+  .aias-input-area { padding: 8px 12px 12px; }
+}
+
+@media (max-height: 720px) {
+  .ai-dba-modal.maximized .aias-drilldown { min-height: 300px; }
+}
+
+
+/* ════════════════════════════════════════════════════════════
+   答案优先排版（结论卡）
+   一条回答自上而下：证据栏 → 过程折叠 → 结论行 → 要点 → 其余正文。
+   只重排位置，文字仍是模型原文；层级靠字号/边框色/留白表达，配色全部走主题变量，
+   浅色与深色同一套规则（写死色值会在另一种主题下看不清）。
+   ════════════════════════════════════════════════════════════ */
+
+/* ── 证据栏：这条回答凭什么 ───────────────────────────── */
+.aias-evidence {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 7px;
+  padding: 0 2px;
+}
+
+.aias-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  max-width: 100%;
+  transition: border-color var(--trans), background var(--trans);
+}
+
+.aias-chip b {
+  color: var(--text-main);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.aias-chip.is-ds {
+  background: var(--accent-soft, var(--surface2));
+  border-color: color-mix(in srgb, var(--accent) 32%, transparent);
+}
+
+.aias-chip.is-ds b { color: var(--accent); }
+
+.aias-chip.is-ro {
+  background: var(--warn-soft, var(--surface2));
+  border-color: color-mix(in srgb, var(--warn) 30%, transparent);
+  color: var(--warn);
+}
+
+.aias-chip.is-ro b { color: var(--warn); }
+
+.aias-chip.is-bad {
+  background: var(--danger-soft, var(--surface2));
+  border-color: color-mix(in srgb, var(--danger) 34%, transparent);
+  color: var(--danger);
+}
+
+.aias-chip.is-bad b { color: var(--danger); }
+
+/* ── 结论行：一条回答只看这一句 ───────────────────────── */
+.aias-verdict {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin: 0 0 12px;
+  padding: 2px 0 2px 12px;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 8px 8px 0;
+  background: linear-gradient(90deg,
+              color-mix(in srgb, var(--accent) 8%, transparent),
+              transparent 62%);
+}
+
+.aias-verdict.is-alert {
+  border-left-color: var(--warn);
+  background: linear-gradient(90deg,
+              color-mix(in srgb, var(--warn) 10%, transparent),
+              transparent 62%);
+}
+
+.aias-verdict-badge {
+  flex: none;
+  align-self: center;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: .4px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: var(--accent-soft, var(--surface2));
+  color: var(--accent);
+}
+
+.aias-verdict.is-alert .aias-verdict-badge {
+  background: var(--warn-soft, var(--surface2));
+  color: var(--warn);
+}
+
+.aias-verdict-text {
+  font-size: 15px;
+  line-height: 1.65;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.aias-verdict-text p { margin: 0; }
+.aias-verdict-text code { font-weight: 500; }
+
+/* ── 要点：把结论撑住的那几条事实 ─────────────────────── */
+.aias-points {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0 0 0 2px;
+}
+
+.aias-points li {
+  position: relative;
+  padding: 4px 0 4px 16px;
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: color-mix(in srgb, var(--text-main) 88%, transparent);
+}
+
+.aias-points li::before {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 13px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.aias-points li p { margin: 0; }
+.aias-points li + li { border-top: 1px dashed color-mix(in srgb, var(--border) 70%, transparent); }
+
+/* ── 过程折叠：思考 + 理解 + 工具链，默认收起 ─────────── */
+details.aias-proof {
+  margin: 0 0 10px;
+  padding: 0 0 2px;
+}
+
+details.aias-proof > summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  padding: 3px 2px;
+  transition: color var(--trans);
+  /* 通用 details 规则会给摘要加一块灰底与下边框，这里要的是正文上方一行小字 */
+  background: transparent;
+  border: none;
+  font-weight: 500;
+}
+
+details.aias-proof[open] > summary { border-bottom: none; }
+details.aias-proof > summary:hover { background: transparent; }
+
+details.aias-proof > summary::-webkit-details-marker { display: none; }
+details.aias-proof > summary:hover { color: var(--accent); }
+
+.aias-proof-car {
+  display: inline-block;
+  transition: transform var(--trans);
+  font-size: 11px;
+}
+
+details.aias-proof[open] .aias-proof-car { transform: rotate(90deg); }
+
+.aias-proof-hint {
+  margin-left: auto;
+  font-size: 11px;
+  color: color-mix(in srgb, var(--text-muted) 78%, transparent);
+}
+
+.aias-proof-body {
+  margin-top: 8px;
+  padding-top: 2px;
+}
+
+/* 折叠里的思考块与工具链不再各自占一块外边距（外层已有呼吸空间） */
+.aias-proof-body .aias-thinking:last-child,
+.aias-proof-body .aias-tool-chain:last-child { margin-bottom: 0; }
+
+/* ── 用户气泡：与天蓝主题同族 ───────────────────────────
+   原来是靛紫渐变，放进天蓝底里像另一套系统的控件。改成主色浅底 + 主题文字色后，
+   气泡内的代码/链接不再需要「深底白字」特例，两处特例一并撤掉。 */
+.aias-msg.user .aias-msg-text {
+  background: color-mix(in srgb, var(--sky) 12%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--sky) 30%, var(--border));
+  color: var(--text-main);
+  border-top-right-radius: 4px;
+}
+
+/* ── 语句块动作：降噪但不移位 ─────────────────────────────
+   执行/批量这排按钮是每条回答里出现频次最高的动作，原来每个都是实心色块，
+   一屏三条 SQL 就是好几个色块，把结论挤没了。这里只调视觉层级：默认弱底色细边 +
+   主题色文字，「执行SQL」保留主色但收敛，悬停才补满对比度。
+   DOM 结构一个字节都不动 —— 结果区、槽位、方言徽标都靠这套类名与兄弟关系定位。
+   代码块右上角的复制/撤销是 28×28 的图标按钮（常驻可见），不归这组规则管。 */
+.aias-sql-exec-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0 10px;
+}
+
+/* 结果永远独占一行：它是 wrap 的第三个 flex 子项，不撑满整行的话就会跟「批量/执行」
+   挤在同一行上（表格被压扁、时间线读不出先后）。按钮只占第一行。 */
+.aias-sql-exec-wrap > .aias-sql-result {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+.aias-sql-batch-btn {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  border-radius: 7px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: color var(--trans), border-color var(--trans), background var(--trans);
+}
+
+.aias-sql-batch-btn:hover {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: var(--accent-soft, var(--surface2));
+}
+
+.aias-sql-exec-btn {
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  border-radius: 7px;
+  padding: 3px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  transition: background var(--trans), color var(--trans);
+}
+
+/* 悬停填充时用主题底面作字色：深色主题的 --accent 是亮青绿，白字压不住；
+   --surface 在两套主题里都与主色形成足够对比。 */
+.aias-sql-exec-btn:hover { background: var(--accent); color: var(--surface); }
+
+/* ── 输入区上下文条：与答案证据栏同一套 chip 语言 ─────── */
+.aias-ds-capsule-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.aias-ds-capsule {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--accent-soft, var(--surface2));
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+  color: var(--accent);
+  transition: border-color var(--trans), box-shadow var(--trans);
+}
+
+.aias-ds-capsule:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.aias-ds-capsule-name { font-weight: 600; }
+
+.aias-ds-capsule-tip {
+  font-size: 11.5px;
+  color: color-mix(in srgb, var(--text-muted) 85%, transparent);
+}
+
+.aias-global-row-limit {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.aias-global-row-limit input {
+  width: 52px;
+  font-size: 12px;
+  padding: 1px 5px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text-main);
+}
+
+/* ── 顶栏：把「看历史」与「管现场」两组拉开一点距离 ───────
+   顺序不变、入口不减：把常用动作藏进 ⚙ 会让它们多一步，这里只用留白做视觉分组。 */
+.aias-topbar-right { display: flex; align-items: center; gap: 4px; }
+.aias-topbar-right #aias-minimap-btn { margin-right: 10px; }
+
+/* ── 批量结果也能全屏查看 ─────────────────────────────────
+   单条结果早就有 ⛶，批量这边一直没给：批量最常查出十几列的宽表，缩在消息流的
+   一小块里只能横向拖，比几个库还费劲。这里复用同一套全屏层（.aias-result-max-*），
+   按钮样式与单条结果对齐，三类表（汇总 / 各库明细 / 单条结果）行为一致。 */
+.aias-batch-maxbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 2px;
+}
+
+.aias-batch-maxtip {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.aias-batch-zoom {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  border-radius: 6px;
+  padding: 2px 9px;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color var(--trans), border-color var(--trans), background var(--trans);
+}
+
+.aias-batch-zoom:hover {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: var(--accent-soft, var(--surface2));
+}
+
+.aias-batch-table-wrap { overflow: auto; }
+
+/* 明细标题行改成左标题右按钮，最大化入口跟单条结果一样摆在右上角 */
+.aias-batch-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+/* 全屏层里的批量表：字号放大、表头吸顶，长单元格不换行（横向滚而不是压成一堆行） */
+.aias-result-max-body .aias-batch-table,
+.aias-result-max-body .aias-result-table {
+  font-size: 12.5px;
+  width: auto;
+  min-width: 100%;
+}
+
+.aias-result-max-body .aias-batch-table th,
+.aias-result-max-body .aias-result-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: color-mix(in srgb, var(--accent, #2ea043) 16%, var(--surface-solid, var(--surface)));
+}
+
+.aias-result-max-body .aias-batch-table td,
+.aias-result-max-body .aias-batch-table th,
+.aias-result-max-body .aias-result-table td,
+.aias-result-max-body .aias-result-table th {
+  padding: 7px 12px;
+  white-space: nowrap;
+}
+
+/* ════════════════════════════════════════════════════════════
+   双击取词 · 同值高亮
+   命中格只加背景（不改 innerHTML，表格结构与事件绑定原样保留），
+   当前处再加一圈描边；状态条浮在消息区底部，与侧边抽屉（z 55）分层不互相压住。
+   配色全走主题变量，深浅两套都成立。
+   ════════════════════════════════════════════════════════════ */
+.aias-hl-hit {
+  background: color-mix(in srgb, var(--warn) 24%, transparent);
+  border-radius: 4px;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warn) 34%, transparent);
+}
+
+.aias-hl-cur {
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.aias-hl-bar {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 12px;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  max-width: calc(100% - 32px);
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  box-shadow: var(--shadow-1, 0 8px 26px -14px rgba(0, 0, 0, .35));
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.aias-hl-bar .aias-hl-ico { color: var(--accent); }
+
+/* 全屏层里的取词条：消息区被遮罩整个盖住，条必须挂在那一层里并跟着视口定位 */
+.aias-hl-bar.is-in-max {
+  position: fixed;
+  bottom: 18px;
+  z-index: 5;
+  background: color-mix(in srgb, var(--surface) 97%, transparent);
+  border-color: var(--border);
+}
+
+.aias-hl-bar .aias-hl-term {
+  max-width: 210px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-main);
+  font-weight: 600;
+}
+
+.aias-hl-bar .aias-hl-pos { font-variant-numeric: tabular-nums; color: var(--accent); }
+
+.aias-hl-btn {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  border-radius: 7px;
+  padding: 1px 7px;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: color var(--trans), border-color var(--trans), background var(--trans);
+}
+
+.aias-hl-btn:hover {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: var(--accent-soft, var(--surface2));
+}
+
+.aias-hl-btn.is-on { color: var(--accent); border-color: var(--accent); }
+
+@media (max-width: 768px) {
+  .aias-hl-bar { gap: 5px; padding: 4px 7px; bottom: 8px; }
+  .aias-hl-bar .aias-hl-term { max-width: 110px; }
+  .aias-hl-bar .aias-hl-count { display: none; }
+}
+
+/* ── 全屏层分栏（批量查看的主用法：一边比对，一边看某个库的完整结果）──────
+   汇总表被搬进全屏层后，明细面板必须跟到同一层：否则点「查看」生成的面板还留在
+   被遮罩盖住的底下，表现就是「全屏里点查看没反应」。
+   左表右明细、各自滚动；窄屏改成上下叠放，明细不再抢宽度。 */
+.aias-result-max-body.is-split {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.aias-result-max-body.is-split > table {
+  flex: 1 1 52%;
+  min-width: 0;
+}
+
+.aias-result-max-body.is-split > .aias-batch-detail-panels {
+  flex: 1 1 48%;
+  min-width: 0;
+  position: sticky;
+  top: 0;
+  max-height: calc(100vh - 130px);
+  overflow: auto;
+  padding-left: 14px;
+  border-left: 1px dashed var(--border);
+}
+
+/* 用户切到「底部」：明细占满整宽、堆在汇总表下方，列特别多的明细表更舒展。
+   选择器比默认右栏多一个类，覆盖横向 flex 与右侧 sticky 面板。 */
+.aias-result-max-body.is-split.is-bottom { flex-direction: column; }
+.aias-result-max-body.is-split.is-bottom > table,
+.aias-result-max-body.is-split.is-bottom > .aias-batch-detail-panels { flex: none; width: 100%; }
+.aias-result-max-body.is-split.is-bottom > .aias-batch-detail-panels {
+  position: static;
+  max-height: none;
+  padding-left: 0;
+  border-left: none;
+  border-top: 1px dashed var(--border);
+  padding-top: 12px;
+}
+
+@media (max-width: 1100px) {
+  .aias-result-max-body.is-split { flex-direction: column; }
+  .aias-result-max-body.is-split > table,
+  .aias-result-max-body.is-split > .aias-batch-detail-panels { flex: none; width: 100%; }
+  .aias-result-max-body.is-split > .aias-batch-detail-panels {
+    position: static;
+    max-height: none;
+    padding-left: 0;
+    border-left: none;
+    border-top: 1px dashed var(--border);
+    padding-top: 12px;
+  }
+  /* 窄屏本来就强制上下堆叠，没有「右/底」可选，隐藏切换按钮免得点了没变化 */
+  .aias-split-toggle { display: none; }
+}

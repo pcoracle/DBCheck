@@ -3,14 +3,15 @@
  * Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
  * Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
  *
- * Fusion page logic: SQL editor (object tree + multi-window editor + result tabs).
- * Behaviour and interaction habits ported from DBCheck v2.6 (MIT License,
- * Copyright (c) 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>) — 多执行窗口页签、
- * 对象感知智能提示（表/视图/列/函数/关键字）、执行范围三档（选区/当前语句/全文）、
- * 逐条结果页签 + 游标无限滚动、树节点右键（插入名称 / Top-N / 表属性）、按方言的
- * 执行目标（库 / 用户 / 模式）与示例 SQL。
- * Rewritten for the RaccoonX module layout and /api/execute_sql_multi、
- * /api/sql_metadata、/api/pro/datasources/<id>/{databases,schemas,objects,table-info}.
+ * Fusion page logic: SQL editor (object tree + object quick search + multi-window
+ * editor + result tabs).
+ * Attribution: 交互设计归 MIT License, Copyright (c) 2025-2026
+ * fiyo (Jack Ge) <sdfiyon@gmail.com> 所有。本页能力：多执行窗口页签、
+ * 对象感知智能提示（表/视图/列/函数/关键字）、对象快速搜索（Ctrl+K）、
+ * 执行范围三档（选区/当前语句/全文）、逐条结果页签 + 游标无限滚动、
+ * 树节点右键（插入名称 / Top-N / 表属性）、按方言的执行目标（库 / 用户 / 模式）与示例 SQL。
+ * Runs on the RaccoonX module layout against /api/execute_sql_multi、
+ * /api/sql_metadata、/api/pro/datasources/<id>/{databases,schemas,objects,object-search,table-info}.
  */
 (function () {
   'use strict';
@@ -69,6 +70,19 @@
     treeNodeType: null,
     datasources: [],
     treeKeyword: '',
+    // 对象快速搜索（Ctrl+K）：与树内筛选分开，查的是服务端过滤后的对象名单
+    objectSearch: {
+      open: false, query: '', scopeMode: 'db', objectType: 'all',
+      datasourceId: '', databaseName: '', results: [], activeIndex: -1,
+      total: 0, truncated: false, metadataTruncated: false, scopeLimited: false,
+      scopeNote: '',
+      datasourceErrors: [],
+      // 翻页：命中超过一页时不丢结果，点「加载更多」把下一页接上
+      // （服务端切的是内存里缓存的对象名单，翻页几乎零成本）
+      offset: 0, hasMore: false, loadingMore: false,
+      cached: false, loading: false, error: '', requestSeq: 0,
+      debounceTimer: null, lastFocused: null
+    },
     resultPaneMaximized: false,
     layoutSizes: {},
     running: false,
@@ -1332,7 +1346,7 @@
     if (!body) return;
     body.innerHTML = '<div class="sql-tree-loading">' +
                      escapeHtml(i18nText('sql_editor.loading', '加载中...')) + '</div>';
-    httpGet('/api/pro/datasources').then(function (payload) {
+    return httpGet('/api/pro/datasources').then(function (payload) {
       var list = (payload && (payload.datasources || payload.data || payload.instances)) || [];
       editorState.datasources = list;
       list.forEach(function (datasource) {
@@ -1522,7 +1536,7 @@
   }
 
   function loadDatabasesOfDatasource(container, datasourceId, forceRefresh) {
-    httpGet(treeUrl(datasourceId, 'databases', '', forceRefresh))
+    return httpGet(treeUrl(datasourceId, 'databases', '', forceRefresh))
       .then(function (payload) {
         if (payload.error) { showContainerMessage(container, payload.error, true); return; }
         var list = payload.databases || [];
@@ -1548,8 +1562,8 @@
   }
 
   function loadObjectsOfDatabase(container, datasourceId, databaseName, forceRefresh) {
-    httpGet(treeUrl(datasourceId, 'objects',
-                    '?database=' + encodeURIComponent(databaseName), forceRefresh))
+    return httpGet(treeUrl(datasourceId, 'objects',
+                           '?database=' + encodeURIComponent(databaseName), forceRefresh))
       .then(function (payload) {
         if (payload.error) { showContainerMessage(container, payload.error, true); return; }
         var html = '';
@@ -1619,7 +1633,7 @@
         return;
       }
       selectTreeNode(node);
-      // 旧版习惯：点数据源 / 库这一行（文字或 ▶ 都一样）就展开或收起它的子层；
+      // 交互习惯：点数据源 / 库这一行（点文字或点 ▶ 都一样）就展开或收起它的子层；
       // 表、视图是叶子节点，只选中不展开。
       var toggle = node.querySelector('.tree-toggle');
       if (toggle && !toggle.classList.contains('leaf')) {
@@ -1646,6 +1660,720 @@
   function filterDatasourceTree(keyword) {
     editorState.treeKeyword = keyword || '';
     renderDatasourceTree();
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  //  对象快速搜索（Ctrl+K）
+  // ══════════════════════════════════════════════════════════════
+  // 与树内筛选分工：
+  //   * 树内筛选只过滤已经加载的节点，输入即生效、不连库；
+  //   * 这里查服务端「对象名单」，不要求树节点展开，默认只查当前库。
+  //     第一次搜索读一次数据字典，之后由 metadata 的 300s TTL 缓存兜住。
+  // 匹配规则与后端一致：不带 % / * 时按包含匹配（_ 按字面）；
+  // 带 % / * 时进入通配符模式（_ / ? 表示单个字符）。
+  var OBJECT_SEARCH_LIMIT = 200;
+  var OBJECT_SEARCH_DEBOUNCE_MS = 250;
+
+  function objectSearchState() {
+    return editorState.objectSearch;
+  }
+
+  function openObjectSearch() {
+    var state = objectSearchState();
+    var modal = elementById('sql-obj-search-modal');
+    var input = elementById('sql-obj-search-input');
+    if (!modal || !input) return;
+    if (!editorState.datasourceId) {
+      notifyUser(i18nText('sql_editor.obj_search_no_ds', '请先选择数据源'), 'error');
+      return;
+    }
+    state.open = true;
+    state.datasourceId = String(editorState.datasourceId);
+    state.databaseName = editorState.databaseName || '';
+    state.scopeMode = state.databaseName ? 'db' : 'all';
+    state.query = '';
+    state.results = [];
+    state.activeIndex = -1;
+    state.total = 0;
+    state.truncated = false;
+    state.metadataTruncated = false;
+    state.scopeLimited = false;
+    state.scopeNote = '';
+    state.datasourceErrors = [];
+    state.offset = 0;
+    state.hasMore = false;
+    state.loadingMore = false;
+    state.cached = false;
+    state.loading = false;
+    state.error = '';
+    state.requestSeq += 1;
+    if (state.debounceTimer) { clearTimeout(state.debounceTimer); state.debounceTimer = null; }
+    state.lastFocused = document.activeElement;
+
+    input.setAttribute('aria-label', i18nText('sql_editor.obj_search_title', '搜索对象'));
+    var scopeSelect = elementById('sql-obj-search-scope');
+    if (scopeSelect) scopeSelect.setAttribute('aria-label', i18nText('sql_editor.obj_search_scope', '搜索范围'));
+    var resultsBox = elementById('sql-obj-search-results');
+    if (resultsBox) resultsBox.setAttribute('aria-label', i18nText('sql_editor.obj_search_results', '对象搜索结果'));
+
+    modal.style.display = 'flex';
+    input.value = '';
+    input.removeAttribute('aria-activedescendant');
+    updateObjectSearchScopeOptions();
+    updateObjectSearchTypeButtons();
+    renderObjectSearch();
+    setTimeout(function () {
+      try { input.focus(); } catch (ignore) { /* 输入框被移出 DOM 就算了 */ }
+    }, 0);
+  }
+
+  function closeObjectSearch(returnFocus) {
+    var state = objectSearchState();
+    var modal = elementById('sql-obj-search-modal');
+    if (modal) modal.style.display = 'none';
+    state.open = false;
+    state.requestSeq += 1;                  // 让在途请求的回包失效
+    if (state.debounceTimer) { clearTimeout(state.debounceTimer); state.debounceTimer = null; }
+    if (returnFocus !== false && state.lastFocused && typeof state.lastFocused.focus === 'function') {
+      try { state.lastFocused.focus(); } catch (ignore) { /* 原焦点元素已被移除 */ }
+    }
+    state.lastFocused = null;
+  }
+
+  function toggleObjectSearch() {
+    if (objectSearchState().open) closeObjectSearch(); else openObjectSearch();
+  }
+
+  function updateObjectSearchScopeOptions() {
+    var state = objectSearchState();
+    var select = elementById('sql-obj-search-scope');
+    var dbOption = elementById('sql-obj-search-scope-db');
+    var allOption = elementById('sql-obj-search-scope-all');
+    var dsOption = elementById('sql-obj-search-scope-ds');
+    if (!select || !dbOption) return;
+    var db = state.databaseName || '';
+    dbOption.disabled = !db;
+    // 用函数替换：库名里万一带 $& / $1 之类，replace 的字符串替换会解释它们
+    dbOption.textContent = db
+      ? i18nText('sql_editor.obj_search_scope_db', '当前库：{db}')
+          .replace('{db}', function () { return db; })
+      : i18nText('sql_editor.obj_search_scope_db_empty', '当前库（未选择）');
+    // 「全部」的真实含义按方言不同：SQL Server 是实例内各库的跨 catalog 名单；
+    // PG / DB2 只能覆盖当前连接库（跨库要重新建连），文案要说实话。
+    var dialect = normalizeDbType(datasourceTypeOf(state.datasourceId));
+    var schemaOnlyScope = ['postgresql', 'ivorysql', 'kingbase', 'hgdb', 'halodb', 'db2']
+      .indexOf(dialect) >= 0;
+    if (allOption) {
+      allOption.textContent = schemaOnlyScope
+        ? i18nText('sql_editor.obj_search_scope_all_schemas', '当前库所有模式')
+        : i18nText('sql_editor.obj_search_scope_all', '本数据源全部对象');
+    }
+    // 「所有同类型数据源」：每个数据源都单独建连拉名单，只对方言内对象可比的类型开放
+    // （SQL Server / MySQL 系：库名在标签里，跨数据源也能分清是谁家的）
+    var crossDsSupported = supportsCrossDatasourceSearch();
+    // option 上的 hidden 各浏览器表现不一，一并置 disabled 才真的选不到
+    if (dsOption) {
+      dsOption.hidden = !crossDsSupported;
+      dsOption.disabled = !crossDsSupported;
+    }
+    if (!crossDsSupported && state.scopeMode === 'ds') state.scopeMode = 'all';
+    if (!db && state.scopeMode === 'db') state.scopeMode = 'all';
+    select.value = state.scopeMode;
+  }
+
+  // 聚合搜索只对「对象口径能对齐」的类型开放：
+  // SQL Server（实例内多库）与 MySQL 系（库即 schema）的标签都带库名，
+  // 跨数据源摆在一起也认得出是谁家的；Oracle 系的 owner 语义不同，先不放进来。
+  function supportsCrossDatasourceSearch() {
+    var dialect = normalizeDbType(
+      datasourceTypeOf(objectSearchState().datasourceId || editorState.datasourceId));
+    return dialect === 'sqlserver' ||
+      ['mysql', 'tidb', 'mariadb', 'oceanbase', 'tdsqlc_mysql'].indexOf(dialect) >= 0;
+  }
+
+  function updateObjectSearchTypeButtons() {
+    var state = objectSearchState();
+    document.querySelectorAll('#sql-obj-search-types .sql-obj-type-btn').forEach(function (button) {
+      var active = button.getAttribute('data-object-type') === state.objectType;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+  }
+
+  function onObjectSearchInput(value) {
+    objectSearchState().query = value || '';
+    scheduleObjectSearch(false);
+  }
+
+  function onObjectSearchScopeChange(value) {
+    var state = objectSearchState();
+    state.scopeMode = (value === 'all' || value === 'ds') ? value : 'db';
+    var select = elementById('sql-obj-search-scope');
+    if (select) select.value = state.scopeMode;
+    scheduleObjectSearch(true);
+  }
+
+  function onObjectSearchTypeChange(objectType) {
+    var state = objectSearchState();
+    state.objectType = (objectType === 'table' || objectType === 'view') ? objectType : 'all';
+    updateObjectSearchTypeButtons();
+    scheduleObjectSearch(true);
+  }
+
+  // 输入期间只防抖，不连库；真正搜索由 runObjectSearch 发一次请求
+  function scheduleObjectSearch(immediate) {
+    var state = objectSearchState();
+    state.requestSeq += 1;                  // 作废上一次在途请求
+    if (state.debounceTimer) { clearTimeout(state.debounceTimer); state.debounceTimer = null; }
+    state.error = '';
+    state.results = [];
+    state.activeIndex = -1;
+    state.total = 0;
+    state.truncated = false;
+    state.metadataTruncated = false;
+    state.scopeLimited = false;
+    state.scopeNote = '';
+    state.datasourceErrors = [];
+    state.offset = 0;
+    state.hasMore = false;
+    state.loadingMore = false;
+    state.cached = false;
+    if (state.scopeMode === 'db' && !state.databaseName) state.scopeMode = 'all';
+    if (!state.query.trim()) {
+      state.loading = false;
+      renderObjectSearch();
+      return;
+    }
+    state.loading = true;
+    renderObjectSearch();
+    state.debounceTimer = setTimeout(function () {
+      state.debounceTimer = null;
+      runObjectSearch(false);
+    }, immediate ? 0 : OBJECT_SEARCH_DEBOUNCE_MS);
+  }
+
+  function buildObjectSearchUrl(offset) {
+    var state = objectSearchState();
+    var types = state.objectType === 'table' ? 'table'
+              : (state.objectType === 'view' ? 'view' : 'table,view');
+    // 范围切到「全部」时仍然带上当前库：PG / DB2 的「全部」只是当前库的所有模式，
+    // 不带库名会连到默认库；Oracle / MySQL 由后端忽略它。
+    return '/api/pro/datasources/' + encodeURIComponent(state.datasourceId) + '/object-search' +
+           '?q=' + encodeURIComponent(state.query.trim()) +
+           '&database=' + encodeURIComponent(state.databaseName || '') +
+           '&scope=' + encodeURIComponent(state.scopeMode) +
+           '&types=' + encodeURIComponent(types) +
+           '&limit=' + OBJECT_SEARCH_LIMIT +
+           '&offset=' + (offset || 0);
+  }
+
+  // append=true：把下一页接在已有结果后面（加载更多）；否则整页替换（新搜索）
+  function runObjectSearch(append) {
+    var state = objectSearchState();
+    if (!state.open || !state.query.trim()) return;
+    var seq = state.requestSeq;
+    var requestOffset = append ? state.results.length : 0;
+    if (append) state.loadingMore = true; else state.loading = true;
+    state.error = '';
+    renderObjectSearchStatus();
+    httpGet(buildObjectSearchUrl(requestOffset), METADATA_TIMEOUT_MS)
+      .then(function (payload) {
+        if (seq !== state.requestSeq || !state.open) return;
+        state.loading = false;
+        state.loadingMore = false;
+        if (!payload || payload.ok === false || payload.error) {
+          if (append) {
+            // 追加失败别把已有结果清掉，只把错误显示出来
+            state.error = briefError((payload && (payload.error || payload.message)) || '加载失败');
+          } else {
+            state.results = [];
+            state.activeIndex = -1;
+            state.total = 0;
+            state.hasMore = false;
+            state.error = briefError((payload && (payload.error || payload.message)) || '搜索失败');
+          }
+          renderObjectSearch();
+          return;
+        }
+        var page = payload.objects || [];
+        state.results = append ? state.results.concat(page) : page;
+        state.offset = Number(payload.offset);
+        if (isNaN(state.offset)) state.offset = append ? requestOffset : 0;
+        state.hasMore = !!payload.has_more;
+        state.total = Number(payload.total) || state.results.length;
+        state.truncated = !!payload.truncated;
+        state.metadataTruncated = !!payload.metadata_truncated;
+        state.scopeLimited = !!payload.scope_limited;
+        state.scopeNote = payload.scope_note || '';
+        state.datasourceErrors = payload.datasource_errors || [];
+        state.cached = !!payload.cached;
+        // 追加页保持当前选中项；整页替换才回到第一条
+        if (!append) state.activeIndex = state.results.length ? 0 : -1;
+        else if (state.activeIndex < 0) state.activeIndex = state.results.length ? 0 : -1;
+        renderObjectSearch();
+      })
+      .catch(function (failure) {
+        if (seq !== state.requestSeq || !state.open) return;
+        state.loading = false;
+        state.loadingMore = false;
+        if (append) {
+          // 加载更多失败：已有结果留着，用户还能接着点或按原样插入
+          state.error = briefError(failure && failure.message || failure);
+          renderObjectSearch();
+          return;
+        }
+        state.results = [];
+        state.hasMore = false;
+        state.activeIndex = -1;
+        state.total = 0;
+        state.error = briefError(failure && failure.message || failure);
+        renderObjectSearch();
+      });
+  }
+
+  function loadMoreObjectSearch() {
+    var state = objectSearchState();
+    if (state.loading || state.loadingMore || !state.hasMore) return;
+    state.requestSeq += 1;                    // 与在途的「换关键字」请求互斥
+    runObjectSearch(true);
+  }
+
+  function objectSearchTypeLabel(result) {
+    return result.type === 'VIEW'
+      ? i18nText('sql_editor.obj_search_type_view', '视图')
+      : i18nText('sql_editor.obj_search_type_table', '表');
+  }
+
+  // 只对「非通配符」查询做高亮：通配符模式下高亮整段反而误导
+  function highlightSearchText(text, query) {
+    var raw = String(text || '');
+    var needle = String(query || '').trim();
+    if (!needle || /[%*]/.test(needle)) return escapeHtml(raw);
+    var regex = new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+    var html = '', lastIndex = 0, match;
+    while ((match = regex.exec(raw)) !== null) {
+      if (!match[0]) { regex.lastIndex += 1; continue; }
+      html += escapeHtml(raw.slice(lastIndex, match.index));
+      html += '<mark>' + escapeHtml(match[0]) + '</mark>';
+      lastIndex = match.index + match[0].length;
+    }
+    return html + escapeHtml(raw.slice(lastIndex));
+  }
+
+  function renderObjectSearchItems(results) {
+    var state = objectSearchState();
+    var currentDatasourceName = datasourceNameOf(state.datasourceId);
+    var html = '';
+    results.forEach(function (result, index) {
+      var label = result.label || result.name || '';
+      var metaParts = [];
+      // 聚合搜索时结果来自多个数据源：数据源名一律用后端带回来的那个，
+      // 不能拿「当前数据源」套到所有行上（否则跨源的命中会被标错来源）
+      var dsName = result.datasource_name || currentDatasourceName;
+      if (dsName) metaParts.push(dsName);
+      // 库名一律在副信息里标一次：窄屏会把这段隐藏（css 里 display:none），
+      // SQL Server 的跨库结果则已经把库名并进 label，两处都有才不会认错库。
+      var databaseName = result.database || '';
+      if (databaseName) metaParts.push(databaseName);
+      html += '<div class="sql-obj-search-item' + (index === state.activeIndex ? ' active' : '') + '"' +
+              ' role="option" id="sql-obj-search-opt-' + index + '" data-index="' + index + '"' +
+              ' aria-selected="' + (index === state.activeIndex ? 'true' : 'false') + '"' +
+              ' title="' + escapeAttr(label + (metaParts.length ? '\n' + metaParts.join(' · ') : '')) + '">' +
+              '  <span class="sql-obj-search-name">' + highlightSearchText(label, state.query) + '</span>' +
+              '  <span class="sql-obj-search-meta">' + escapeHtml(metaParts.join(' · ')) + '</span>' +
+              '  <span class="sql-obj-search-type">' + escapeHtml(objectSearchTypeLabel(result)) + '</span>' +
+              '</div>';
+    });
+    return html;
+  }
+
+  // 命中超过一页时的「加载更多」行：翻页切的是服务端内存里缓存的对象名单，
+  // 不再打数据字典，所以每页都取得到；不做成无限滚动是因为列表高度会一直变，
+  // 键盘选中项会跟着抖，显式点一下更可控。
+  function objectSearchMoreRowHtml() {
+    var state = objectSearchState();
+    if (!state.hasMore && !state.loadingMore) return '';
+    var remain = Math.max(0, state.total - state.results.length);
+    var label = state.loadingMore
+      ? i18nText('sql_editor.obj_search_loading_more', '正在加载…')
+      : i18nText('sql_editor.obj_search_more', '加载更多（还有 {n} 条）').replace('{n}', remain);
+    return '<div class="sql-obj-search-more">' +
+           '  <button type="button" class="btn btn-ghost btn-xs"' +
+           '         data-action="load-more"' + (state.loadingMore ? ' disabled' : '') + '>' +
+           '    ' + escapeHtml(label) + '  </button>' +
+           '</div>';
+  }
+
+  function renderObjectSearchStatus() {
+    var state = objectSearchState();
+    var status = elementById('sql-obj-search-status');
+    var note = elementById('sql-obj-search-scope-note');
+    if (status) {
+      var text = '';
+      if (state.loading) {
+        text = i18nText('sql_editor.obj_search_searching', '正在搜索…');
+      } else if (state.error) {
+        text = state.error;
+      } else if (state.query.trim()) {
+        text = i18nText('sql_editor.obj_search_count', '共 {n} 条').replace('{n}', state.total);
+        // 命中多于一页时说清楚「已经显示了几条」，剩下的靠下面的「加载更多」接上
+        if (state.hasMore || state.results.length < state.total) {
+          text += ' · ' + i18nText('sql_editor.obj_search_shown', '已显示 {shown} 条')
+            .replace('{shown}', state.results.length);
+        } else if (state.truncated) {
+          text += ' · ' + i18nText('sql_editor.obj_search_truncated', '仅显示前 {n} 条')
+            .replace('{n}', state.results.length);
+        }
+        if (state.cached) text += ' · ' + i18nText('sql_editor.obj_search_cached', '来自缓存');
+        if (state.metadataTruncated) {
+          text += ' · ' + i18nText('sql_editor.obj_search_meta_truncated', '数据字典已达上限，结果可能不完整');
+        }
+      }
+      status.textContent = text;
+      status.classList.toggle('is-error', !!state.error);
+    }
+    if (note) {
+      // 范围说明由后端给出（SQL Server 的「全部」是跨库名单，会带上了扫了几个库）；
+      // 老后端没回这段时退回本地文案，别让提示栏空着。
+      var noteText = state.scopeNote || (state.scopeLimited
+        ? i18nText('sql_editor.obj_search_scope_limited',
+                   '“全部”仅覆盖当前连接库的所有模式，跨库请切换数据库')
+        : '');
+      // 聚合搜索要把「有几个源没连上」摊开说：否则用户以为搜过了，其实是漏了
+      if (state.scopeMode === 'ds' && state.datasourceErrors.length) {
+        noteText += ' · ' + i18nText('sql_editor.obj_search_ds_errors',
+                                     '有 {n} 个数据源没搜到：{detail}')
+          .replace('{n}', String(state.datasourceErrors.length))
+          .replace('{detail}', function () { return state.datasourceErrors.join('；'); });
+      }
+      note.textContent = noteText;
+      note.classList.toggle('is-error',
+                             state.scopeMode === 'ds' && !!state.datasourceErrors.length);
+    }
+  }
+
+  function renderObjectSearch() {
+    var state = objectSearchState();
+    var list = elementById('sql-obj-search-results');
+    if (!list) return;
+    if (state.error) {
+      list.innerHTML = '<div class="sql-obj-search-msg is-error">' +
+                       escapeHtml(state.error) + '</div>';
+    } else if (state.loading) {
+      list.innerHTML = '<div class="sql-obj-search-msg">' +
+                       escapeHtml(i18nText('sql_editor.obj_search_loading',
+                                           '正在读取数据字典…（首次可能较慢）')) + '</div>';
+    } else if (!state.query.trim()) {
+      list.innerHTML = '<div class="sql-obj-search-msg">' +
+                       escapeHtml(i18nText('sql_editor.obj_search_hint',
+                                           '输入表名或视图名开始搜索；支持 % / * 通配符')) + '</div>';
+    } else if (!state.results.length) {
+      var empty = escapeHtml(i18nText('sql_editor.obj_search_empty', '没有匹配的对象'));
+      if (state.scopeMode === 'db') {
+        empty += '<button type="button" class="btn btn-ghost btn-xs sql-obj-search-all" ' +
+                 'data-action="scope-all">' +
+                 escapeHtml(i18nText('sql_editor.obj_search_all_action', '在整个连接中搜索')) +
+                 '</button>';
+      } else if (state.scopeMode === 'all' && supportsCrossDatasourceSearch()) {
+        // 本源没搜到 ≠ 没有这张表：同类型还有别的源（测试机/另一套实例）时给个入口
+        empty += '<button type="button" class="btn btn-ghost btn-xs sql-obj-search-all" ' +
+                 'data-action="scope-ds">' +
+                 escapeHtml(i18nText('sql_editor.obj_search_ds_action', '搜所有同类型数据源')) +
+                 '</button>';
+      }
+      list.innerHTML = '<div class="sql-obj-search-msg">' + empty + '</div>';
+    } else {
+      list.innerHTML = renderObjectSearchItems(state.results) + objectSearchMoreRowHtml();
+    }
+    list.setAttribute('aria-busy', state.loading ? 'true' : 'false');
+    setObjectSearchActive(state.activeIndex);
+    renderObjectSearchStatus();
+  }
+
+  function setObjectSearchActive(index) {
+    var state = objectSearchState();
+    state.activeIndex = index;
+    var list = elementById('sql-obj-search-results');
+    var input = elementById('sql-obj-search-input');
+    if (!list) return;
+    var items = list.querySelectorAll('.sql-obj-search-item');
+    items.forEach(function (item) {
+      var active = Number(item.getAttribute('data-index')) === index;
+      item.classList.toggle('active', active);
+      item.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    var activeItem = items[index];
+    if (input) {
+      if (activeItem) input.setAttribute('aria-activedescendant', activeItem.id);
+      else input.removeAttribute('aria-activedescendant');
+    }
+    if (activeItem && activeItem.scrollIntoView) {
+      activeItem.scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  function moveObjectSearchActive(delta) {
+    var state = objectSearchState();
+    if (!state.results.length) return;
+    var nextIndex = state.activeIndex + delta;
+    if (nextIndex < 0) nextIndex = state.results.length - 1;
+    if (nextIndex >= state.results.length) nextIndex = 0;
+    setObjectSearchActive(nextIndex);
+  }
+
+  function onObjectSearchKey(event) {
+    // 中文输入法选词时不要抢 Enter / 方向键
+    if (event.isComposing || event.keyCode === 229) return;
+    var state = objectSearchState();
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      moveObjectSearchActive(1);
+      return;
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      moveObjectSearchActive(-1);
+      return;
+    }
+    if (event.key === 'Enter') {
+      if (state.results.length) {
+        event.preventDefault();
+        var result = state.results[state.activeIndex >= 0 ? state.activeIndex : 0];
+        if (event.shiftKey) locateObjectSearchResult(result);
+        else insertObjectSearchResult(result);
+        return;
+      }
+      // 还在防抖等待期时按 Enter：立即发请求，不要等 250ms
+      if (state.query.trim() && (state.debounceTimer || !state.loading)) {
+        event.preventDefault();
+        if (state.debounceTimer) { clearTimeout(state.debounceTimer); state.debounceTimer = null; }
+        state.requestSeq += 1;
+        runObjectSearch();
+      }
+      return;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      closeObjectSearch();
+    }
+  }
+
+  function applyObjectSearchTarget(datasourceId, result) {
+    if (!datasourceId || !result) return;
+    editorState.datasourceId = String(datasourceId);
+    // database 由后端按方言算好（Oracle/MySQL 即 owner/库，PG/SQLServer 是连接库）；
+    // 不要用 schema 兜底，否则会把 dbo / sales 当成数据库目标。
+    editorState.databaseName = result.database || '';
+    editorState.schemaName = '';
+    editorState.treeNodeType = result.type === 'VIEW' ? 'view' : 'table';
+    var hintEl = elementById('sql-curr-ds');
+    if (hintEl) {
+      var text = TREE_ICON + ' ' + (datasourceNameOf(datasourceId) || ('DS#' + datasourceId));
+      if (editorState.databaseName) text += ' › ' + editorState.databaseName;
+      var objectLabel = result.tree_name || result.name || '';
+      if (objectLabel) text += ' › ' + objectLabel;
+      hintEl.textContent = text;
+    }
+    syncContextToTab();
+    saveEditorContext();
+    refreshTargetSelectors();
+    refreshMetadataStatus();
+  }
+
+  // 聚合搜索的命中可能属于「另一条同类型数据源」：目标数据源以结果自带的为准，
+  // 插入的限定名、执行目标、树定位都要跟着切过去，否则会把 SQL 写到别的实例上。
+  function objectSearchResultDatasource(result) {
+    var state = objectSearchState();
+    return String((result && result.datasource_id) || state.datasourceId || '');
+  }
+
+  function insertObjectSearchResult(result) {
+    if (!result) return;
+    var datasourceId = objectSearchResultDatasource(result);
+    var rawName = result.qualified || result.label || result.name || '';
+    var qualified = qualifiedObjectName(datasourceTypeOf(datasourceId),
+                                        result.database || '', rawName);
+    applyObjectSearchTarget(datasourceId, result);
+    closeObjectSearch(false);
+    if (!insertTextAtCursor(qualified || rawName)) {
+      notifyUser(i18nText('sql_editor.obj_search_insert_fail',
+                          '插入失败：当前没有可用的执行窗口'), 'error');
+    }
+  }
+
+  function locateObjectSearchResult(result) {
+    if (!result) return;
+    var datasourceId = objectSearchResultDatasource(result);
+    applyObjectSearchTarget(datasourceId, result);
+    closeObjectSearch(false);
+    locateObjectInTree(datasourceId, result).then(function (located) {
+      if (!located) {
+        notifyUser(i18nText('sql_editor.obj_search_locate_fail',
+                            '未在树中定位到该对象，可能已删除或列表未刷新'), 'info');
+      }
+    });
+  }
+
+  function clearTreeFilterForLocate() {
+    if (!editorState.treeKeyword) return;
+    editorState.treeKeyword = '';
+    var input = elementById('sql-tree-search');
+    if (input) input.value = '';
+    if (editorState.datasources.length) renderDatasourceTree();
+  }
+
+  function findDatasourceTreeNode(datasourceId) {
+    var nodes = document.querySelectorAll('#sql-tree-body .sql-tree-node[data-type="ds"]');
+    for (var index = 0; index < nodes.length; index++) {
+      if (String(nodes[index].getAttribute('data-ds-id')) === String(datasourceId)) return nodes[index];
+    }
+    return null;
+  }
+
+  function findDatabaseTreeNode(datasourceId, databaseName) {
+    var nodes = document.querySelectorAll('#sql-tree-body .sql-tree-node[data-type="db"]');
+    var needle = String(databaseName || '').toLowerCase();
+    for (var index = 0; index < nodes.length; index++) {
+      var node = nodes[index];
+      if (String(node.getAttribute('data-ds-id')) !== String(datasourceId)) continue;
+      if (String(node.getAttribute('data-db') || '').toLowerCase() === needle) return node;
+    }
+    return null;
+  }
+
+  // 展开节点，必要时等子层加载完（定位用；不会把已展开的节点再收起来）
+  function expandTreeNode(node) {
+    var container = childrenContainerOf(node);
+    if (!container) return Promise.resolve(null);
+    var toggle = node.querySelector('.tree-toggle');
+    if (!container.classList.contains('expanded')) {
+      container.classList.add('expanded');
+      if (toggle) toggle.classList.add('expanded');
+    }
+    if (container.querySelector('.sql-tree-node')) return Promise.resolve(container);
+    showContainerLoading(container);
+    var nodeType = node.getAttribute('data-type');
+    var datasourceId = node.getAttribute('data-ds-id');
+    if (nodeType === 'ds') return loadDatabasesOfDatasource(container, datasourceId);
+    if (nodeType === 'db') {
+      return loadObjectsOfDatabase(container, datasourceId, node.getAttribute('data-db') || '');
+    }
+    return Promise.resolve(container);
+  }
+
+  function findObjectTreeNode(datasourceId, databaseName, result) {
+    var candidates = [];
+    [result.tree_name, result.name,
+     result.schema ? result.schema + '.' + result.name : '',
+     result.qualified].forEach(function (candidate) {
+      var text = String(candidate || '');
+      if (text && candidates.indexOf(text) < 0) candidates.push(text.toLowerCase());
+    });
+    var nodes = document.querySelectorAll('#sql-tree-body .sql-tree-node.leaf');
+    var needleDatabase = String(databaseName || '').toLowerCase();
+    for (var index = 0; index < nodes.length; index++) {
+      var node = nodes[index];
+      if (String(node.getAttribute('data-ds-id')) !== String(datasourceId)) continue;
+      if (String(node.getAttribute('data-db') || '').toLowerCase() !== needleDatabase) continue;
+      var nodeName = String(node.getAttribute('data-name') || '').toLowerCase();
+      if (nodeName && candidates.indexOf(nodeName) >= 0) return node;
+    }
+    return null;
+  }
+
+  function finishTreeLocate(node) {
+    if (!node) return;
+    selectTreeNode(node);
+    if (node.scrollIntoView) node.scrollIntoView({ block: 'center' });
+    node.classList.add('flash');
+    setTimeout(function () { node.classList.remove('flash'); }, 1600);
+  }
+
+  function locateObjectInTree(datasourceId, result) {
+    clearTreeFilterForLocate();
+    var datasourceNode = findDatasourceTreeNode(datasourceId);
+    var datasourceReady = datasourceNode
+      ? Promise.resolve(datasourceNode)
+      : loadDatasourceTree().then(function () { return findDatasourceTreeNode(datasourceId); });
+    return datasourceReady.then(function (foundDatasourceNode) {
+      if (!foundDatasourceNode) return false;
+      return expandTreeNode(foundDatasourceNode).then(function () {
+        // database 已经由后端按方言归一（owner / 库 / catalog），不再拿 schema 兜底，
+        // 否则 PG 的 sales 模式可能误命中一个叫 sales 的库节点。
+        var databaseName = result.database || '';
+        var databaseNode = findDatabaseTreeNode(datasourceId, databaseName);
+        if (!databaseNode) return false;
+        var actualDatabase = databaseNode.getAttribute('data-db') || databaseName;
+        return expandTreeNode(databaseNode).then(function () {
+          var objectNode = findObjectTreeNode(datasourceId, actualDatabase, result);
+          if (objectNode) { finishTreeLocate(objectNode); return true; }
+          // 对象名单可能过期：强制刷新这个库一次，再找一遍
+          var container = childrenContainerOf(databaseNode);
+          if (!container) return false;
+          showContainerLoading(container);
+          return loadObjectsOfDatabase(container, String(datasourceId), actualDatabase, true)
+            .then(function () {
+              objectNode = findObjectTreeNode(datasourceId, actualDatabase, result);
+              if (!objectNode) return false;
+              finishTreeLocate(objectNode);
+              return true;
+            });
+        });
+      });
+    }).catch(function () { return false; });
+  }
+
+  function bindObjectSearchEvents() {
+    var searchButton = elementById('sql-btn-object-search');
+    if (searchButton) {
+      // 只有 title 的元素在部分读屏器里没有可访问名称，补一个同文案的 aria-label
+      searchButton.setAttribute('aria-label',
+        i18nText('sql_editor.obj_search_tip', '搜索对象（Ctrl+K）'));
+    }
+    var list = elementById('sql-obj-search-results');
+    if (!list || list.eventsBound) return;
+    list.eventsBound = true;
+    list.addEventListener('click', function (event) {
+      var scopeAll = event.target.closest ? event.target.closest('[data-action="scope-all"]') : null;
+      if (scopeAll) {
+        onObjectSearchScopeChange('all');
+        return;
+      }
+      var scopeDs = event.target.closest ? event.target.closest('[data-action="scope-ds"]') : null;
+      if (scopeDs) {
+        onObjectSearchScopeChange('ds');
+        return;
+      }
+      var more = event.target.closest ? event.target.closest('[data-action="load-more"]') : null;
+      if (more) {
+        event.preventDefault();
+        loadMoreObjectSearch();
+        return;
+      }
+      var item = event.target.closest ? event.target.closest('.sql-obj-search-item') : null;
+      if (item) setObjectSearchActive(Number(item.getAttribute('data-index')));
+    });
+    list.addEventListener('dblclick', function (event) {
+      var item = event.target.closest ? event.target.closest('.sql-obj-search-item') : null;
+      if (!item) return;
+      var result = objectSearchState().results[Number(item.getAttribute('data-index'))];
+      if (result) insertObjectSearchResult(result);
+    });
+    list.addEventListener('mouseover', function (event) {
+      var item = event.target.closest ? event.target.closest('.sql-obj-search-item') : null;
+      if (!item) return;
+      var index = Number(item.getAttribute('data-index'));
+      if (index !== objectSearchState().activeIndex) setObjectSearchActive(index);
+    });
+    var typeHost = elementById('sql-obj-search-types');
+    if (typeHost) {
+      typeHost.addEventListener('click', function (event) {
+        var button = event.target.closest ? event.target.closest('.sql-obj-type-btn') : null;
+        if (!button) return;
+        onObjectSearchTypeChange(button.getAttribute('data-object-type') || 'all');
+      });
+    }
   }
 
   // ── 限定名 / Top-N / 表属性 ──────────────────────────────────
@@ -1765,7 +2493,7 @@
     executeActiveSql({ wholeContentOnly: true });
   }
 
-  // ── 右键菜单（不透明 / 可拖动 / 可缩放，沿用旧版习惯）──
+  // ── 右键菜单（不透明 / 可拖动 / 可缩放）──
   var contextMenuElement = null;
 
   function hideTreeContextMenu() {
@@ -2803,6 +3531,7 @@
   // 离开本页时把整屏结果收回去：否则挂在 <body> 下的浮层会盖在别的页面上
   function leaveSqlEditorPage() {
     if (editorState.resultPaneMaximized) toggleResultPaneMaximized(false);
+    closeObjectSearch(false);         // 面板是浮层，切页收掉并作废在途搜索
     closeLobViewer();                 // 查看窗口挂在 body 下，切页要收掉
   }
 
@@ -2958,7 +3687,7 @@
       document.addEventListener('mousemove', moveHandler);
       document.addEventListener('mouseup', upHandler);
     });
-    splitter.addEventListener('dblclick', function () {   // 双击复位（旧版习惯）
+    splitter.addEventListener('dblclick', function () {   // 双击复位为默认分配
       editorPane.style.height = ''; editorPane.style.flex = '';
       resultPane.style.height = ''; resultPane.style.flex = '';
       delete editorState.layoutSizes.editorHeight;
@@ -3013,6 +3742,16 @@
     document.addEventListener('keydown', function (event) {
       var page = elementById('page-sql-editor');
       if (!page || !page.classList.contains('active')) return;
+      if (event.key === 'Escape' && editorState.objectSearch.open) {
+        closeObjectSearch();
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey &&
+          (event.key === 'k' || event.key === 'K')) {
+        event.preventDefault();
+        toggleObjectSearch();
+        return;
+      }
       if (event.key === 'Escape') {
         var lobModal = elementById('sql-lob-modal');
         if (lobModal && lobModal.style.display && lobModal.style.display !== 'none') {
@@ -3045,13 +3784,14 @@
     var placeholder = i18nText('sql_editor.sample_placeholder', '输入 SQL，如：{s}')
                         .replace(/\{s\}/g, sampleSqlOf().hint);
     editorState.tabs.forEach(function (tab) {
-      if (tab.codeMirror) { try { tab.codeMirror.setOption('placeholder', placeholder); } catch (ignore) { /* 旧版本没有该选项 */ } }
+      if (tab.codeMirror) { try { tab.codeMirror.setOption('placeholder', placeholder); } catch (ignore) { /* 部分 CodeMirror 版本没有该选项 */ } }
       if (tab.textareaEl) tab.textareaEl.placeholder = placeholder;
     });
   }
 
   function bindStaticControls() {
     bindTreeEvents();
+    bindObjectSearchEvents();
     bindLobViewer();
     var tabsList = elementById('sql-tabs-list');
     if (tabsList && !tabsList.eventsBound) {
@@ -3117,6 +3857,12 @@
     closeAllResults: closeAllResultTabs,
     reloadTree: loadDatasourceTree,
     filterTree: filterDatasourceTree,
+    openObjectSearch: openObjectSearch,
+    closeObjectSearch: closeObjectSearch,
+    onObjectSearchInput: onObjectSearchInput,
+    onObjectSearchKey: onObjectSearchKey,
+    onObjectSearchScopeChange: onObjectSearchScopeChange,
+    onObjectSearchTypeChange: onObjectSearchTypeChange,
     onTargetChange: onTargetChange,
     addTab: function () { addEditorTab({}); },
     closeTableInfo: closeTableInfoModal,

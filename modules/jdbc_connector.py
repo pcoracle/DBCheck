@@ -912,25 +912,48 @@ def _start_jvm(jars: List[str]) -> None:
         _JVM_START_LOCK.release()
 
 
+def _preload_driver_class(driver_class: str) -> bool:
+    """把驱动主类装进 JVM（静态初始化会自行向 DriverManager 注册）。
+
+    只需要 JVM + classpath，**不建任何数据库连接**，所以放启动阶段零风险：
+    既不碰用户的库，也不占会话。
+    """
+    import jpype
+    jpype.JClass(driver_class)
+    return True
+
+
 def prestart_jvm(db_types) -> bool:
-    """按数据源类型预热 JVM（起 JVM + 挂驱动 jar），不建任何数据库连接。
+    """按数据源类型预热 JDBC：起 JVM、挂驱动 jar、装载驱动类；不建任何数据库连接。
 
     [WARN] 必须在**主线程、Web 服务开跑之前**调用：
 
     * 放到后台线程启动，解释器退出会卡在 ``jpype._JTerminate``（实测退不出去）；
     * 放到请求线程启动，JVM 启动期间会把 gevent hub 钉死（所有页面无响应）。
 
+    为什么要连驱动类一起装：实测同一条 Oracle 数据源，进程内第一次建连 2.2s、
+    之后每次 180ms 左右，其中约 0.5s 是 JVM 首次加载 ``oracle.jdbc.driver.OracleDriver``
+    的代价（类加载 + 静态初始化 + 注册）。这一步不依赖任何连接串，留在第一次点
+    「执行」时付，用户看到的就是「第一条 SQL 特别慢」。
+
     没有 JDBC 数据源（*_jdbc）时什么都不做；失败只记录，不影响服务启动。
     """
     started = False
+    loaded = set()
     for db_type in (db_types or []):
         try:
-            jars = resolve_driver_jars(str(db_type), '')
+            key = str(db_type or '').strip().lower()
+            jars = resolve_driver_jars(key, '')
             if not jars:
                 continue
             _start_jvm(jars)
-            if _is_jvm_started():
-                started = True
+            if not _is_jvm_started():
+                continue
+            started = True
+            driver_class = str((JDBC_PROFILES.get(key) or {}).get('driver_class') or '').strip()
+            if driver_class and driver_class not in loaded:
+                loaded.add(driver_class)
+                _preload_driver_class(driver_class)
         except Exception as e:  # noqa: BLE001 - 预热失败不影响启动，首个请求会再试
             print('[jvm] 预热 %s 失败: %s' % (db_type, e), flush=True)
     return started

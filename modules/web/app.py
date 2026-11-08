@@ -19,14 +19,37 @@ import logging
 import io
 from pathlib import Path
 
-# ── B 方案：会话/JWT 密钥默认每次启动随机生成（进程级稳定）──────────
-# 重启后旧 Flask 会话 cookie 与 JWT 均失效 → 必须重新登录。
-# 生产环境可设环境变量 DBCheck_SECRET_KEY / JWT_SECRET 固定密钥
-# （多实例/集群部署时必须一致，否则互不相认）。
-if not os.environ.get('DBCheck_SECRET_KEY'):
-    os.environ['DBCheck_SECRET_KEY'] = secrets.token_hex(32)
-if not os.environ.get('JWT_SECRET'):
-    os.environ['JWT_SECRET'] = secrets.token_hex(32)
+# ── 会话/JWT 密钥：优先环境变量，其次落盘复用 ──────────────────
+# 之前默认「每次启动随机」，代价是每次重启都把所有人的登录态踢掉：
+# 助手页表现为「所有接口 401、会话读不到、发不出消息」，看起来就是功能坏了。
+# 现在密钥写进 data/ 下的文件（0600，随 data/ 一起不进版本库），重启后继续沿用；
+# 多实例/集群部署仍必须用环境变量 DBCheck_SECRET_KEY / JWT_SECRET 保持各进程一致。
+def _persistent_secret(env_name, file_name):
+    value = os.environ.get(env_name)
+    if value:
+        return value
+    try:
+        from modules.core.paths import DATA_DIR
+        path = Path(DATA_DIR) / file_name
+        if path.exists():
+            stored = path.read_text(encoding='utf-8').strip()
+            if stored:
+                return stored
+        secret = secrets.token_hex(32)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(secret, encoding='utf-8')
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass        # Windows 上权限位形同虚设，能写就行
+        return secret
+    except OSError as failure:
+        logging.warning('%s 密钥无法落盘（本次启动用随机值，重启后需重新登录）: %s', env_name, failure)
+        return secrets.token_hex(32)
+
+
+os.environ['DBCheck_SECRET_KEY'] = _persistent_secret('DBCheck_SECRET_KEY', '.web_secret')
+os.environ['JWT_SECRET'] = _persistent_secret('JWT_SECRET', '.jwt_secret')
 
 # 全局基础目录（开发模式用 __file__，PyInstaller 打包后用 exe 目录）
 if getattr(sys, "frozen", False):
@@ -534,8 +557,8 @@ except ImportError:
 # 静态资源已收口到 assets/web/（阶段5：原 web_templates 下的 static/、icons/ 及各 png/ico/js 等）。
 # 因 static_url_path='/'，前端所有绝对引用（/static/...、/icons/...、/xxx.png 等）自动映射到 static_folder 根。
 app = Flask(__name__, template_folder=str(PROJECT_ROOT / 'web_templates'), static_folder=str(PROJECT_ROOT / 'assets' / 'web'), static_url_path='/')
-# 会话密钥取自环境变量 DBCheck_SECRET_KEY（已在启动时为未设置的情况种入进程级随机值）。
-# 重启后旧会话 cookie 失效，需重新登录；生产可固定该环境变量保持登录态。
+# 会话密钥取自环境变量 DBCheck_SECRET_KEY（未设置时是 data/.web_secret 里落盘复用的密钥，
+# 重启后登录态保持；多实例部署请用环境变量统一）。
 app.config['SECRET_KEY'] = os.environ['DBCheck_SECRET_KEY']
 # 模板自动重载：开发/迭代阶段避免 Flask 缓存旧版 index.html，修改前端后无需重启进程即可生效
 app.config['TEMPLATES_AUTO_RELOAD'] = True
@@ -3438,7 +3461,23 @@ def index():
         rules_available = True
     except Exception:
         pass
+    # AI 巡检助手实现选择（回退开关）：
+    #   source（默认）= 助手页完整实现（aias.js + 对应 DOM/CSS，含槽位、拆分执行、批量）；
+    #   fusion        = 另一套模块化实现，出问题时改这个键即可退回。
+    # 临时切换还可以带 URL 参数 ?aias_impl=fusion 便于两套并排对比。
+    aias_impl = 'source'
+    try:
+        import json as _json_mod
+        _cfg_path = os.path.join(BASE_DIR, 'dbc_config.json')
+        if os.path.exists(_cfg_path):
+            with open(_cfg_path, 'r', encoding='utf-8') as _fh:
+                aias_impl = (_json_mod.load(_fh) or {}).get('ai_assistant_impl', 'source')
+        from flask import request as _req
+        aias_impl = _req.args.get('aias_impl') or aias_impl
+    except Exception:
+        aias_impl = 'source'
     resp = make_response(render_template('index.html', version=__version__, edition=EDITION, lang=lang, i18n_data=i18n_data,
+                           aias_source_ui=(aias_impl != 'fusion'),
                            pro_available=pro_available,
                            rules_available=rules_available,
                            admin_token=get_admin_token(),
@@ -6703,6 +6742,30 @@ def api_awr_status(task_id):
     return jsonify({'ok': True, 'exists': False})
 
 
+# AI 巡检助手：任务历史（对话回溯）
+try:
+    from modules.ai.routes import (ai_assistant_bp as _ai_assistant_bp,
+                                   ai_session_bp as _ai_session_bp,
+                                   ai_task_bp as _ai_task_bp)
+    app.register_blueprint(_ai_task_bp)
+    app.register_blueprint(_ai_session_bp)
+    app.register_blueprint(_ai_assistant_bp)
+    # 助手页按 /api/chat/* 请求，这里把同一批 view 函数也挂到这些路径上：
+    # 接口只有一份实现（鉴权、响应结构都一样），不复制第二份逻辑。
+    from modules.ai import chat_alias as _ai_chat_alias
+    _ai_chat_alias.register(app)
+except Exception as _ai_task_err:
+    print('[ai] 任务历史接口加载失败: %s' % _ai_task_err, flush=True)
+
+# AWR 在线生成（快照 / 生成 / 预览下载 / 最近文件 / AI 流式诊断）
+# 上传解析与 Word 报告仍在上面的 /api/awr/upload、/api/awr/report（异步任务 + 进度）。
+try:
+    from modules.awr.routes import awr_bp as _awr_extra_bp
+    app.register_blueprint(_awr_extra_bp)
+except Exception as _awr_extra_err:      # 模块缺失/语法问题时不要拖垮整站
+    print('[awr] 在线生成接口加载失败: %s' % _awr_extra_err, flush=True)
+
+
 @app.route('/api/rag/ollama-status', methods=['GET'])
 def api_rag_ollama_status():
     """向后兼容：检查当前 Embedding 后端连接状态，同时返回 backend 类型"""
@@ -8209,15 +8272,19 @@ def api_ds_objects(ds_id):
                                     dbname=database, connect_timeout=timeout)
             cur = conn.cursor()
             # 查所有非系统 schema 的表
+            # [WARN] pg_temp_* 是会话临时表：换条连接就没了，列进树里既点不开也没意义，
+            # 而且用户要的是「只列表和视图」，临时表属于「其它对象」，不显示。
             cur.execute(
                 "SELECT schemaname, tablename FROM pg_catalog.pg_tables "
                 "WHERE schemaname NOT IN ('pg_catalog','information_schema','pg_toast') "
+                "  AND schemaname NOT LIKE 'pg\\_temp%' "
                 "ORDER BY schemaname, tablename"
             )
             tables = [r[0] + '.' + r[1] if r[0] != 'public' else r[1] for r in cur.fetchall()]
             cur.execute(
                 "SELECT schemaname, viewname FROM pg_catalog.pg_views "
                 "WHERE schemaname NOT IN ('pg_catalog','information_schema') "
+                "  AND schemaname NOT LIKE 'pg\\_temp%' "
                 "ORDER BY schemaname, viewname"
             )
             views = [r[0] + '.' + r[1] if r[0] != 'public' else r[1] for r in cur.fetchall()]
@@ -8453,6 +8520,221 @@ def api_ds_objects(ds_id):
         return jsonify(payload)
     except Exception as e:
         return jsonify({'error': str(e), 'db_type': db_type}), 500
+
+
+def _visible_datasources_same_dialect(ds_id, dialect):
+    """当前用户可见、且方言相同的已登记数据源（含本条）。
+
+    「同类型数据源聚合搜索」的候选名单：先过 ``filter_visible``，
+    再按 ``normalize_db_type`` 归一后的方言比对 —— ``sqlserver`` 与
+    ``sqlserver_jdbc``（原生 pyodbc / JDBC 插件两种接法）算同一个方言。
+    """
+    from modules.ai.datasource_access import visible_datasources
+    from modules.sqleditor.metadata import normalize_db_type
+    wanted = normalize_db_type(dialect)
+    picked, seen = [], set()
+    for row in visible_datasources() or []:
+        rid = str(row.get('id') or '')
+        if not rid or rid in seen:
+            continue
+        if normalize_db_type(row.get('db_type', '')) != wanted:
+            continue
+        seen.add(rid)
+        picked.append({'id': rid,
+                       'name': str(row.get('name') or row.get('host') or rid),
+                       'db_type': row.get('db_type', '')})
+    if ds_id and str(ds_id) not in seen:
+        # 本条数据源没出现在可见清单（口径差异）时也要搜它，路由已经判过权限
+        picked.insert(0, {'id': str(ds_id), 'name': str(ds_id), 'db_type': dialect})
+    return picked
+
+
+def _object_search_across_datasources(ds_id, dialect, query, types, limit, force, offset=0,
+                                      maxDatasources=None, budgetSeconds=None):
+    """把同方言的已登记数据源各搜一遍，按匹配档位合并成一份结果。
+
+    每个数据源都用「不指定库」的范围搜（SQL Server = 实例内各库的跨 catalog 名单），
+    这样聚合出来的才是「所有数据源 + 所有库」的对象，而不是各自主库的对象。
+
+    [WARN] 这里是**串行**的，不是偷懒：插件型数据源（``*_jdbc``）在 Web 主进程里起 JVM，
+    而 JVM 的并发调用会长时间霸占执行权、把 gevent hub 一起钉死（见
+    ``modules/jdbc_connector`` 里「JVM 只能起一次」那段实测记录）—— 并行搜 12 个源
+    换来的是「整个界面没响应」。所以按墙钟预算逐个搜，超预算就停手，
+    剩下的源在 ``datasources_skipped`` / 提示栏里如实说明，绝不假装搜过了。
+    """
+    from modules.sqleditor.metadata import (
+        search_objects, OBJECT_SEARCH_DATASOURCE_MAX, OBJECT_SEARCH_DATASOURCE_BUDGET_SECONDS)
+    from modules.pro import get_instance_manager
+    maxDatasources = maxDatasources or OBJECT_SEARCH_DATASOURCE_MAX
+    # 注意用 is None：budgetSeconds=0（测试 / 只想搜本条）不能被当成「没传」而回落到默认预算
+    if budgetSeconds is None:
+        budgetSeconds = OBJECT_SEARCH_DATASOURCE_BUDGET_SECONDS
+    try:
+        offsetValue = max(0, int(offset or 0))
+    except (TypeError, ValueError):
+        offsetValue = 0
+    # 翻页要对「全局序」成立：每个源先取出 offset+页大小 条（源内序与全局序在同一源
+    # 内完全一致，所以全局前 K 条必然落在各源前 K 条里），合并后再切片。
+    fetchPerSource = offsetValue + limit
+    allCandidates = _visible_datasources_same_dialect(ds_id, dialect)
+    candidates = allCandidates[:maxDatasources]
+    mgr = get_instance_manager()
+    errors = []
+    settled = []
+    budgetStopped = 0
+    broken = 0
+    startedAt = time.time()
+    for index, entry in enumerate(candidates):
+        # 当前这条永远要搜完（用户点的就是它），之后按预算决定还搜不搜下一个源
+        if index and time.time() - startedAt > budgetSeconds:
+            budgetStopped = len(candidates) - index
+            errors.append('剩余 %d 个数据源超出本次搜索预算（%ds）未搜' % (
+                budgetStopped, int(budgetSeconds)))
+            break
+        inst = mgr.get_instance_decrypted(entry['id'])
+        if not inst:
+            broken += 1
+            errors.append('%s：数据源配置已变更，请重新选择' % entry['name'])
+            continue
+        try:
+            payload = search_objects(
+                inst, inst.get('db_type', ''), '', query,
+                scope='all', types=types, limit=fetchPerSource, force=force,
+                conn_opener=_pooled_editor_conn,
+                datasource_id=entry['id'], datasource_name=entry['name'])
+        except Exception as failure:
+            payload = None
+            errors.append('%s：%s: %s' % (entry['name'], type(failure).__name__, failure))
+        settled.append((entry, payload))
+
+    merged, covered, cachedAll, metadataTruncated = [], 0, True, False
+    matchedTotal = 0            # 各源「命中总数」之和（比 merged 准，merged 只装了取回来的窗口）
+    for entry, payload in settled:
+        if payload is None or not payload.get('ok'):
+            if payload is not None:
+                errors.append('%s：%s' % (entry['name'], payload.get('error') or '对象名单加载失败'))
+                cachedAll = False
+            continue
+        covered += 1
+        cachedAll = cachedAll and bool(payload.get('cached'))
+        metadataTruncated = metadataTruncated or bool(payload.get('truncated'))
+        matchedTotal += int(payload.get('total') or 0)
+        for obj in payload.get('objects') or []:
+            merged.append((obj, int(obj.get('rank') or 0),
+                           str(obj.get('datasource_name') or ''),
+                           str(obj.get('database') or '')))
+    # 先按匹配档位（精确 > 前缀 > 包含），同档再按数据源 / 库 / 标签聚拢：
+    # 跨数据源时「在 A 源精确命中的表」不该被 B 源一堆包含命中挤到后面
+    merged.sort(key=lambda item: (item[1], item[2].lower(), item[3].lower(),
+                                  (item[0].get('label') or '').lower()))
+    picked = [item[0] for item in merged[offsetValue:offsetValue + limit]]
+    hasMore = matchedTotal > offsetValue + len(picked) or len(merged) > offsetValue + len(picked)
+    attempted = len(settled) + broken          # 试过几个源（含读不到配置的）
+    skipped = max(0, len(allCandidates) - attempted)   # 因上限/预算根本没试的
+    note = '已搜 %d/%d 个同类型数据源的 %s' % (
+        covered, attempted,
+        '全部库（SQL Server 跨库名单）' if dialect == 'sqlserver' else '可访问对象')
+    if budgetStopped:
+        note += '，另有 %d 个超出本次搜索预算未搜' % budgetStopped
+    if skipped - budgetStopped > 0:
+        note += '，%d 个超出单次数据源上限未搜' % (skipped - budgetStopped)
+    return {
+        'ok': True, 'db_type': dialect, 'database': '', 'scope': 'ds',
+        'query': query, 'total': matchedTotal, 'returned': len(picked),
+        'limit': limit, 'offset': offsetValue, 'has_more': hasMore,
+        'truncated': hasMore, 'scope_limited': False,
+        'metadata_truncated': metadataTruncated, 'cached': cachedAll,
+        'elapsed_ms': int((time.time() - startedAt) * 1000),
+        'objects': picked,
+        'datasource_id': str(ds_id), 'datasource_name': '',
+        'datasources_searched': covered,
+        'datasources_attempted': attempted,
+        'datasources_listed': len(candidates),
+        'datasources_skipped': skipped,
+        'datasource_errors': errors,
+        'scope_note': note,
+    }
+
+
+@app.route('/api/pro/datasources/<ds_id>/object-search', methods=['GET'])
+def api_ds_object_search(ds_id):
+    """SQL 编辑器「对象快速搜索」：按名称查表 / 视图，不要求树节点已经展开。
+
+    参数:
+        - q:        关键字；不带 % / * 时按包含匹配，带 % / * 时按通配符匹配
+        - database: 当前库 / Oracle 的 owner；scope=db 时必填
+        - scope:    db（默认）/ all / ds；all 覆盖当前连接可访问的对象
+                    （SQL Server 会展开成实例内各库的名单，PG / DB2 仍是当前库）；
+                    ds 覆盖**当前用户可见的同类数据源**（每个数据源都按其"全部"范围搜），
+                    结果里带数据源名，点选时编辑器会切到那条数据源
+        - types:    table,view（默认全部）
+        - limit:    本页条数（默认 200，最大 500）
+        - offset:   跳过前 N 条；「加载更多」用，翻页只切内存里的名单，不重查数据字典
+        - refresh:  传 1 跳过对象名单缓存
+
+    权限判定与 /objects 一致：先判权，再读带 TTL 的对象名单缓存；
+    搜索本身只在内存里过滤，不会每敲一个字就回数据库查一次数据字典。
+    ``ds`` 范围多了一步：候选数据源同样先过 ``filter_visible``，无权的根本不建连。
+    """
+    query = (request.args.get('q') or '').strip()
+    database = (request.args.get('database') or '').strip()
+    scope = (request.args.get('scope') or '').strip().lower()
+    if scope not in ('db', 'all', 'ds'):
+        scope = 'db' if database else 'all'
+    if scope == 'db' and not database:
+        return jsonify({'ok': False, 'error': '缺少 database 参数'}), 400
+    refresh = (request.args.get('refresh') or '').strip().lower() in ('1', 'true', 'yes')
+    types = (request.args.get('types') or '').strip() or None
+    try:
+        limit = int(request.args.get('limit') or 200)
+    except (TypeError, ValueError):
+        limit = 200
+    try:
+        offset = max(0, int(request.args.get('offset') or 0))
+    except (TypeError, ValueError):
+        offset = 0
+
+    from modules.pro import get_instance_manager
+    from modules.access import principal_from_session, assert_visible
+    ok, err = assert_visible(principal_from_session(), 'instance', ds_id)
+    if not ok:
+        return jsonify({'ok': False, **err}), 403
+    inst = get_instance_manager().get_instance_decrypted(ds_id)
+    if not inst:
+        return jsonify({'error': f'数据源不存在: {ds_id}'}), 404
+
+    from modules.sqleditor.metadata import (
+        OBJECT_SEARCH_LIMIT_MAX, OBJECT_SEARCH_DATASOURCE_MAX,
+        normalize_db_type, search_objects)
+    limit = max(1, min(OBJECT_SEARCH_LIMIT_MAX, limit))
+    dialect = normalize_db_type(inst.get('db_type', ''))
+    if not query:
+        return jsonify({
+            'ok': True, 'db_type': dialect,
+            'database': database, 'scope': scope, 'query': '',
+            'total': 0, 'returned': 0, 'limit': limit,
+            'offset': offset, 'has_more': False,
+            'truncated': False, 'scope_limited': False,
+            'metadata_truncated': False, 'cached': False,
+            'elapsed_ms': 0, 'objects': [], 'scope_note': '',
+            'datasource_id': str(ds_id), 'datasource_name': '',
+        })
+    try:
+        if scope == 'ds':
+            return jsonify(_object_search_across_datasources(
+                ds_id, dialect, query, types, limit, refresh, offset=offset,
+                maxDatasources=OBJECT_SEARCH_DATASOURCE_MAX))
+        payload = search_objects(
+            inst, inst.get('db_type', ''), database, query,
+            scope=scope, types=types, limit=limit, offset=offset, force=refresh,
+            conn_opener=_pooled_editor_conn,
+            datasource_id=ds_id,
+            datasource_name=inst.get('name') or str(ds_id))
+        return jsonify(payload)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'ok': False, 'error': '%s: %s' % (type(e).__name__, e)}), 500
 
 
 @app.route('/api/pro/datasources/<ds_id>/schemas', methods=['GET'])
@@ -10397,11 +10679,16 @@ def _load_ai_config():
     }
 
 
-def _call_llm(prompt: str, system: str = '', stream_callback=None) -> str:
+def _call_llm(prompt: str, system: str = '', stream_callback=None, reasoning_callback=None) -> str:
     """调用 LLM API 生成文本（支持 Ollama 和 OpenAI 协议兼容的远程模型）
     
     Args:
         stream_callback: 流式回调函数，接收 chunk 字符串。如果提供，则流式输出
+        reasoning_callback: 流式回调函数，接收模型原生思考内容（Ollama 的
+            `reasoning` / OpenAI 兼容协议的 `delta.reasoning_content`）。
+            深度思考模型（qwen3 / deepseek-r1 等）推理阶段可能持续几十秒到几分钟，
+            把思考内容单独透出既不污染正文，也让前端「深度思考」块能实时滚动，
+            并让上层的事件队列持续收到数据、不会误判超时。
     """
     cfg = _load_ai_config()
     backend = cfg.get('backend', 'ollama')
@@ -10411,17 +10698,18 @@ def _call_llm(prompt: str, system: str = '', stream_callback=None) -> str:
         backend = cfg.get('online_backend', 'openai')
 
     if backend == 'ollama':
-        return _call_llm_ollama(cfg, prompt, system, timeout, stream_callback)
+        return _call_llm_ollama(cfg, prompt, system, timeout, stream_callback, reasoning_callback)
     elif backend == 'openai':
         online_enabled = cfg.get('online_enabled', False)
         if not online_enabled:
             return '[在线模型未启用，请在 AI 设置中开启"启用在线模型"]'
-        return _call_llm_openai(cfg, prompt, system, timeout, stream_callback)
+        return _call_llm_openai(cfg, prompt, system, timeout, stream_callback, reasoning_callback)
     else:
         return '[AI 后端未启用]'
 
 
-def _call_llm_ollama(cfg: dict, prompt: str, system: str, timeout: int, stream_callback=None) -> str:
+def _call_llm_ollama(cfg: dict, prompt: str, system: str, timeout: int, stream_callback=None,
+                     reasoning_callback=None) -> str:
     """调用 Ollama API 生成文本（支持流式）
 
     Args:
@@ -10475,6 +10763,13 @@ def _call_llm_ollama(cfg: dict, prompt: str, system: str, timeout: int, stream_c
                             if ct:
                                 full_response += ct
                                 stream_callback(ct)
+                        # 思考模型（qwen3 / deepseek-r1 等）单独返回 reasoning 字段：
+                        # 它是模型的推理过程，不是答案正文，走 reasoning_callback，
+                        # 不进 full_response，避免思考内容混进最终答案。
+                        if reasoning_callback is not None:
+                            rt = jdata.get('reasoning') or ''
+                            if rt:
+                                reasoning_callback(rt)
                         if jdata.get('done', False):
                             conn.close()
                             return full_response.strip()
@@ -10495,11 +10790,13 @@ def _call_llm_ollama(cfg: dict, prompt: str, system: str, timeout: int, stream_c
         return f'[Ollama 调用失败: {e}]'
 
 
-def _call_llm_openai(cfg: dict, prompt: str, system: str, timeout: int, stream_callback=None) -> str:
+def _call_llm_openai(cfg: dict, prompt: str, system: str, timeout: int, stream_callback=None,
+                     reasoning_callback=None) -> str:
     """调用 OpenAI 协议兼容的远程 API 生成文本（支持流式）
     
     Args:
         stream_callback: 流式回调函数，接收 chunk 字符串
+        reasoning_callback: 流式回调函数，接收 delta.reasoning_content（深度思考模型）
     """
     api_url = cfg.get('online_api_url', 'https://api.openai.com/v1').rstrip('/')
     model = cfg.get('online_model', 'gpt-4o-mini')
@@ -10550,6 +10847,11 @@ def _call_llm_openai(cfg: dict, prompt: str, system: str, timeout: int, stream_c
                                 choices = data.get('choices', [])
                                 if choices:
                                     delta = choices[0].get('delta', {})
+                                    # 思考模型的推理内容：单独回调，不进正文
+                                    if reasoning_callback is not None:
+                                        rt = delta.get('reasoning_content') or ''
+                                        if rt:
+                                            reasoning_callback(rt)
                                     chunk = delta.get('content', '')
                                     if chunk:
                                         full_response += chunk

@@ -4,16 +4,16 @@
  * Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
  *
  * Fusion page logic: inspection configuration (three-pane master-detail).
- * Interaction and inline SQL editor behaviour ported from DBCheck v2.6
- * (MIT License, Copyright (c) 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>)
- * — 保持原有操作习惯：单击选中章节 / 双击全屏查看、SQL 行内手风琴编辑、
+ * Attribution: 交互与内联 SQL 编辑器设计归 MIT License,
+ * Copyright (c) 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com> 所有：
+ * 单击选中章节 / 双击全屏查看、SQL 行内手风琴编辑、
  * 放大编辑、折行开关、安全格式化、复制、拖拽调高、Ctrl+S / Esc / Ctrl+Shift-F。
- * Rewritten for the RaccoonX module layout and /api/inspection/* endpoints.
+ * 按 RaccoonX 的模块结构与 /api/inspection/* 接口实现。
  */
 (function () {
   'use strict';
 
-  // ── 与旧版一致的行内 SVG 图标（viewBox 16，currentColor 描边）──
+  // ── 行内 SVG 图标（viewBox 16，currentColor 描边）──
   var SVG = {
     edit: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11.2 2.3 13.7 4.8 5.6 12.9 2.3 13.7 3.1 10.4z"/></svg>',
     del: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3 4.5h10"/><path d="M6.5 4.5V3.2h3v1.3"/><path d="M4.5 4.5 5 13.2h6l.5-8.7"/><path d="M6.8 7v3.6M9.2 7v3.6"/></svg>',
@@ -31,7 +31,7 @@
     rail: { el: 'icx-rail', min: 210, max: 560, def: 258 },
     chapters: { el: 'icx-chapters-col', min: 220, max: 620, def: 288 }
   };
-  var SQL_H_KEY = 'dbcheck.inspection.sqlEditorH';   // 沿用旧键，换系统后高度偏好不丢
+  var SQL_H_KEY = 'dbcheck.inspection.sqlEditorH';   // 偏好键名固定，布局改版后用户设过的高度不丢
   var SQL_WRAP_KEY = 'dbcheck.inspection.sqlWrap';
 
   var state = {
@@ -438,7 +438,7 @@
     if (addCh) addCh.disabled = !isAdmin() || !has;
   }
 
-  // ── 模板弹窗：新建 / 编辑信息（含副本不可设默认的提醒，同旧版）──
+  // ── 模板弹窗：新建 / 编辑信息（副本不可设默认，弹窗里必须提醒）──
   function openTplModal(mode) {
     var x = mode === 'edit' ? state.template : null;
     if (mode === 'edit' && !x) return;
@@ -857,7 +857,7 @@
     return '<ul class="icx-q-ul">' + list.map(function (q) {
       var zh = String(q.query_description_zh || '').trim();
       var key = String(q.query_key || '').trim();
-      // 展示层次同旧版：中文说明给人看（主），英文标识给程序用（次）
+      // 展示层次：中文说明给人看（主），英文标识给程序用（次）
       var nameHtml = zh
         ? '<span class="icx-q-name">' + esc(zh) + '</span>'
         : '<span class="icx-q-name missing">' + esc(key || t('webui.icx_q_unnamed', '未命名')) +
@@ -924,7 +924,7 @@
     }).catch(function (e) { say(e.message, 'error'); });
   }
 
-  // ── 行内编辑表单（字段顺序 / 提示文案 / 工具按钮均沿用旧版）──
+  // ── 行内编辑表单（字段顺序 / 提示文案 / 工具按钮固定在一处）──
   function inlineFormHtml(q) {
     q = q || {};
     var enabled = (q.enabled === 0 || q.enabled === false) ? '' : 'checked';
@@ -1348,7 +1348,8 @@
 
   /**
    * 保守格式化：保护字符串/行注释/块注释，按子句换行 + 括号缩进 + 关键字大写。
-   * 算法取自 DBCheck v2.6 的 _formatInspectionSql（MIT），异常时保留原文不破坏 SQL。
+   * 算法归属 MIT License, Copyright (c) 2025-2026 fiyo (Jack Ge)；
+   * 只做保守换行，任何异常都保留原文，不破坏 SQL。
    */
   function formatSqlText(src) {
     src = src == null ? '' : String(src);
@@ -1498,7 +1499,7 @@
 
   // ── 未保存守卫 + 列宽拖拽 ─────────────────────────────────
   // 编辑器展开时切换章节/模板：先确认再丢弃改动，并把「放大编辑」状态一并收尾。
-  // （旧版只标记 inspectionQueryUnsaved，这里等价实现）
+  // （脏标记只挂在当前编辑态上，确认后必须清掉并关闭放大窗口，否则会残留到下一个章节。）
   function guardSwitch(next) {
     if (edit && edit.dirty) {
       confirmIt(t('webui.icx_q_unsaved', '有未保存的修改'),

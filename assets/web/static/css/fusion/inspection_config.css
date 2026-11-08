@@ -4,9 +4,9 @@
  * Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
  *
  * Fusion page styles: inspection configuration (three-pane master-detail).
- * Layout and interaction styles ported from DBCheck v2.6 (MIT License,
- * Copyright (c) 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>),
- * rewritten for the RaccoonX theme variables.
+ * Attribution: 布局与交互样式归 MIT License,
+ * Copyright (c) 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com> 所有，
+ * 配色走 RaccoonX 主题变量。
  * Scoped to #page-inspection-config / body-level overlays to avoid leaking styles.
  */
 
@@ -42,7 +42,7 @@
   transition: flex-basis .18s ease;
 }
 
-/* 收缩态：52px 图标窄条（与旧系统一致），中右两栏自动吃掉释放出的空间 */
+/* 收缩态：52px 图标窄条，中右两栏自动吃掉释放出的空间 */
 #page-inspection-config .icx-rail.icx-collapsed {
   flex: 0 0 52px !important;
   width: 52px !important;

@@ -12,18 +12,51 @@
 
 设计取舍（刻意做小）：
 
-* 只服务**只读字典查询**。执行 SQL 的那条路（``/api/execute_sql``）不进池 ——
-  它要把游标留在进程里做翻页，连接生命周期由游标管，混在一起只会互相踩。
+* 只服务**跑完就交还**的只读查询：字典查询（对象树 / 元数据 / 表属性 / schema 名单）
+  与 AI 巡检助手的 ``query_rows``。编辑器里用户自己执行 SQL 的那条路
+  （``/api/execute_sql``）仍**不进池** —— 它要把游标留在进程里做翻页，
+  连接生命周期由游标管，混在一起只会互相踩。
 * 键是「数据源 + 目标库」，TTL 到期或连接报错就丢弃重建，不做后台保活。
 * 用 ``PooledDictConnection`` 把「归还」伪装成 ``close()``：
   上层 metadata / table_info 一行都不用改。
 """
+import os
 import threading
 import time
 
-POOL_TTL_SECONDS = 300      # 空闲超过这个时间就真正关闭（和元数据缓存 300s 同档）
-POOL_REUSE_MAX_IDLE = 60    # 借出前只按空闲时长判断是否还「热」，不做网络探活
-POOL_MAX_ENTRIES = 8        # 最多同时留几条（每条都是一个数据库会话，不能无限攒）
+def _knob(name, default, minimum, maximum):
+    """读环境变量里的池参数；缺失、非数字或越界都退回默认值。
+
+    宁可保守用默认，也不要因为一个写错的环境变量把池调成 0 条或几小时不过期。
+    """
+    raw = str(os.environ.get(name) or '').strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        print('[conn_pool] %s=%r 不是整数，用默认值 %s' % (name, raw, default), flush=True)
+        return default
+    if not minimum <= value <= maximum:
+        print('[conn_pool] %s=%s 超出 [%s, %s]，用默认值 %s'
+              % (name, value, minimum, maximum, default), flush=True)
+        return default
+    return value
+
+
+# 池里一条连接最多能 idle 多久（超过就真正关闭）。也是「数据源改动后最多多久
+# 一定换血」的上界，所以别调太大；discard_datasource 会立即清，这里是兜底。
+POOL_TTL_SECONDS = _knob('DBCHECK_POOL_TTL_S', 600, 30, 3600)
+# 借出前只按「多久没用过」判断这条还热不热，不做网络探活。
+# 从 60s 放宽到 150s：一次建连 Oracle 实测 ~180ms、进程内首次 2.2s，而语句本身十几毫秒；
+# 用户在助手页读结果、改一句 SQL 再点执行，很容易超过 60s，于是每次都被判「凉了、重连」。
+# 真正会掐空闲会话的是防火墙/NAT（阈值一般在 5 分钟以上）和 profile 空闲杀（普遍 ≥15 分钟），
+# 150s 仍远在它们之内；万一取到半开连接，助手执行链路会按连接类报错换新连接重试一次。
+POOL_REUSE_MAX_IDLE = _knob('DBCHECK_POOL_REUSE_S', 150, 10, 600)
+# 最多同时留几条（每条都是一个数据库会话，不能无限攒）。
+# 8 → 16：一次批量执行会串行经过多个数据源，池太小会在跑第 9 个时把第 1 个的连接挤掉，
+# 下次再点「批量」又得重连。上限仍然很小，不会把目标库的会话占满。
+POOL_MAX_ENTRIES = _knob('DBCHECK_POOL_MAX', 16, 1, 64)
 
 _lock = threading.Lock()
 _pool = {}                  # key -> {'conn':…, 'until':…, 'idle_since':…}
@@ -146,3 +179,40 @@ def open_pooled(db_info, db_type, database, connector):
     if conn is None:
         return None, None
     return PooledDictConnection(conn, key), fromPool
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 连接级错误判定：「连接已坏」还是「SQL 写错」
+# ─────────────────────────────────────────────────────────────────────────────
+# 池子刻意不做网络探活（见 acquire 的 [WARN]），代价就是「被防火墙/NAT 悄悄掐断、
+# 或被 DBA kill 掉的连接」只会在真正用它跑 SQL 时才暴露。因此调用方报错后要能分清
+# 两类：连接类 → 这条别回池 + 可以换一条新连接重试一次；SQL 类 → 原样把报错给用户。
+# 归属说明：错误特征表归 MIT License, Copyright (c) 2025-2026 fiyo (Jack Ge)
+# 所有，并按本项目 JDBC 插件层的报错措辞补齐了条目。
+
+_CONN_ERROR_MARKS = (
+    # python-oracledb：DPY-1010 连接已不可用 / DPY-6005 建连失败 / DPI-* 客户端层异常
+    'dpy-1010', 'dpy-6005', 'dpi-1080', 'dpi-1001',
+    # Oracle 网络与服务端断连
+    'ora-03113', 'ora-03114', 'ora-03135', 'ora-12170', 'ora-12537', 'ora-12571',
+    'ora-01033', 'not connected', 'not logged on',
+    # MySQL / MariaDB（不匹配裸数字 2006：会误伤诸如 ORA-02006 这类无关报错）
+    'server has gone away', 'lost connection',
+    # PostgreSQL
+    'terminating connection', 'server closed the connection', 'ssl connection has been closed',
+    # SQL Server / JDBC 插件层
+    'communication link failure', 'the connection is closed', 'connection.close()',
+    # 通用 socket / TCP 层
+    'connection reset', 'connection aborted', 'connection refused', 'connection closed',
+    'connection is closed', 'connection already closed', 'connection does not exist',
+    'broken pipe', 'eof detected',
+    'could not connect', 'operation timed out', 'network is unreachable', '10054', '10053',
+)
+
+
+def is_conn_error(error_text):
+    """报错文本是否属于「连接已坏」类（而不是 SQL 本身写错）。"""
+    text = str(error_text or '').lower()
+    if not text:
+        return False
+    return any(mark in text for mark in _CONN_ERROR_MARKS)

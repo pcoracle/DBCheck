@@ -884,15 +884,14 @@
         function toggleTheme() {
             const html = document.documentElement;
             const current = html.getAttribute('data-theme');
-            if (current === 'light') {
-                html.removeAttribute('data-theme');
-                localStorage.setItem('dbcheck-theme', 'dark');
-                updateThemeIcon('dark');
-            } else {
-                html.setAttribute('data-theme', 'light');
-                localStorage.setItem('dbcheck-theme', 'light');
-                updateThemeIcon('light');
-            }
+            const next = (current === 'light') ? 'dark' : 'light';
+            if (next === 'dark') html.removeAttribute('data-theme');
+            else html.setAttribute('data-theme', 'light');
+            localStorage.setItem('dbcheck-theme', next);
+            // 用户主动选择留记号：没有这个记号时按默认（浅色）走，
+            // 旧版本自动写入的 dark 不代表意愿（与主站 index.html 同一口径）。
+            localStorage.setItem('dbcheck-theme-user', '1');
+            updateThemeIcon(next);
         }
 
         function updateThemeIcon(theme) {
@@ -907,14 +906,21 @@
             }
         }
 
-        // 初始化主题
+        // 初始化主题：与主站同一口径 —— 只有用户主动选过才尊重存储值，
+        // 否则默认浅色（旧版本每次加载自动写入的 dark 不算用户意愿）。
         (function() {
-            const saved = localStorage.getItem('dbcheck-theme');
-            if (saved === 'light') {
+            var chosen = false;
+            try { chosen = localStorage.getItem('dbcheck-theme-user') === '1'; } catch (e) {}
+            var t = 'light';
+            try {
+                if (chosen) t = (localStorage.getItem('dbcheck-theme') === 'dark') ? 'dark' : 'light';
+            } catch (e) {}
+            if (t === 'dark') {
+                document.documentElement.removeAttribute('data-theme');
+                updateThemeIcon('dark');
+            } else {
                 document.documentElement.setAttribute('data-theme', 'light');
                 updateThemeIcon('light');
-            } else {
-                updateThemeIcon('dark');
             }
         })();
 
