@@ -1,0 +1,138 @@
+<!--
+  SPDX-License-Identifier: Apache-2.0
+  Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
+  Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
+
+  历史趋势分析页面（融合自 DBCheck v2.6 page-trends）
+  只读：全部数据来自 GET /api/trend/analysis、/api/trend/metric/detail、
+        /api/trend/metric/raw，页面不做任何写操作。
+-->
+<div class="page" id="page-trend" data-page-node-id="zC6XcQUtPE5X7HkAVHlXvD">
+
+  <!-- 工具栏：实例 / 时间范围 / 刷新 / 查看趋势 -->
+  <div class="tr-toolbar">
+    <div class="tr-field tr-field-grow">
+      <label>选择数据库实例</label>
+      <select id="trend-instance-select" class="tr-select" onchange="trendSelectInstance()">
+        <option value="">-- 加载中 --</option>
+      </select>
+    </div>
+    <div class="tr-field tr-field-narrow">
+      <label>时间范围</label>
+      <select id="tr-days" class="tr-select" onchange="loadTrendData()">
+        <option value="0" selected>全部</option>
+        <option value="7">近 7 天</option>
+        <option value="30">近 30 天</option>
+        <option value="90">近 90 天</option>
+      </select>
+    </div>
+    <button class="tr-btn" onclick="loadTrendInstances()">↻ 刷新</button>
+    <button class="tr-btn tr-btn-primary" onclick="loadTrendData()">查看趋势</button>
+  </div>
+
+  <!-- 空态 -->
+  <div id="tr-empty" class="tr-empty">
+    <div class="tr-empty-icon">📉</div>
+    <div class="tr-empty-title">暂无可分析的历史趋势数据</div>
+    <div class="tr-empty-note">执行巡检后，同一个数据库（IP + 端口）的多次结果将在这里对比展示；数据不足时保持空态，不生成推测结论。</div>
+  </div>
+
+  <div id="tr-content" style="display:none">
+
+    <!-- ① 整体结论 -->
+    <div id="tr-verdict" class="tr-verdict"></div>
+
+    <!-- ② 概览统计 -->
+    <div class="tr-stats" id="tr-stats"></div>
+
+    <!-- ③ 异常项看板 -->
+    <section class="tr-card" id="tr-issue-card">
+      <div class="tr-panel-head">
+        <div class="tr-panel-title">🚨 异常项看板 <span id="tr-issue-count" class="tr-pill">0</span></div>
+        <div class="tr-legend">
+          <span class="tr-legend-item"><i class="tr-dot tr-dot-new"></i>新增</span>
+          <span class="tr-legend-item"><i class="tr-dot tr-dot-persistent"></i>持续</span>
+          <span class="tr-legend-item"><i class="tr-dot tr-dot-resolved"></i>已消除</span>
+        </div>
+      </div>
+      <div id="tr-issue-list" class="tr-issue-list"></div>
+    </section>
+
+    <!-- ④ 健康评分与风险项数量（双轴） -->
+    <section class="tr-card" id="tr-hr-card">
+      <div class="tr-panel-head">
+        <div class="tr-panel-title">🩺 健康评分与风险项数量 <span id="tr-hr-latest" class="tr-pill"></span></div>
+      </div>
+      <div class="tr-chart-box" id="tr-hr-chart"></div>
+      <div class="tr-legend">
+        <span class="tr-legend-item"><i class="tr-legend-line" style="background:var(--sky)"></i>健康评分</span>
+        <span class="tr-legend-item"><i class="tr-legend-line" style="background:var(--danger)"></i>风险项数量</span>
+      </div>
+    </section>
+
+    <!-- ⑤ 指标总览 -->
+    <section class="tr-card" id="tr-metric-card">
+      <div class="tr-panel-head">
+        <div class="tr-panel-title">📊 指标趋势 <span id="tr-metric-count" class="tr-pill">0</span></div>
+      </div>
+      <div class="tr-metric-toolbar">
+        <div class="tr-tabs" id="tr-filter-tabs">
+          <button class="tr-tab active" data-filter="all" onclick="trendSetFilter('all')">全部指标</button>
+          <button class="tr-tab" data-filter="anomaly" onclick="trendSetFilter('anomaly')">仅异常</button>
+          <button class="tr-tab" data-filter="changed" onclick="trendSetFilter('changed')">有变化</button>
+          <button class="tr-tab" data-filter="primary" onclick="trendSetFilter('primary')">仅主要</button>
+        </div>
+        <input id="tr-metric-search" class="tr-input tr-search" placeholder="搜索指标名称…" oninput="trendRenderMetrics()">
+        <select id="tr-metric-group" class="tr-select tr-select-sm" onchange="trendSetGroup(this.value)">
+          <option value="">全部分组</option>
+        </select>
+        <select id="tr-metric-coverage" class="tr-select tr-select-sm" onchange="trendSetCoverage(this.value)">
+          <option value="all">全部覆盖</option>
+          <option value="full">仅完整采集</option>
+        </select>
+        <select id="tr-metric-sort" class="tr-select tr-select-sm" onchange="trendSetSort(this.value)">
+          <option value="smart">智能排序</option>
+          <option value="change">按变化幅度</option>
+          <option value="name">按名称</option>
+        </select>
+        <button class="tr-btn tr-btn-mini" id="tr-metric-fold" onclick="trendToggleFold()">折叠分组</button>
+      </div>
+      <div id="tr-metric-list" class="tr-metric-list"></div>
+      <div id="tr-metric-note" class="tr-note" style="display:none"></div>
+    </section>
+  </div>
+
+  <!-- 溯源抽屉：原数据 / 采集 SQL / 血缘 / 同点其他指标 -->
+  <div id="tr-drawer-mask" class="tr-drawer-mask" onclick="trendCloseDrawer(event)">
+    <aside class="tr-drawer" onclick="event.stopPropagation()">
+      <header class="tr-drawer-head">
+        <div class="tr-drawer-head-text">
+          <div id="tr-drawer-title" class="tr-drawer-title">指标溯源</div>
+          <div id="tr-drawer-sub" class="tr-drawer-sub"></div>
+        </div>
+        <button class="tr-icon-btn" onclick="trendCloseDrawer()" title="关闭">✕</button>
+      </header>
+      <div class="tr-drawer-tabs">
+        <button class="tr-tab active" data-tab="raw" onclick="trendDrawerTab('raw')">原数据</button>
+        <button class="tr-tab" data-tab="sql" onclick="trendDrawerTab('sql')">采集 SQL</button>
+        <button class="tr-tab" data-tab="lineage" onclick="trendDrawerTab('lineage')">血缘</button>
+        <button class="tr-tab" data-tab="same" onclick="trendDrawerTab('same')">同点其他指标</button>
+      </div>
+      <div class="tr-drawer-body">
+        <div id="tr-raw-wrap">
+          <div id="tr-raw-meta" class="tr-raw-meta"></div>
+          <div id="tr-raw-table" class="tr-raw-table"></div>
+        </div>
+        <div id="tr-sql-wrap" style="display:none">
+          <pre id="tr-sql" class="tr-sql"></pre>
+        </div>
+        <div id="tr-lineage-wrap" style="display:none">
+          <div id="tr-lineage" class="tr-lineage"></div>
+        </div>
+        <div id="tr-same-wrap" style="display:none">
+          <div id="tr-same" class="tr-raw-table"></div>
+        </div>
+      </div>
+    </aside>
+  </div>
+</div>

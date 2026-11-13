@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
+# Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
+
 """发版时从 CHANGELOG.md 动态生成 GitHub Release 追加说明。
 
 用法: python3 gen_release_append.py <tag>   # 如 v26.10.11.0

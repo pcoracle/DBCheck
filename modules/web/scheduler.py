@@ -24,6 +24,57 @@ paths.ensure_migrated()
 
 CONFIG_FILE = str(paths.SCHEDULER_JOBS)
 LOG_FILE = str(paths.SCHEDULER_LOG)
+# 定时任务执行记录（结构化 JSON，供「执行日志」弹窗展示；与运行日志分开）
+EXEC_LOG_FILE = str(Path(CONFIG_FILE).with_name('scheduler_exec_logs.json'))
+_EXEC_LOG_LIMIT = 200
+_exec_log_lock = threading.Lock()
+
+
+def _load_exec_logs():
+    try:
+        if os.path.exists(EXEC_LOG_FILE):
+            with open(EXEC_LOG_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data if isinstance(data, list) else []
+    except Exception as e:
+        logger.warning('读取定时任务执行记录失败: %s', e)
+    return []
+
+
+def _save_exec_logs(logs):
+    try:
+        os.makedirs(os.path.dirname(EXEC_LOG_FILE), exist_ok=True)
+        with open(EXEC_LOG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(logs[:_EXEC_LOG_LIMIT], f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning('保存定时任务执行记录失败: %s', e)
+
+
+def _append_exec_log(entry):
+    """追加一条任务执行记录（最多保留最近 200 条）"""
+    with _exec_log_lock:
+        logs = _load_exec_logs()
+        logs.insert(0, entry)
+        _save_exec_logs(logs)
+
+
+def get_job_logs(job_id, limit=50):
+    """获取指定任务的执行记录（新的在前）"""
+    try:
+        limit = max(1, min(int(limit or 50), 200))
+    except (TypeError, ValueError):
+        limit = 50
+    return [x for x in _load_exec_logs() if x.get('job_id') == job_id][:limit]
+
+
+def clear_job_logs(job_id):
+    """清空指定任务的执行记录，返回删除条数"""
+    with _exec_log_lock:
+        logs = _load_exec_logs()
+        remain = [x for x in logs if x.get('job_id') != job_id]
+        removed = len(logs) - len(remain)
+        _save_exec_logs(remain)
+    return removed
 
 # ── 日志配置 ────────────────────────────────────────────────
 logger = logging.getLogger('scheduler')
@@ -316,7 +367,26 @@ def _on_watchdog_timeout(job_id, db_info, state, guard):
                  job_id, _INSPECTION_WATCHDOG_TIMEOUT, db_type)
 
 
-def _run_inspection(job_id, db_info, inspector_name, notify_on_done):
+def _db_info_for_run(cfg):
+    """把任务顶层的「系统资源采集」设置并入 db_info 后再交给执行链。
+
+    采集方式存在 job 顶层（syscollect_mode / syscollect.zabbix_host），而 _job_func
+    只接收 db_info；不并进来，定时任务里选的 Zabbix 采集永远到不了引擎，
+    表现为「界面选了 Zabbix，报告里却没有系统资源章节」。
+    """
+    db_info = dict(cfg.get('db_info') or {})
+    mode = (cfg.get('syscollect_mode') or '').strip()
+    if mode in ('none', 'ssh', 'zabbix'):
+        db_info['syscollect_mode'] = mode
+    sc = cfg.get('syscollect') or {}
+    if isinstance(sc, dict):
+        for _key in ('zabbix_host', 'zabbix_hostname'):
+            if sc.get(_key):
+                db_info[_key] = str(sc[_key]).strip()
+    return db_info
+
+
+def _run_inspection(job_id, db_info, inspector_name, notify_on_done, triggered_by='schedule'):
     """
     并发巡检排除机制入口（在独立线程中运行）。
 
@@ -334,6 +404,17 @@ def _run_inspection(job_id, db_info, inspector_name, notify_on_done):
             '[%s] 巡检被跳过：并发排除机制，等待执行名额超时（%ds）',
             job_id, _INSPECTION_ACQUIRE_TIMEOUT,
         )
+        _append_exec_log({
+            'job_id': job_id,
+            'triggered_by': triggered_by,
+            'status': 'skipped',
+            'message': '等待执行名额超时，本次巡检被跳过',
+            'start_time': datetime.datetime.now().isoformat(timespec='seconds'),
+            'end_time': datetime.datetime.now().isoformat(timespec='seconds'),
+            'duration': 0,
+            'db_type': (db_info or {}).get('db_type', ''),
+            'host': (db_info or {}).get('host', ''),
+        })
         return
 
     guard = threading.Lock()
@@ -352,13 +433,15 @@ def _run_inspection(job_id, db_info, inspector_name, notify_on_done):
     )
     timer.start()
     try:
-        _run_inspection_core(job_id, db_info, inspector_name, notify_on_done)
+        _run_inspection_core(job_id, db_info, inspector_name, notify_on_done,
+                             triggered_by=triggered_by)
     finally:
         timer.cancel()
         _release()
 
 
-def _run_inspection_core(job_id, db_info, inspector_name, notify_on_done):
+def _run_inspection_core(job_id, db_info, inspector_name, notify_on_done,
+                         triggered_by='schedule'):
     """
     执行巡检并发送通知（在独立线程中运行）
 
@@ -376,6 +459,11 @@ def _run_inspection_core(job_id, db_info, inspector_name, notify_on_done):
     from modules.notify import EmailNotifier, WebhookNotifier
 
     # 如果指定了 datasource_id，从 Pro 模块获取完整连接信息（解密密码）
+    # 任务级采集设置先保全：下面用数据源整体覆盖 db_info，
+    # 不保全的话定时任务里选的「系统资源采集方式 / Zabbix 主机」会被静默丢掉
+    _job_collect = {k: db_info.get(k) for k in
+                    ('syscollect_mode', 'zabbix_host', 'zabbix_hostname')
+                    if db_info.get(k)}
     if db_info.get('datasource_id'):
         try:
             from modules.pro import get_instance_manager
@@ -390,6 +478,7 @@ def _run_inspection_core(job_id, db_info, inspector_name, notify_on_done):
             raise ValueError('Pro 模块未安装，无法使用数据源')
         except Exception as e:
             raise ValueError('获取数据源失败: ' + str(e))
+        db_info.update(_job_collect)
 
     db_type = db_info.get('db_type', 'mysql')
     logger.info('[%s] 定时巡检开始: %s %s:%s', job_id, db_type,
@@ -398,6 +487,8 @@ def _run_inspection_core(job_id, db_info, inspector_name, notify_on_done):
 
     report_file = None
     error_msg = None
+    started_at = datetime.datetime.now()
+    _t0 = time.time()
     # 巡检结果上下文（内置巡检器返回的第三项），用于统计问题数、生成分享报告
     inspection_ctx = None
     # 统一问题清单（已按 collect_issues 口径汇总）。子进程路径在巡检进程内已完成
@@ -417,6 +508,14 @@ def _run_inspection_core(job_id, db_info, inspector_name, notify_on_done):
                 'ssh_key_file': db_info.get('ssh_key_file', ''),
                 'ssh_key_password': db_info.get('ssh_key_password', ''),
             }
+        # 系统资源采集方式与 Zabbix 目标：与手动巡检同一口径，都塞进 ssh_info 透传袋，
+        # 由引擎的「收集系统信息」步骤按 Zabbix > SSH 判定；只有 Zabbix 时也要建袋子。
+        _zbx_keys = {k: db_info[k] for k in
+                     ('syscollect_mode', 'zabbix_host', 'zabbix_hostname')
+                     if db_info.get(k)}
+        if _zbx_keys:
+            ssh_info = dict(ssh_info or {})
+            ssh_info.update(_zbx_keys)
 
         # Build runner map for built-in db_types (oracle_full -> oracle_full, oracle -> oracle_full)
         runner_map = {
@@ -485,9 +584,33 @@ def _run_inspection_core(job_id, db_info, inspector_name, notify_on_done):
             _send_notifications(job_id, db_info, report_file, error=None,
                                 context=inspection_ctx, issues=notification_issues)
 
+        _append_exec_log({
+            'job_id': job_id,
+            'triggered_by': triggered_by,
+            'status': 'success',
+            'message': '巡检完成',
+            'report': os.path.basename(report_file) if report_file else '',
+            'start_time': started_at.isoformat(timespec='seconds'),
+            'end_time': datetime.datetime.now().isoformat(timespec='seconds'),
+            'duration': round(time.time() - _t0, 1),
+            'db_type': db_type,
+            'host': db_info.get('host', ''),
+        })
+
     except Exception as e:
         error_msg = str(e)
         logger.error('[%s] 巡检失败: %s', job_id, error_msg)
+        _append_exec_log({
+            'job_id': job_id,
+            'triggered_by': triggered_by,
+            'status': 'failed',
+            'message': error_msg,
+            'start_time': started_at.isoformat(timespec='seconds'),
+            'end_time': datetime.datetime.now().isoformat(timespec='seconds'),
+            'duration': round(time.time() - _t0, 1),
+            'db_type': db_type,
+            'host': db_info.get('host', ''),
+        })
         # 即使失败也发送通知（告警）
         if notify_on_done:
             _send_notifications(job_id, db_info, report_file, error=error_msg,
@@ -695,6 +818,8 @@ class SchedulerManager:
         if self._initialized:
             return
         self._initialized = True
+        # 手动触发的任务 ID 集合：用于在执行记录中区分「手动执行 / 定时触发」
+        self._manual_jobs = set()
         
         # APScheduler 配置
         jobstores = {'default': MemoryJobStore()}
@@ -723,10 +848,12 @@ class SchedulerManager:
     
     def _job_func(self, job_id, db_info, inspector_name, notify_on_done):
         """任务执行函数（包装器）"""
+        triggered_by = 'manual' if job_id in self._manual_jobs else 'schedule'
+        self._manual_jobs.discard(job_id)
         # 在独立线程中运行，避免阻塞调度器
         t = threading.Thread(
             target=_run_inspection,
-            args=(job_id, db_info, inspector_name, notify_on_done),
+            args=(job_id, db_info, inspector_name, notify_on_done, triggered_by),
             daemon=True
         )
         t.start()
@@ -787,8 +914,12 @@ class SchedulerManager:
                 self.scheduler.add_job(
                     func=self._job_func,
                     trigger=trigger,
-                    job_id=job_id,
-                    args=[job_id, config['db_info'], config.get('inspector_name', 'DBCheck'),
+                    # APScheduler 3.x 的作业标识关键字是 id（不是 job_id）；
+                    # 此前误用 job_id 会被当作未知 trigger 关键字静默忽略，
+                    # 调度器自行生成随机 ID，导致列表「运行中/下次执行」恒空、
+                    # 停用时也移不掉真实作业。必须用 id 与配置里的任务 ID 对齐。
+                    id=job_id,
+                    args=[job_id, _db_info_for_run(config), config.get('inspector_name', 'DBCheck'),
                           config.get('notify_on_done', True)],
                     name=config.get('name', job_id),
                     replace_existing=True
@@ -882,11 +1013,30 @@ class SchedulerManager:
         """
         jobs = _load_jobs()
         scheduled_ids = {job.id for job in self.scheduler.get_jobs()}
+        # 最近一次执行记录（每个任务取最新一条）
+        last_exec = {}
+        for item in _load_exec_logs():
+            jid = item.get('job_id')
+            if jid and jid not in last_exec:
+                last_exec[jid] = item
 
         result = []
         for job_cfg in jobs:
             job_cfg = dict(job_cfg)  # 拷贝
             job_cfg['running'] = job_cfg['id'] in scheduled_ids
+            # 附加最近执行状态，供列表卡片展示
+            _last = last_exec.get(job_cfg['id'])
+            if _last:
+                job_cfg['last_run'] = _last.get('end_time') or _last.get('start_time')
+                job_cfg['last_status'] = _last.get('status')
+                job_cfg['last_message'] = _last.get('message')
+            else:
+                job_cfg['last_run'] = ''
+                job_cfg['last_status'] = ''
+                job_cfg['last_message'] = ''
+            # 下次执行时间
+            _job = self.scheduler.get_job(job_cfg['id'])
+            job_cfg['next_run'] = _job.next_run_time.isoformat(timespec='seconds') if _job and _job.next_run_time else ''
             # 隐藏敏感信息
             if 'password' in job_cfg.get('db_info', {}):
                 job_cfg['db_info'] = dict(job_cfg['db_info'])
@@ -940,9 +1090,10 @@ class SchedulerManager:
         jobs = _load_jobs()
         for job_cfg in jobs:
             if job_cfg['id'] == job_id:
+                self._manual_jobs.add(job_id)
                 self._job_func(
                     job_id,
-                    job_cfg['db_info'],
+                    _db_info_for_run(job_cfg),
                     job_cfg.get('inspector_name', 'DBCheck'),
                     job_cfg.get('notify_on_done', True)
                 )

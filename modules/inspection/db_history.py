@@ -96,6 +96,10 @@ class SQLiteHistoryManager:
         max_tablespace_pct REAL,
         connection_usage_pct REAL,
         db_version      TEXT,
+        -- 溯源三件套：报告文件名 / 巡检模板 ID / 采集器模块名
+        report_file     TEXT NOT NULL DEFAULT '',   -- 本次巡检生成的报告文件名（reports/ 下裸名）
+        template_id     INTEGER,                    -- 本次使用的巡检模板 ID（采集 SQL 反查用）
+        engine          TEXT NOT NULL DEFAULT '',   -- 产出该快照的采集器模块名
         -- 完整 context JSON（供详细对比）
         context_json TEXT NOT NULL DEFAULT '{}',
         FOREIGN KEY (instance_key) REFERENCES history_instances(key) ON DELETE CASCADE
@@ -105,6 +109,13 @@ class SQLiteHistoryManager:
         ON snapshots(instance_key, ts);
     """
 
+    #: 后加列（CREATE TABLE IF NOT EXISTS 对既有库不生效，需幂等 ALTER 补齐）
+    _EXTRA_COLUMNS = (
+        ('report_file', "TEXT NOT NULL DEFAULT ''"),
+        ('template_id', 'INTEGER'),
+        ('engine', "TEXT NOT NULL DEFAULT ''"),
+    )
+
     def __init__(self, base_dir: str):
         self.db_path = os.path.join(base_dir, 'data', 'history.db')
         self._ensure_db()
@@ -113,7 +124,15 @@ class SQLiteHistoryManager:
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         with _get_conn(self.db_path) as conn:
             conn.executescript(self.SCHEMA)
+            self._migrate_columns(conn)
             conn.commit()
+
+    def _migrate_columns(self, conn):
+        """幂等补齐后加列（旧库无 report_file/template_id/engine 时不报错）。"""
+        existing = {row[1] for row in conn.execute('PRAGMA table_info(snapshots)').fetchall()}
+        for name, ddl in self._EXTRA_COLUMNS:
+            if name not in existing:
+                conn.execute(f'ALTER TABLE snapshots ADD COLUMN {name} {ddl}')
 
     def _now_str(self) -> str:
         return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -134,7 +153,8 @@ class SQLiteHistoryManager:
                 (label, self._now_str(), instance_key)
             )
 
-    def save_snapshot(self, db_type: str, host: str, port, label: str, context: dict):
+    def save_snapshot(self, db_type: str, host: str, port, label: str, context: dict,
+                      report_file: str = '', template_id=None, engine: str = ''):
         """
         从 context 提取关键指标，并存入 SQLite。
 
@@ -143,6 +163,9 @@ class SQLiteHistoryManager:
         :param port: 数据库端口
         :param label: 数据库标签名
         :param context: getData.checkdb() 返回的 context 字典
+        :param report_file: 本次巡检生成的报告文件名（reports/ 下裸名，供趋势溯源）
+        :param template_id: 本次使用的巡检模板 ID
+        :param engine: 产出该快照的采集器模块名
         """
         key = _db_key(db_type, host, port)
         snap = self._extract_metrics(db_type, context)
@@ -166,24 +189,44 @@ class SQLiteHistoryManager:
                     connections, max_connections, max_used_connections,
                     queries_total, cache_hit_ratio, sga_total_mb,
                     max_tablespace_pct, connection_usage_pct, db_version,
+                    report_file, template_id, engine,
                     context_json
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, tuple(_to_native(x) for x in (
                 key, snap['ts'], snap['report_time'], snap['risk_count'], snap['health_status'],
                 snap.get('cpu_usage'), snap.get('mem_usage'), snap.get('disk_usage_max'),
                 snap.get('connections'), snap.get('max_connections'), snap.get('max_used_connections'),
                 snap.get('queries_total'), snap.get('cache_hit_ratio'), snap.get('sga_total_mb'),
                 snap.get('max_tablespace_pct'), snap.get('connection_usage_pct'), snap.get('version'),
+                report_file or '', template_id, engine or '',
                 context_json
             )))
-            # 保留最近 30 条
+            # 保留最近 90 条（与旧系统一致，避免迁移过来的历史被下一次巡检裁掉）
             conn.execute("""
                 DELETE FROM snapshots WHERE instance_key=? AND id NOT IN (
-                    SELECT id FROM snapshots WHERE instance_key=? ORDER BY ts DESC LIMIT 30
+                    SELECT id FROM snapshots WHERE instance_key=? ORDER BY ts DESC LIMIT 90
                 )
             """, (key, key))
             conn.commit()
         return key
+
+    def get_snapshot(self, instance_key: str, snapshot_id: int):
+        """按主键取单个快照（含扁平指标列 + 溯源三件套 + context_json）。
+
+        用 `SELECT *` 而非列举列名：扁平指标列（cpu_usage/connections/…）是
+        trend_analysis 的兜底数据源，漏选会让单点溯源的血缘凭空消失。
+        """
+        with _get_conn(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT * FROM snapshots WHERE id=? AND instance_key=?",
+                (int(snapshot_id), instance_key)
+            ).fetchone()
+        if not row:
+            return None
+        got = dict(row)
+        for extra, default in (('report_file', ''), ('template_id', None), ('engine', '')):
+            got.setdefault(extra, default)
+        return got
 
     def _extract_metrics(self, db_type: str, context: dict) -> dict:
         """从 context 提取可量化的核心指标"""

@@ -1,0 +1,249 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
+ * Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
+ */
+
+/* 定时巡检：统计栏 + 工具栏 + 任务卡片 + 4 步向导 + 执行日志 */
+#page-scheduler {
+  display: flex; flex-direction: column; gap: 0;
+  padding: 16px 18px; height: calc(100vh - 84px); overflow: hidden;
+}
+#page-scheduler.active { display: flex; }
+
+.sched-stats-bar { display: flex; gap: 14px; margin-bottom: 14px; flex: 0 0 auto; }
+.sched-stat-card {
+  flex: 1; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 14px 18px; display: flex; align-items: center; gap: 12px;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.sched-stat-card:hover { border-color: var(--accent); box-shadow: 0 2px 12px rgba(0,0,0,.06); }
+.sched-stat-card.stat-active { border-left: 3px solid var(--success); }
+.sched-stat-card.stat-paused { border-left: 3px solid var(--border); }
+.sched-stat-card.stat-success { border-left: 3px solid var(--success); }
+.sched-stat-card.stat-fail { border-left: 3px solid var(--danger); }
+.sched-stat-icon { font-size: 22px; }
+.sched-stat-num { font-size: 24px; font-weight: 800; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.sched-stat-num.active { color: var(--success); }
+.sched-stat-num.paused { color: var(--text-muted); }
+.sched-stat-num.success { color: var(--success); }
+.sched-stat-num.fail { color: var(--danger); }
+.sched-stat-label { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+
+.sched-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; flex: 0 0 auto; }
+.sched-toolbar h3 { margin: 0 10px 0 0; font-size: 16px; font-weight: 700; }
+.sched-search-input {
+  height: 34px; padding: 0 10px; font-size: 13px; background: var(--surface2);
+  border: 1px solid var(--border); border-radius: 8px; color: var(--text); outline: none;
+}
+.sched-search-input:focus { border-color: var(--accent); }
+#sched-search-input { width: 220px; }
+
+.scheduler-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding-bottom: 8px; }
+.sched-job-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  padding: 16px 18px; display: flex; align-items: center; gap: 16px;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.sched-job-card:hover { border-color: var(--accent); box-shadow: 0 2px 14px rgba(0,0,0,.06); }
+.sched-job-card.is-paused { opacity: .72; }
+.sched-job-card.has-fail { border-left: 3px solid var(--danger); }
+.sched-job-card.has-success { border-left: 3px solid var(--success); }
+.sched-job-status-dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 9px; }
+.sched-job-status-dot.running { background: var(--success); box-shadow: 0 0 6px rgba(63,185,80,.45); }
+.sched-job-status-dot.paused { background: var(--text-muted); opacity: .45; }
+.sched-job-info { flex: 1 1 auto; min-width: 0; }
+.sched-job-name-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.sched-job-main { flex: 1 1 auto; min-width: 0; }
+.sched-job-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.sched-job-name { font-size: 14px; font-weight: 700; color: var(--text); }
+.sched-job-meta { font-size: 12px; color: var(--text-muted); display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.sched-job-meta b { color: var(--text); font-weight: 600; }
+.sched-job-meta-item { display: inline-flex; align-items: center; gap: 4px; }
+.sched-db-badge {
+  display: inline-flex; align-items: center; padding: 1px 7px; border-radius: 6px;
+  font-size: 11px; font-weight: 600; background: var(--surface2); color: var(--text-muted);
+  font-family: var(--font-mono, monospace);
+}
+.sched-last-status { font-weight: 600; }
+.sched-last-status.success { color: var(--success); }
+.sched-last-status.failed { color: var(--danger); }
+.sched-job-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; flex-wrap: wrap; }
+.sched-action-btn {
+  height: 30px; padding: 0 10px; border-radius: 7px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text-muted); font-size: 12px;
+  display: inline-flex; align-items: center; gap: 4px; cursor: pointer; white-space: nowrap;
+  transition: all .15s ease;
+}
+.sched-action-btn:hover { border-color: var(--accent); color: var(--text); }
+.sched-action-btn.primary { color: var(--accent); }
+.sched-action-btn.primary:hover { background: var(--accent-soft); }
+.sched-action-btn.danger { color: var(--danger); }
+.sched-action-btn.danger:hover { border-color: var(--danger); background: rgba(248,81,73,.08); }
+.sched-icon-btn {
+  width: 30px; height: 30px; display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border); border-radius: 7px; background: var(--surface2);
+  color: var(--text-muted); font-size: 13px; cursor: pointer; transition: all .15s ease;
+}
+.sched-icon-btn:hover { border-color: var(--accent); color: var(--text); }
+.sched-icon-btn.danger:hover { border-color: var(--danger); color: var(--danger); }
+
+.sched-badge {
+  display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 6px;
+  font-size: 11px; font-weight: 600; white-space: nowrap;
+}
+.sched-badge.running { background: rgba(63,185,80,.12); color: var(--success); }
+.sched-badge.paused { background: var(--surface2); color: var(--text-muted); }
+.sched-badge.success { background: rgba(63,185,80,.12); color: var(--success); }
+.sched-badge.failed { background: rgba(248,81,73,.12); color: var(--danger); }
+.sched-badge.skipped { background: rgba(245,158,11,.12); color: var(--warning); }
+.sched-badge.db { background: var(--surface2); color: var(--text-muted); font-family: var(--font-mono, monospace); }
+.sched-badge.info { background: var(--accent-soft); color: var(--accent); }
+
+.sched-empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  min-height: 260px; color: var(--text-muted); font-size: 13px; gap: 8px;
+}
+.sched-empty .icon { font-size: 40px; }
+
+/* 开关 */
+.sched-switch { position: relative; width: 34px; height: 20px; flex: 0 0 34px; }
+.sched-switch input { opacity: 0; width: 0; height: 0; }
+.sched-switch span {
+  position: absolute; inset: 0; border-radius: 10px; background: var(--border);
+  cursor: pointer; transition: background .2s ease;
+}
+.sched-switch span::before {
+  content: ""; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px;
+  border-radius: 50%; background: #fff; transition: transform .2s ease;
+}
+.sched-switch input:checked + span { background: var(--accent); }
+.sched-switch input:checked + span::before { transform: translateX(14px); }
+
+/* ── 4 步向导弹窗 ── */
+.sched-modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 10002;
+  display: flex; align-items: flex-start; justify-content: center; padding-top: 4vh;
+}
+.sched-modal {
+  background: var(--surface); border-radius: 16px; width: 94%; max-width: 760px;
+  max-height: 92vh; display: flex; flex-direction: column; box-shadow: 0 12px 48px rgba(0,0,0,.3);
+}
+.sched-modal-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 22px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.sched-modal-header .title { font-weight: 700; font-size: 16px; display: flex; align-items: center; gap: 8px; }
+.sched-modal-body { padding: 18px 22px; overflow-y: auto; flex: 1; }
+.sched-modal-footer {
+  display: flex; align-items: center; gap: 8px; justify-content: flex-end;
+  padding: 14px 22px; border-top: 1px solid var(--border); flex-shrink: 0;
+}
+.sched-modal-footer .spacer { margin-left: auto; }
+
+/* 步骤指示条：序号可点直接跳步（与巡检向导一致，点序号不校验，只有「下一步」才校验） */
+.sched-steps { display: flex; align-items: center; gap: 0; margin-bottom: 20px; }
+.sched-step {
+  display: flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: 12px;
+  cursor: pointer; user-select: none;
+  padding: 3px 6px; border-radius: 7px;
+  transition: color var(--trans, .18s), background var(--trans, .18s);
+}
+.sched-step:hover { color: var(--text); background: var(--surface2); }
+.sched-step:hover .num { border-color: var(--accent); }
+.sched-step .num {
+  width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; border: 1px solid var(--border); background: var(--surface2);
+}
+.sched-step.active .num { background: var(--accent); border-color: var(--accent); color: #fff; }
+.sched-step.done .num { background: var(--success); border-color: var(--success); color: #fff; }
+.sched-step.active, .sched-step.done { color: var(--text); }
+.sched-step-line { flex: 1 1 auto; height: 1px; background: var(--border); margin: 0 10px; min-width: 24px; }
+
+.sched-pane { display: none; }
+.sched-pane.active { display: block; }
+.sched-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 16px; }
+.sched-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.sched-field.full { grid-column: 1 / -1; }
+.sched-field label { font-size: 12px; color: var(--text-muted); font-weight: 500; }
+.sched-field label .req { color: var(--danger); }
+.sched-field input, .sched-field select {
+  width: 100%; height: 36px; padding: 0 10px; font-size: 13px;
+  background: var(--surface2); border: 1px solid var(--border); border-radius: 8px;
+  color: var(--text); outline: none; box-sizing: border-box;
+}
+.sched-field input:focus, .sched-field select:focus { border-color: var(--accent); }
+.sched-field .hint { font-size: 11px; color: var(--text-muted); line-height: 1.5; }
+
+/* 频率页签 */
+.freq-tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+.freq-tab {
+  height: 32px; padding: 0 14px; border-radius: 8px; font-size: 12px; font-weight: 500;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text-muted); cursor: pointer;
+}
+.freq-tab:hover { border-color: var(--accent); color: var(--text); }
+.freq-tab.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.freq-panel { display: none; }
+.freq-panel.active { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.freq-panel select, .freq-panel input {
+  height: 36px; padding: 0 10px; font-size: 13px; background: var(--surface2);
+  border: 1px solid var(--border); border-radius: 8px; color: var(--text); outline: none;
+}
+.freq-panel select:focus, .freq-panel input:focus { border-color: var(--accent); }
+.freq-panel .sep { color: var(--text-muted); font-size: 12px; }
+.sched-year-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.sched-month-chips { display: flex; gap: 5px; flex-wrap: wrap; }
+.sched-month-chip {
+  height: 26px; padding: 0 9px; border-radius: 6px; font-size: 11px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text-muted); cursor: pointer;
+}
+.sched-month-chip:hover { border-color: var(--accent); color: var(--text); }
+.sched-month-chip.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.freq-presets { display: flex; gap: 5px; }
+.freq-preset {
+  height: 24px; padding: 0 8px; border-radius: 6px; font-size: 11px;
+  border: 1px solid var(--border); background: var(--surface2); color: var(--text-muted); cursor: pointer;
+}
+.freq-preset:hover { border-color: var(--accent); color: var(--text); }
+#sched-cron-input { width: 100%; font-family: var(--font-mono, monospace); }
+.cron-preview {
+  margin-top: 12px; padding: 10px 12px; border-radius: 8px;
+  background: var(--surface2); border: 1px solid var(--border);
+  font-size: 12px; color: var(--text-muted); display: flex; align-items: center; gap: 6px;
+}
+.cron-preview b { color: var(--accent); font-weight: 600; }
+
+/* 系统采集 / 通知选项 */
+.sched-radio-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.sched-radio-card {
+  border: 1px solid var(--border); border-radius: 10px; padding: 12px;
+  cursor: pointer; background: var(--surface); transition: all .15s ease;
+}
+.sched-radio-card:hover { border-color: var(--accent); }
+.sched-radio-card.active { border-color: var(--accent); background: var(--accent-soft); }
+.sched-radio-card .t { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+.sched-radio-card .d { font-size: 11px; color: var(--text-muted); line-height: 1.5; }
+.sched-check-row { display: flex; align-items: flex-start; gap: 8px; padding: 8px 0; font-size: 13px; }
+.sched-check-row input { width: 16px; height: 16px; margin-top: 2px; accent-color: var(--accent); }
+.sched-check-row .d { font-size: 11px; color: var(--text-muted); line-height: 1.5; margin-top: 2px; }
+.sched-summary {
+  margin-top: 14px; border: 1px solid var(--border); border-radius: 10px;
+  padding: 12px 14px; background: var(--surface2); font-size: 12px; line-height: 2;
+}
+.sched-summary b { color: var(--text); }
+
+/* ── 执行日志弹窗 ── */
+.sched-log-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.sched-log-table th {
+  text-align: left; padding: 9px 10px; background: var(--surface2);
+  border-bottom: 1px solid var(--border); color: var(--text-muted); font-weight: 600;
+}
+.sched-log-table td { padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.sched-log-empty { padding: 32px; text-align: center; color: var(--text-muted); font-size: 13px; }
+
+@media (max-width: 760px) {
+  .sched-stats-bar { flex-wrap: wrap; }
+  .sched-stat-card { min-width: calc(50% - 8px); }
+  .sched-form-grid { grid-template-columns: 1fr; }
+  .sched-radio-cards { grid-template-columns: 1fr; }
+}

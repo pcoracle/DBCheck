@@ -435,6 +435,8 @@ DE.update({
     "menu.monitor-conn": "Verbindungspool-Überwachung",
     "menu.monitor-slow": "Langsame-Abfragen-Überwachung",
     "menu.notifier": "Benachrichtigungsverwaltung",
+    "menu.ai-assistant": "AI Assistant",
+    "menu.zabbix": "Zabbix-Einstellungen",
     "menu.oracle-client": "Oracle-Client",
     "menu.plugin-market": "Plugin-Markt",
     "menu.rag": "Wissensdatenbank",

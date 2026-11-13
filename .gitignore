@@ -125,6 +125,8 @@ tests/
 # AGENTS.md = 给 AI 编码助手的强制署名约束；scripts/check_license_headers.py = CI 检测脚本
 !AGENTS.md
 !scripts/check_license_headers.py
+# 同上：数据入库硬闸脚本本身必须入库（否则会被上面的 check_*.py 全局忽略误伤）
+!scripts/check_no_data_files.py
 
 # 目录结构重构：data 统一收口
 data/reports/
@@ -133,6 +135,10 @@ data/pro_data/*
 data/user_db/
 data/logs/
 data/scheduler_jobs.json
+# 定时巡检执行日志（运行态，最多 200 条，随 job 增删滚动）
+data/scheduler_exec_logs.json
+# 历史趋势迁移脚本生成的库备份
+data/history.db.bak-*
 data/awr_uploads/
 # AI 巡检助手运行态：工具启停/自定义定义、数据源版本探测记忆
 data/ai_tools.json
@@ -190,3 +196,47 @@ docs/release/*.png
 /startDBCheck.sh
 /.venv/
 /.idea
+# ═══════════════════════════════════════════════════════════════════
+#  数据库与运行态数据收口（数据安全硬性规则，2026-11-09）
+#  背景：此前按「具体文件」逐条忽略（data/drivers.db-wal、
+#  data/monitor_history.db* 等），SQLite 的 -wal/-shm 附属文件、
+#  报告与备份目录都会漏网；一旦 git add -A 就会把真实业务数据推到
+#  公开 GitHub 仓库。下面按「类别」整体拦截，不再逐条打补丁。
+#
+#  安全性说明：本项目没有任何需要随包分发的 .db —— 种子数据全部是
+#  JSON（modules/config/*_seed.json、plugins/*/baseline_data.json），
+#  所以全局忽略数据库文件不会误伤构建产物。
+# ═══════════════════════════════════════════════════════════════════
+
+# 数据库本体与运行态附属文件（-wal 预写日志 / -shm 共享内存 / -journal 回滚日志
+# / 备份与临时副本）。-wal 里就是尚未落盘的真实行数据，等同泄库。
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.db-sqlite3-shm
+*.db-sqlite3-wal
+*.db.*
+*.db.bak
+*.db.bak-*
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+
+# data/ 整目录都是运行态数据（库文件、报告、上传解析产物、缓存、备份、日志）。
+# 历史上只有 data/reports/oracle_awr.html 被误提交，已移出版本库；
+# 今后若确需入库某个 data/ 文件，必须显式 !data/<文件> 放行并写明理由。
+data/
+
+# 上传与解析产物、报告输出、备份目录：任何位置都不入库
+awr_uploads/
+*.parsed.json
+reports/
+backups/
+data_backups/
+logs/
+
+# 若确实需要提交某个数据库文件（例如随包分发的空模板库），
+# 必须在此显式放行并注明用途，不允许默默 add -f：
+# !modules/config/seed_template.db   # 目前没有任何这类文件

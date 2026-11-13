@@ -435,6 +435,8 @@ KO.update({
     "menu.monitor-conn": "연결 풀 모니터",
     "menu.monitor-slow": "슬로우 쿼리 모니터",
     "menu.notifier": "알림 관리",
+    "menu.ai-assistant": "AI Assistant",
+    "menu.zabbix":  "Zabbix 설정",
     "menu.oracle-client": "Oracle 클라이언트",
     "menu.plugin-market": "플러그인 마켓",
     "menu.rag": "지식 베이스",

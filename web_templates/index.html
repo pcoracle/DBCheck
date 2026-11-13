@@ -642,7 +642,14 @@ async function executeFixSql(taskId, sql) {
   display: flex; align-items: center; gap: 8px;
   font-size: 12.5px;
   color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+  padding: 4px 6px;
+  border-radius: 8px;
+  transition: color var(--trans), background var(--trans);
 }
+.step:hover { color: var(--text); background: var(--surface2); }
+.step:hover .dot { border-color: var(--accent); }
 .step .dot {
   width: 28px; height: 28px; border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
@@ -669,15 +676,18 @@ async function executeFixSql(taskId, sql) {
 .step-line.done { background: var(--accent); }
 
 /* ─── DB Type Selector ─── */
+/* 一行 8 个类型；描述不再常驻卡面，改为 hover 浮层（.db-type-tip）。
+   断点按「弹窗内容宽 ≈ 1032px」校准，保证每张卡片不窄于 ~120px。 */
 .type-grid {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(8, minmax(0, 1fr));
   gap: 12px;
 }
-@media (max-width: 1100px) { .type-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
-@media (max-width: 920px)  { .type-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
-@media (max-width: 720px)  { .type-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
-@media (max-width: 520px)  { .type-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 1100px) { .type-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); } }
+@media (max-width: 920px)  { .type-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
+@media (max-width: 760px)  { .type-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@media (max-width: 620px)  { .type-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 480px)  { .type-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .type-card {
   position: relative;            /* 为右上角斜角 ribbon 定位 */
   min-width: 0;
@@ -701,7 +711,13 @@ async function executeFixSql(taskId, sql) {
 }
 .type-card .tc-name {
   font-size: 13px; font-weight: 600;
+  /* 一行 8 列时卡片仅 ~107px，名称必须能折行：这里保持块级排版，
+     用 flex 会让文字变成不换行的匿名项，长名称（MariaDB MySQL 等）直接溢出卡片 */
+  line-height: 1.25;
+  overflow-wrap: break-word;
+  word-break: normal;
 }
+.type-card .tc-name .tc-info-icon { margin-left: 3px; }
 .type-card .tc-name-row {
   font-size: 13px; font-weight: 600;
   display: flex;
@@ -744,8 +760,49 @@ async function executeFixSql(taskId, sql) {
   margin-left: 4px;
   vertical-align: middle;
 }
-.type-card .tc-desc {
-  font-size: 11px; color: var(--text-muted); line-height: 1.35;
+/* 卡面描述改为 hover 浮层：卡片只留 ⓘ，说明文字交给 .db-type-tip。
+   浮层用 position:fixed 挂在 body 上——.wi-config-modal-body 是 overflow:auto，
+   且一行 8 列时边缘卡片居中弹出的提示会超出内容框，放在祖先里必然被裁掉。 */
+.type-card .tc-info-icon {
+  font-size: 11px;
+  color: var(--text-muted);
+  opacity: .5;
+  cursor: help;
+  transition: opacity .2s;
+}
+.type-card:hover .tc-info-icon { opacity: 1; }
+.db-type-tip {
+  position: fixed;
+  z-index: 1000;
+  max-width: 280px;
+  padding: 10px 14px;
+  background: rgba(15,23,42,.95);
+  color: #e2e8f0;
+  font-size: 12px;
+  line-height: 1.6;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.2);
+  pointer-events: none;
+  white-space: normal;
+  text-align: left;
+  opacity: 0;
+  transition: opacity .18s ease;
+}
+.db-type-tip.show { opacity: 1; }
+.db-type-tip::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: var(--tip-arrow-x, 50%);
+  transform: translateX(-50%);
+  border: 6px solid transparent;
+  border-top-color: rgba(15,23,42,.95);
+}
+.db-type-tip.below::after {
+  top: auto;
+  bottom: 100%;
+  border-top-color: transparent;
+  border-bottom-color: rgba(15,23,42,.95);
 }
 .type-card .tc-check {
   width: 18px; height: 18px; border-radius: 50%;
@@ -776,11 +833,6 @@ async function executeFixSql(taskId, sql) {
 .type-card .tc-name {
   font-size: 12.5px;
   line-height: 1.3;
-}
-.type-card .tc-desc {
-  font-size: 11px; color: var(--text-muted); line-height: 1.35;
-  max-width: 100%;
-  word-break: break-word;
 }
 /* ─── 右上角斜角 ribbon：区分「原生」/「JDBC」 ─── */
 .type-card .tc-ribbon {
@@ -1004,6 +1056,20 @@ select option { background: var(--surface2); }
 .toggle.on::after { transform: translateX(16px); }
 .ssh-fields { display: none; margin-top: 16px; }
 .ssh-fields.visible { display: grid; }
+/* ─── 向导第 3 步：系统资源采集方式（不采集 / SSH / Zabbix）─── */
+.syscollect-opts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 16px; }
+.syscollect-opt {
+  display: flex; flex-direction: column; gap: 6px; padding: 12px 14px;
+  border: 1.5px solid var(--border); border-radius: 10px; cursor: pointer;
+  transition: all var(--trans); background: var(--surface2);
+}
+.syscollect-opt:hover { border-color: var(--accent2); }
+.syscollect-opt.active { border-color: var(--accent2); background: rgba(56,139,253,.08); }
+.syscollect-opt input[type=radio] { width: 15px; height: 15px; accent-color: var(--accent); margin: 0; cursor: pointer; }
+.syscollect-opt .so-ico { font-size: 20px; line-height: 1; }
+.syscollect-opt .so-txt b { display: block; font-size: 13px; color: var(--text); margin-bottom: 3px; }
+.syscollect-opt .so-txt i { display: block; font-style: normal; font-size: 11px; color: var(--text-muted); line-height: 1.5; }
+@media (max-width: 900px) { .syscollect-opts { grid-template-columns: 1fr; } }
 
 /* ─── Buttons ─── */
 .btn-row {
@@ -1697,7 +1763,7 @@ body { padding-bottom: 32px !important; }
 /* ─── 响应式断点 ─── */
 @media (max-width: 1100px) {
   .feature-grid { grid-template-columns: repeat(2, 1fr); }
-  .type-grid    { grid-template-columns: 1fr 1fr; }
+  /* .type-grid 的列数由「DB Type Selector」处的统一断点表控制，这里不再覆盖 */
   /* 确认面板在宽屏下保持 2 列，缩小后切 1 列 */
   #confirm-panel > div[style*="1fr 1fr"] { grid-template-columns: 1fr 1fr; }
 }
@@ -1921,7 +1987,7 @@ async function executeFixSql(taskId, sql) {
   .sidebar { width: 200px; }
   .main { margin-left: 200px; }
   .form-grid { grid-template-columns: 1fr; }
-  .type-grid { grid-template-columns: 1fr; }
+  /* .type-grid 的列数由「DB Type Selector」处的统一断点表控制，这里不再覆盖 */
   .feature-grid { grid-template-columns: 1fr; }
   /* 确认面板 / 趋势图 / 报告列表 */
   #confirm-panel > div,
@@ -3523,7 +3589,10 @@ async function executeFixSql(taskId, sql) {
   <link rel="stylesheet" href="/static/css/inspection_config.css" data-page-node-id="ioW10XaqiPun7ZHGmokkN5">
   <link rel="stylesheet" href="/static/css/fusion/notifier.css?v={{ version }}-fusion3">
   <link rel="stylesheet" href="/static/css/fusion/datasources.css?v={{ version }}-fusion16">
-  <link rel="stylesheet" href="/static/css/fusion/inspection_config.css?v={{ version }}-fusion11">
+  <link rel="stylesheet" href="/static/css/fusion/inspection.css?v={{ version }}-fusion2">
+  <link rel="stylesheet" href="/static/css/fusion/scheduler.css?v={{ version }}-fusion3">
+  <link rel="stylesheet" href="/static/css/fusion/trend.css?v={{ version }}-fusion3">
+  <link rel="stylesheet" href="/static/css/fusion/inspection_config.css?v={{ version }}-fusion14">
   <link rel="stylesheet" href="/static/css/fusion/sql_editor.css?v={{ version }}-fusion20">
   <link rel="stylesheet" href="/static/css/fusion/ds_picker.css?v={{ version }}-fusion5">
   {% if aias_source_ui %}
@@ -7773,6 +7842,9 @@ function wfCloseRunDrawer() {
     <div class="nav-item" onclick="showPage('notifier')" id="nav-notifier" data-page-node-id="GDnl2HhMCqnPYTJc1CAoeV">
       <span class="icon" data-page-node-id="5ithdyJj37mcNQHBbDomHG"><svg viewBox="0 0 24 24" aria-hidden="true" data-page-node-id="rvVl6NJbBOKKMw5qFt5ced"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" data-page-node-id="w9bAwRqz45oNpRgvfX9N0l"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" data-page-node-id="oDAcWpvm6PFxFlIrDk3oqI"/></svg></span> <span data-i18n="webui.nav_notifier" data-page-node-id="K2jFbkJtQrBlYM0u6BwOrD">通知设置</span>
     </div>
+    <div class="nav-item" onclick="showPage('zabbix')" id="nav-zabbix">
+      <span class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 0 1 9 9"/><path d="M12 7a5 5 0 0 1 5 5"/><circle cx="12" cy="12" r="1.6"/><path d="M3.5 20.5 8 16"/></svg></span> <span data-i18n="webui.nav_zabbix">Zabbix 监控设置</span>
+    </div>
     <div class="nav-item" onclick="showPage('disaster-recovery')" id="nav-disaster-recovery" data-page-node-id="EjYEUQelzAAFI3dzFg7MnS">
       <span class="icon" data-page-node-id="tV0sAReKY66zoa8JBiMlg2"><svg viewBox="0 0 24 24" aria-hidden="true" data-page-node-id="L506z40Xu9GuDRbOXL0kC6"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" data-page-node-id="gPp3BzHa18uyEpV7THOrwf"/><path d="M12 8v4" data-page-node-id="e9cYArdj1SBabKUcSEfLq0"/><path d="m10 10 2-2 2 2" data-page-node-id="K3Q5cptPIpdWLSinqx9hf1"/></svg></span> <span data-i18n="webui.nav_disaster_recovery" data-page-node-id="fuhEegebRRrJ4uHrnSDSIB">容灾备份</span>
     </div>
@@ -8224,17 +8296,128 @@ function wfCloseRunDrawer() {
       <!-- ══ Page: Wizard ══ -->
       <div class="page" id="page-wizard" data-page-node-id="IahAxH5Drwl9c0IdknCj9f">
 
+        <!-- 统计概览栏（口径与源系统一致：健康 ≥80 分，告警 60-79 分，平均评分只统计已巡检实例） -->
+        <div class="wi-stats-bar">
+          <div class="wi-stat-item">
+            <span class="wi-stat-icon">📊</span>
+            <div>
+              <div class="wi-stat-num" id="wi-stat-total">0</div>
+              <div class="wi-stat-label">数据源</div>
+            </div>
+          </div>
+          <div class="wi-stat-item">
+            <span class="wi-stat-icon">✅</span>
+            <div>
+              <div class="wi-stat-num" id="wi-stat-healthy">0</div>
+              <div class="wi-stat-label">健康</div>
+            </div>
+          </div>
+          <div class="wi-stat-item">
+            <span class="wi-stat-icon">⚠️</span>
+            <div>
+              <div class="wi-stat-num" id="wi-stat-warn">0</div>
+              <div class="wi-stat-label">告警</div>
+            </div>
+          </div>
+          <div class="wi-stat-item">
+            <span class="wi-stat-icon">🎯</span>
+            <div>
+              <div class="wi-stat-num" id="wi-stat-avg-score">--</div>
+              <div class="wi-stat-label">平均评分</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 工具栏：新增巡检 → 类型筛选 → 搜索 → 活跃/已删除 → 刷新 -->
+        <div class="sched-toolbar" style="margin-bottom:12px">
+          <button class="btn btn-primary" onclick="startWizard()">
+            <span style="font-size:16px">+</span> 新增巡检
+          </button>
+          <select class="sched-search-input" id="wi-type-filter" style="width:auto;min-width:130px"
+                  onchange="filterWizardHistory(this.value)">
+            <option value="">全部类型</option>
+          </select>
+          <input type="text" class="sched-search-input" id="wh-search-input" placeholder="搜索名称、主机..."
+                 oninput="filterWizardBySearch()">
+          <div style="flex:1"></div>
+          <button class="btn btn-ghost wi-tab-btn active" id="wi-tab-active" onclick="switchWizardTab('active')">📋 活跃 <span class="wi-tab-count" id="wi-tab-active-count">0</span></button>
+          <button class="btn btn-ghost wi-tab-btn" id="wi-tab-deleted" onclick="switchWizardTab('deleted')">🗑️ 已删除 <span class="wi-tab-count" id="wi-tab-deleted-count">0</span></button>
+          <button class="btn btn-ghost" onclick="loadWizardHistoryPage()" title="刷新列表">🔄 刷新</button>
+        </div>
+
+        <!-- 左树右表 -->
+        <div class="wi-split" id="wi-split">
+          <aside class="wi-tree" id="wi-tree" role="tree" aria-label="数据源目录">
+            <div class="wi-tree-head">数据源目录</div>
+            <div id="wi-tree-body">
+              <div class="wi-tree-loading">加载中...</div>
+            </div>
+          </aside>
+          <section class="wi-split-main">
+            <!-- 面包屑（当前目录全路径） -->
+            <div class="wi-crumb" id="wi-crumb">
+              <button class="wi-tree-toggle" id="wi-tree-toggle" onclick="wiToggleTree()" title="收起/展开目录树">☰</button>
+              <span id="wi-crumb-path">全部数据源</span>
+            </div>
+            <!-- 公共操作栏（固定于列名上方，按页签切换可用动作） -->
+            <div class="wh-batch-bar" id="wh-batch-bar">
+              <label class="wh-batch-select-all">
+                <input type="checkbox" id="wh-select-all" onchange="wiToggleSelectAll(this)">
+                全选
+              </label>
+              <span class="wh-batch-info" id="wh-batch-info">未选择数据源</span>
+              <div class="wh-batch-actions" id="wh-batch-active-actions">
+                <button class="wh-batch-btn primary" id="wh-act-inspect" onclick="wiBatchInspect()" title="巡检勾选的数据源；勾选多个时批量提交" disabled>🚀 巡检</button>
+                <button class="wh-batch-btn" id="wh-act-edit" onclick="wiBatchEdit()" title="编辑勾选的数据源（仅单选）" disabled>✏️ 编辑</button>
+                <button class="wh-batch-btn" id="wh-act-report" onclick="wiBatchReport()" title="查看勾选数据源的巡检报告（仅单选且已有报告）" disabled>📊 报告</button>
+                <button class="wh-batch-btn danger" id="wh-act-delete" onclick="wiBatchDelete()" title="删除勾选的数据源" disabled>🗑️ 删除</button>
+              </div>
+              <div class="wh-batch-actions" id="wh-batch-deleted-actions" style="display:none">
+                <button class="wh-batch-btn success" id="wh-act-restore" onclick="wiBatchRestore()" title="恢复勾选的数据源" disabled>♻️ 恢复</button>
+                <button class="wh-batch-btn danger" id="wh-act-hard-delete" onclick="wiBatchHardDelete()" title="彻底删除勾选的数据源（不可恢复）" disabled>🗑️ 彻底删除</button>
+              </div>
+            </div>
+            <div class="wi-table-wrap">
+              <table class="wi-table" id="wizard-history-table">
+                <thead>
+                  <tr>
+                    <th style="width:44px"><input type="checkbox" id="wh-header-check" onchange="wiToggleSelectAll(this)"></th>
+                    <th data-col="name">名称</th>
+                    <th data-col="type">类型</th>
+                    <th data-col="host">主机地址</th>
+                    <th data-col="db">数据库</th>
+                    <th data-col="health">健康评分</th>
+                    <th data-col="risk">风险</th>
+                    <th data-col="last">最近巡检</th>
+                  </tr>
+                </thead>
+                <tbody id="wizard-history-body">
+                  <tr><td colspan="8" style="text-align:center;padding:32px;color:var(--text-muted)">加载中...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+
+        <!-- 巡检配置弹窗：步骤 1-5 全部在弹窗内完成 -->
+        <div class="wi-config-modal-overlay" id="wizard-config-modal" style="display:none" onclick="wiModalBackdropClick(event)">
+          <div class="wi-config-modal" onclick="event.stopPropagation()">
+            <div class="wi-config-modal-header">
+              <div class="wi-config-modal-title">🗄️ <span id="wi-config-modal-title-text">新建巡检任务</span></div>
+              <button class="modal-close" onclick="closeWizardConfig()" title="关闭">✕</button>
+            </div>
+            <div class="wi-config-modal-body">
         <!-- 步骤指示器 -->
         <div class="steps" id="wizard-steps" data-page-node-id="uSFD7nARqYfInalR2ELu4R">
-          <div class="step active" id="s1" data-page-node-id="QUD09VLQyQAOKC3rB8sn32"><div class="dot" data-page-node-id="Rw8KTtI8GaTiCPBEJUvE9v">1</div><span data-i18n="webui.wizard_step1" data-page-node-id="PuZrBlxDHSFOAih3IdnBnJ">数据库类型</span></div>
+          <div class="step active" id="s1" onclick="gotoStep(1)" title="点击跳转到此步骤" data-page-node-id="QUD09VLQyQAOKC3rB8sn32"><div class="dot" data-page-node-id="Rw8KTtI8GaTiCPBEJUvE9v">1</div><span data-i18n="webui.wizard_step1" data-page-node-id="PuZrBlxDHSFOAih3IdnBnJ">数据库类型</span></div>
           <div class="step-line" data-page-node-id="cOyRjIauKkBbk7DuwruhkO"></div>
-          <div class="step" id="s2" data-page-node-id="8eY1qsgEHt6dt98qHRlfRS"><div class="dot" data-page-node-id="sHFGjkYOBxacvMzZT3wweT">2</div><span data-i18n="webui.wizard_step2" data-page-node-id="8DyVChycercFalHwFNkRia">连接信息</span></div>
+          <div class="step" id="s2" onclick="gotoStep(2)" title="点击跳转到此步骤" data-page-node-id="8eY1qsgEHt6dt98qHRlfRS"><div class="dot" data-page-node-id="sHFGjkYOBxacvMzZT3wweT">2</div><span data-i18n="webui.wizard_step2" data-page-node-id="8DyVChycercFalHwFNkRia">连接信息</span></div>
           <div class="step-line" id="sl2" data-page-node-id="OZjwhX3F3R7P9cB6TASb20"></div>
-          <div class="step" id="s3" data-page-node-id="rPME1xmNSult5kM3yKBjyi"><div class="dot" data-page-node-id="XWqygg4TjuU5xDGbbJhhtV">3</div><span data-i18n="webui.wizard_step3" data-page-node-id="JiI5KJb5lJRa2KnxBQzcHA">SSH 配置</span></div>
+          <div class="step" id="s3" onclick="gotoStep(3)" title="点击跳转到此步骤" data-page-node-id="rPME1xmNSult5kM3yKBjyi"><div class="dot" data-page-node-id="XWqygg4TjuU5xDGbbJhhtV">3</div><span data-i18n="webui.wizard_step3" data-page-node-id="JiI5KJb5lJRa2KnxBQzcHA">SSH 配置</span></div>
           <div class="step-line" id="sl3" data-page-node-id="jfgqBADkJPtQMOweFWa3Lv"></div>
-          <div class="step" id="s4" data-page-node-id="TD9ZyvtWKYFKWFSS1bRZ10"><div class="dot" data-page-node-id="gy4F0iSS6U1KVpSSnU9HeB">4</div><span data-i18n="webui.wizard_step4" data-page-node-id="pTg0r0Fs4hBcBItLReqlcE">巡检设置</span></div>
+          <div class="step" id="s4" onclick="gotoStep(4)" title="点击跳转到此步骤" data-page-node-id="TD9ZyvtWKYFKWFSS1bRZ10"><div class="dot" data-page-node-id="gy4F0iSS6U1KVpSSnU9HeB">4</div><span data-i18n="webui.wizard_step4" data-page-node-id="pTg0r0Fs4hBcBItLReqlcE">巡检设置</span></div>
           <div class="step-line" id="sl4" data-page-node-id="NuhgL5ZSS2htoI8O0e2nH5"></div>
-          <div class="step" id="s5" data-page-node-id="ZioNrtPBxjVe1f0cpbTAEU"><div class="dot" data-page-node-id="p5kn90z5iik7h2aRnZTjhy">5</div><span data-i18n="webui.wizard_step5" data-page-node-id="YymI3CFrXHHuECxlSsTpyn">执行巡检</span></div>
+          <div class="step" id="s5" onclick="gotoStep(5)" title="点击跳转到此步骤" data-page-node-id="ZioNrtPBxjVe1f0cpbTAEU"><div class="dot" data-page-node-id="p5kn90z5iik7h2aRnZTjhy">5</div><span data-i18n="webui.wizard_step5" data-page-node-id="YymI3CFrXHHuECxlSsTpyn">执行巡检</span></div>
         </div>
 
         <!-- Step 1: 选择数据库类型 -->
@@ -8392,21 +8575,37 @@ function wfCloseRunDrawer() {
           </div>
         </div>
 
-        <!-- Step 3: SSH 配置 -->
+        <!-- Step 3: 系统资源采集（不采集 / SSH / Zabbix） -->
         <div id="step3" class="card" style="display:none" data-page-node-id="FbwDFnYNlM9yKbDSv5GfPl">
           <div class="card-title" data-page-node-id="A8amtDuyrvxBdtpAOf4yhf">
-            <span data-page-node-id="fHBfTMJghrnHnSOQBilOYe">🔐</span> <span data-i18n="webui.ssh_config" data-page-node-id="CqEITYV8dyhyIthioptd5G">SSH 连接配置</span>
+            <span data-page-node-id="fHBfTMJghrnHnSOQBilOYe">🖥️</span> <span data-i18n="webui.sysinfo_collect_title" data-page-node-id="CqEITYV8dyhyIthioptd5G">系统资源采集</span>
             <span class="badge" id="step-badge-3" data-i18n="webui.step_badge" data-page-node-id="cAYSyGofcw9emMn7AiVqn5">第 3 步 / 共 5 步</span>
           </div>
-          <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px;" data-i18n="webui.ssh_desc" data-page-node-id="Sg2tqO5DY1t1pQXBZhwWkK">
-            配置 SSH 后，巡检报告将包含 CPU、内存、磁盘等系统资源信息。可跳过此步骤仅采集数据库指标。
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:14px;" data-i18n="webui.sysinfo_collect_desc">
+            巡检报告将包含 CPU、内存、磁盘等系统资源信息，请选择采集方式。若目标主机既不使用 SSH、也未纳入 Zabbix 监控，可选择「不采集」，仅采集数据库指标。
           </p>
-          <div class="toggle-row" onclick="toggleSsh()" data-page-node-id="flzEct3KXBgOtyISvS2gpl">
-            <span class="toggle-label" style="color:var(--text)" data-i18n="webui.ssh_enable" data-page-node-id="ecvJri6YE7FEzaogiUQRf8">启用 SSH 系统信息采集</span>
-            <span class="toggle-sub" id="ssh-toggle-sub" data-i18n="webui.ssh_enable_state_off" data-page-node-id="mTsh2K4opBoVeB2lKswIGD">当前：未启用</span>
-            <div class="toggle" id="ssh-toggle" data-page-node-id="dZcGpFBjEDH5oIEVCq39Zd"></div>
+          <!-- 采集方式选择 -->
+          <div class="syscollect-opts">
+            <label class="syscollect-opt active" id="sopt-none">
+              <input type="radio" name="syscollect-mode" value="none" checked onchange="setSysCollectMode('none')" />
+              <span class="so-ico">⏭️</span>
+              <span class="so-txt"><b data-i18n="webui.sysinfo_opt_none">不采集</b><i data-i18n="webui.sysinfo_opt_none_desc">仅执行数据库巡检，不采集服务器系统资源指标</i></span>
+            </label>
+            <label class="syscollect-opt" id="sopt-ssh">
+              <input type="radio" name="syscollect-mode" value="ssh" onchange="setSysCollectMode('ssh')" />
+              <span class="so-ico">🔐</span>
+              <span class="so-txt"><b data-i18n="webui.sysinfo_opt_ssh">SSH 采集</b><i data-i18n="webui.sysinfo_opt_ssh_desc">通过 SSH 连接数据库所在服务器，采集系统资源指标</i></span>
+            </label>
+            <label class="syscollect-opt" id="sopt-zabbix">
+              <input type="radio" name="syscollect-mode" value="zabbix" onchange="setSysCollectMode('zabbix')" />
+              <span class="so-ico">📡</span>
+              <span class="so-txt"><b data-i18n="webui.sysinfo_opt_zabbix">Zabbix</b><i data-i18n="webui.sysinfo_opt_zabbix_desc">从 Zabbix 读取主机监控数据（需已配置 Zabbix）</i></span>
+            </label>
           </div>
-          <div class="ssh-fields form-grid" id="ssh-fields" style="display:none" data-page-node-id="3ZaUq0PqYn5bo5caLHPrA8">
+
+          <!-- SSH 采集参数 -->
+          <div id="ssh-panel" style="display:none">
+          <div class="ssh-fields form-grid visible" id="ssh-fields" data-page-node-id="3ZaUq0PqYn5bo5caLHPrA8">
             <div class="field" data-page-node-id="Qoevio9UsRaG1ujCQx8vZl">
               <label data-i18n="webui.label_ssh_host" data-page-node-id="D6E9T7pCPui7gfR9FSDaZN">SSH 主机地址</label>
               <input type="text" id="f-ssh-host" data-i18n="webui.placeholder_ssh_host" placeholder="与数据库主机相同" data-page-node-id="Qo2vlp57e4cAYF18bU4tmh" />
@@ -8452,10 +8651,28 @@ function wfCloseRunDrawer() {
             <span style="color:#0A2A6E;font-weight:600;" data-page-node-id="uENjhcBMStcrlfX7TUTZWb">ℹ️ eBPF 内核级指标说明：</span>
             <span data-i18n="webui.ssh_ebpf_hint" data-page-node-id="hUU2xf9j2bKaHsMjoEfxg3">采集器默认走零依赖 Shell（/proc）方式，目标机无需安装 Python 即可获取 CPU、内存、磁盘等基础宿主指标。</span>
           </div>
+          </div><!-- /ssh-panel -->
+
+          <!-- Zabbix 采集参数：只指定目标主机，地址与凭据来自「Zabbix 监控设置」 -->
+          <div id="zabbix-panel" style="display:none">
+            <div class="form-grid">
+              <div class="field">
+                <label>💻 <span data-i18n="webui.sysinfo_label_host_ip">Zabbix 主机 IP</span></label>
+                <input type="text" id="f-zb-host" placeholder="与数据库主机相同（推荐）" />
+              </div>
+              <div class="field">
+                <label>🏷️ <span data-i18n="webui.sysinfo_label_host_name">Zabbix 主机名（可选）</span></label>
+                <input type="text" id="f-zb-hostname" placeholder="如已知 Zabbix 中的精确主机名，填写可提高匹配准确度" />
+              </div>
+            </div>
+            <div id="zb-config-status" style="margin-top:10px"></div>
+          </div><!-- /zabbix-panel -->
+
           <div id="ssh-test-status" style="margin-top:12px" data-page-node-id="WnGhLSEVpxQXwup5ymxWVr"></div>
           <div class="btn-row" data-page-node-id="3jfj8HvgQssCK4HewVgTmK">
             <button class="btn btn-ghost" onclick="gotoStep(2)" data-i18n="webui.btn_prev" data-page-node-id="azgB5azipV30OJl9kc4VCG">← 上一步</button>
             <button class="btn btn-ghost" id="btn-test-ssh" onclick="testSsh()" style="display:none" data-i18n="webui.ssh_test_btn" data-page-node-id="JKOALo94Pwy5JdzFITJXGD">🔗 测试 SSH</button>
+            <button class="btn btn-ghost" id="btn-test-zabbix" onclick="testZabbixHost()" style="display:none">🔗 <span data-i18n="webui.sysinfo_test_zabbix_btn">测试 Zabbix 主机</span></button>
             <button class="btn btn-primary" onclick="gotoStep(4)" data-i18n="webui.btn_next" data-page-node-id="tqXh7pD5hHtA7gAWeWBrDN">下一步 →</button>
           </div>
         </div>
@@ -8567,6 +8784,10 @@ function wfCloseRunDrawer() {
             </div>
           </div>
         </div>
+
+            </div><!-- /wi-config-modal-body -->
+          </div><!-- /wi-config-modal -->
+        </div><!-- /wizard-config-modal -->
 
       </div><!-- /page-wizard -->
 
@@ -8710,150 +8931,325 @@ function wfCloseRunDrawer() {
       </div>
 
       <!-- ══ Page: Trend ══ -->
-      <div class="page" id="page-trend" data-page-node-id="zC6XcQUtPE5X7HkAVHlXvD">
-        <div class="card" style="margin-bottom:16px" data-page-node-id="QQ1GLjct7RyPp40O6j8nzY">
-          <div class="card-title" data-page-node-id="Ujx0tBNBNT1WHLaFi1B5Ul"><span data-page-node-id="CCRAjX6gZRugvBNYAYaUHI">📈</span> <span data-i18n="webui.trend_title" data-page-node-id="3DtEuHJkdC6qXgAnFNBlLT">历史趋势分析</span>
-            <button class="btn btn-ghost" style="margin-left:auto;padding:6px 12px;font-size:12px" onclick="loadTrendInstances()" data-i18n="webui.reports_refresh" data-page-node-id="IgTpdIfbNuhuo7DCXVJAaI">↻ 刷新</button>
-          </div>
-          <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap;align-items:flex-end" data-page-node-id="E8Aix9Rke5tyRe0dGwQk41">
-            <div style="flex:1;min-width:200px" data-page-node-id="sJVjO1Te4km9dznQqMXIoU">
-              <label style="font-size:12px;color:var(--text-muted)" data-i18n="webui.trend_select_instance" data-page-node-id="5gEf1kH7yTEAilOCjFupH0">选择数据库实例</label>
-              <select id="trend-instance-select" style="width:100%;margin-top:6px;padding:8px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px" onchange="onTrendInstanceChange()" data-page-node-id="acZYgZuFUPFjfePrcJsJef">
-                <option value="" data-i18n="webui.trend_loading" data-page-node-id="SH4BCrCPlMYL8iUQdqd9Dj">-- 加载中 --</option>
-              </select>
-            </div>
-            <button class="btn btn-primary" style="padding:9px 20px" onclick="loadTrendData()" data-i18n="webui.btn_view_trend" data-page-node-id="auz75sfRFQHoTPsAZqMzKl">查看趋势</button>
-          </div>
-          <div id="trend-comparison" style="display:none;margin-bottom:16px" data-page-node-id="zxGZ4jAhalzEVYifWFIa94"></div>
-        </div>
-
-        <div class="card" id="trend-chart-card" style="display:none" data-page-node-id="ZEOXQVJFcI8YbjdRS4a511">
-          <div class="card-title" data-page-node-id="w8nnGI1HJT5GQ4pRp9cLuu"><span data-page-node-id="rqgvyTsK55TrYjxAMBFoy8">📊</span> <span data-i18n="webui.chart_title" data-page-node-id="ABKq3i7UnMKB1sUhcsf6nu">关键指标趋势图</span></div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px" id="trend-charts-grid" data-page-node-id="137yvZj9jVmtOb2M7TUx55">
-          </div>
-        </div>
-
-        <div id="trend-empty" class="card" style="text-align:center;padding:48px;color:var(--text-muted)" data-page-node-id="PXOZIhmuy7L24Rrr0xGz5F">
-          <div style="font-size:40px;margin-bottom:12px" data-page-node-id="J3SzhRx417yEeGh8JPBDrF">📉</div>
-          <div data-i18n="webui.trend_no_data" data-page-node-id="k0mGCcEpsFxKn6LLDutYtD">执行巡检后，历史趋势数据将在这里显示</div>
-          <div style="font-size:12px;margin-top:8px" data-i18n="webui.trend_same_db_note" data-page-node-id="9zziFBvscvvwG6a1tJ8c8v">同一个数据库（相同 IP + 端口）的多次巡检结果将被对比展示</div>
-        </div>
-      </div>
+      {% include 'partials/fusion/trend.html' %}
 
       <!-- ══ Page: Scheduler ══ -->
       <div class="page" id="page-scheduler" data-page-node-id="Wq2t5taq0kQ2TEYDaoaer2">
-        <div class="card" data-page-node-id="u4QLVUAWSMgMxwfE4DYJuJ">
-          <div class="card-title" data-page-node-id="2eSGJVV2yK6SCAQ2O7pQ1Y">
-            <span data-page-node-id="XNLbjWBeO4h8KgZxhlePrG">⏰</span> <span data-i18n="webui.scheduler_title" data-page-node-id="CLcRoKH7CDl4hw34EshBEw">定时巡检任务</span>
-            <span class="badge" id="scheduler-job-count" data-page-node-id="kidn4s8kXkUVvrsDGHcjqD"></span>
+
+        <!-- 统计概览（口径与源系统一致：运行中=已启用，最近成功/失败按最近一次结果计数） -->
+        <div class="sched-stats-bar">
+          <div class="sched-stat-card stat-total">
+            <span class="sched-stat-icon">📋</span>
+            <div><div class="sched-stat-num" id="sched-stat-total">-</div><div class="sched-stat-label">任务总数</div></div>
           </div>
-          <div id="scheduler-job-list" style="margin-bottom:20px;" data-page-node-id="n4svC2eguDdyllfyrGBvza"></div>
-          <button class="btn btn-primary" onclick="showAddJobForm()" data-page-node-id="KqB6mhhXtQkvCDCLweLmFc"><span data-i18n="webui.scheduler_new_job" data-page-node-id="meGnjw9FNuPsEMxY0J0JG7">+ 新建定时任务</span></button>
+          <div class="sched-stat-card stat-active">
+            <span class="sched-stat-icon">🟢</span>
+            <div><div class="sched-stat-num active" id="sched-stat-active">-</div><div class="sched-stat-label">运行中</div></div>
+          </div>
+          <div class="sched-stat-card stat-paused">
+            <span class="sched-stat-icon">⏸️</span>
+            <div><div class="sched-stat-num paused" id="sched-stat-paused">-</div><div class="sched-stat-label">已暂停</div></div>
+          </div>
+          <div class="sched-stat-card stat-success">
+            <span class="sched-stat-icon">✅</span>
+            <div><div class="sched-stat-num success" id="sched-stat-success">-</div><div class="sched-stat-label">最近成功</div></div>
+          </div>
+          <div class="sched-stat-card stat-fail">
+            <span class="sched-stat-icon">❌</span>
+            <div><div class="sched-stat-num fail" id="sched-stat-fail">-</div><div class="sched-stat-label">最近失败</div></div>
+          </div>
         </div>
 
-        <!-- 添加/编辑任务表单 -->
-        <div class="card" id="add-job-form" style="display:none" data-page-node-id="82SgPkv0E9tmR9T6pxqdn6">
-          <div class="card-title" data-page-node-id="L73Jp4VF3WSN8IRVK7kZwE">
-            <span data-page-node-id="TNO1Z48V1JMwhqDPWxZEcV">➕</span> <span id="job-form-title" data-i18n="webui.scheduler_job_form_title_new" data-page-node-id="X9Oy0WpZZWWUTUAEj9ry8k">新建定时任务</span>
-          </div>
-          <div class="form-grid" data-page-node-id="6VDMtsAXZ86e1sUzI6hUw3">
-            <div class="field full" data-page-node-id="Qd2wB62SFpQh8xhpBFwNbd">
-              <label data-i18n="webui.scheduler_job_name" data-page-node-id="He3NKuE54sFWSQggK6I6Sj">任务名称 <span class="req" data-page-node-id="EUaRCDabGIrVNaq2ANBFiV">*</span></label>
-              <input type="text" id="job-name" data-i18n="webui.placeholder_job_name" placeholder="任务名称（用于报告命名）" data-page-node-id="cCSDheeHArW7tr6qxz8RhD" />
-            </div>
-            <div class="field" data-page-node-id="OEBJsbCHpLqHOcNB7piFtO">
-              <label data-i18n="webui.scheduler_db_type" data-page-node-id="W0l1PWFTgxHLzZZGTsaUV1">数据库类型 <span class="req" data-page-node-id="t8nvihOXGQnf1JxJTVEeFZ">*</span></label>
-              <select id="job-db-type" onchange="onJobDbTypeChange()" data-page-node-id="oqCRz9OdpXHfFa7QWkLenH"></select>
-            </div>
-            <div class="field full" data-page-node-id="lBuC5fN8ZnDhvz53jjqaKr">
-              <label data-i18n="webui.scheduler_select_ds" data-page-node-id="tmP2p0BZipJ8qNk6CzrLlD">选择已有数据源</label>
-              <select id="job-datasource" onchange="onJobDatasourceChange()" data-page-node-id="0G5LUQ3iPUHs1O2TyCTLlT">
-                <option value="" data-i18n="webui.ds_manual_input" data-page-node-id="Xuhep9SubtFge74UyeWWp9">-- 手动输入连接信息 --</option>
-              </select>
-            </div>
-            <div class="field full" data-page-node-id="dmiaLniciRJFFfVy043i8O">
-              <label data-page-node-id="6YDRg6nxumRQsj3PnwPeaO">📋 巡检模板</label>
-              <select id="job-template" class="form-input" data-page-node-id="41rw4tT5GHKzIBe6MWmpn9">
-                <option value="" data-page-node-id="DpbMPVRi3tQhIo5lY0SrWe">使用默认模板（自动选择）</option>
-              </select>
-            </div>
-            <div class="field" data-page-node-id="ml5ztZH81Llcx9ftiTY6xp">
-              <label data-i18n="webui.label_host" data-page-node-id="vcuPmOpDMvxGGHaci2Gaey">主机地址 <span class="req" data-page-node-id="k7YGNEhuRZmtkVkFILaubD">*</span></label>
-              <input type="text" id="job-host" data-i18n="webui.placeholder_host" placeholder="localhost" data-page-node-id="y1HwrQv2zVlRo2ElPSkOFq" />
-            </div>
-            <div class="field" data-page-node-id="MJYttm9HhZovs0lThMaExz">
-              <label data-i18n="webui.label_port" data-page-node-id="trHFlavKnneVNJeazMMc2k">端口 <span class="req" data-page-node-id="9J0n1HfXNF8FOqRA8ME08C">*</span></label>
-              <input type="number" id="job-port" value="3306" data-page-node-id="fRPdZYF0gd5ATnZUCvgcmd" />
-            </div>
-            <div class="field" data-page-node-id="uWBNVnk7KaC3tSyiS9kVM3">
-              <label id="job-user-label" data-i18n="webui.label_username" data-page-node-id="vZpiYQwd7bw1N0ynouqOBA">用户名 <span class="req" data-page-node-id="jDFOsKjYsWhGAwL3Q41KcL">*</span></label>
-              <input type="text" id="job-user" data-i18n="webui.placeholder_username" placeholder="root" autocomplete="off" data-page-node-id="LB3gWne7GJJSkmw2lL8Ugx" />
-            </div>
-            <div class="field" data-page-node-id="D8F2wHuxQ5uEGGmGdxO39g">
-              <label data-i18n="webui.label_password" data-page-node-id="KON6mttGfjoyGmWaJZpLOD">密码</label>
-              <input type="password" id="job-password" data-i18n="webui.placeholder_password" placeholder="数据库密码" autocomplete="new-password" data-page-node-id="InCpF4WMQikwsM4ERDw7Fi" />
-            </div>
-            <div class="field" id="job-database-wrap" style="display:none" data-page-node-id="Mv6ISyxWvbunpyVU08BXfp">
-              <label data-i18n="webui.scheduler_db_name" data-page-node-id="fXBDbxyoY4SZMDv72hzpqD">数据库名</label>
-              <input type="text" id="job-database" data-i18n="webui.placeholder_database_pg" placeholder="默认 postgres" data-page-node-id="8glETWGDy2WpfzYbgCycNj" />
-            </div>
-            <div class="field" id="job-service-wrap" style="display:none" data-page-node-id="xlYcPstcXFfnbbCDvNEPmC">
-              <label data-page-node-id="XHbRiQH8SSkJBcFEGz0e0J">服务名 / SID</label>
-              <input type="text" id="job-service-name" placeholder="ORCL" data-page-node-id="kDR0sOwdWH2SOB8LmISOqr" />
-            </div>
-            <div class="field" id="job-sysdba-wrap" style="display:none" data-page-node-id="QGY8uSRlW6VNRlyjlEMqyq">
-              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;" data-page-node-id="rUSX3TEa6KilMx9ZUPUfC9">
-                <input type="checkbox" id="job-sysdba" data-page-node-id="TEfNFWIGWdfi8NPFuQwrex" />
-                <span style="color:var(--text-muted)" data-page-node-id="q3h2iUWQZGNIojlh5KBK0g">使用 SYSDBA 连接</span>
-              </label>
-            </div>
-            <div class="field" id="job-use-sid-wrap" style="display:none" data-page-node-id="niHPrtwPZ1hHmLxDSu8fZd">
-              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;" data-page-node-id="PVR8WNKmoF5dcPGTPsclsL">
-                <input type="checkbox" id="job-use-sid" data-page-node-id="NhNx4qo5aMHat8cezjkE7B" />
-                <span style="color:var(--text-muted)" data-page-node-id="UGmTdq601G1ukTmjzXe8bc">使用 SID 连接（jdbc:oracle:thin:@host:port:SID，区别于默认的服务名格式）</span>
-              </label>
-            </div>
-            <div class="field full" id="job-driver-version-wrap" style="display:none" data-page-node-id="JxNfS8wczgOm4S7jemeGTo">
-              <label data-page-node-id="fSGp6R891sNvcz4rz2f9aR"><span data-page-node-id="6F2j0T51GHPQuPWOvnwBab">JDBC 驱动版本</span> <span class="opt" data-page-node-id="oWx95vuoJ1olFhGiZ8YSCW">驱动管理</span></label>
-              <select id="job-driver-version" style="width:100%;margin-top:4px;padding:8px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px" data-page-node-id="Cx42jGGdkVFzbAl1W6JxTx">
-                <option value="" data-page-node-id="W9WcyISzK7gzW6kzwlucBP">默认（激活版本）</option>
-              </select>
-            </div>
-          </div>
+        <!-- 工具栏：新建定时任务 → 搜索 → 状态筛选 → 刷新 -->
+        <div class="sched-toolbar">
+          <button class="btn btn-primary" onclick="showAddJobForm()">
+            <span style="font-size:16px">+</span> 新建定时任务
+          </button>
+          <input type="text" class="sched-search-input" id="sched-search-input" placeholder="搜索任务名称、主机..."
+                 oninput="filterSchedulerJobs()">
+          <select class="sched-search-input" id="sched-status-filter" onchange="filterSchedulerJobs()" style="width:120px">
+            <option value="">全部状态</option>
+            <option value="running">运行中</option>
+            <option value="paused">已暂停</option>
+            <option value="failed">最近失败</option>
+          </select>
+          <div style="flex:1"></div>
+          <button class="btn btn-ghost" onclick="loadSchedulerJobs()" title="刷新列表">🔄 刷新</button>
+        </div>
 
-          <div id="job-test-status" style="margin-top:10px;display:none;" data-page-node-id="9mqCWFgukgHetUhWLyVixh"></div>
+        <!-- 任务卡片列表 -->
+        <div class="scheduler-list" id="scheduler-job-list">
+          <div class="sched-empty"><div class="icon">⏰</div>正在加载定时任务...</div>
+        </div>
+      </div>
 
-          <div style="margin-top:20px;" data-page-node-id="AnRwa8Y3AqNkCi7qwjqYug">
-            <label style="font-weight:600;margin-bottom:12px;display:block;" data-page-node-id="AOGXXoHEiOQlRLtEQedACC">⏰ 执行周期</label>
-            <div class="field" style="margin-bottom:14px;" data-page-node-id="taSXdJLe6sGgkSIBNhDbqx">
-              <select id="job-schedule-type" onchange="onScheduleTypeChange()" data-page-node-id="dfAeAnI52pnhkKYQuuhGI4">
-                <option value="hourly" data-page-node-id="F6joELB8ceEDgLbbKuau2f">每小时</option>
-                <option value="every_min" data-page-node-id="VFK2Gel2aWo4wlnUeSs89Z">每隔 N 分钟</option>
-                <option value="every_hour" data-page-node-id="VsUzawafLtyV6PTY87DXKj">每隔 N 小时</option>
-                <option value="daily" selected data-page-node-id="BE04cVaJnsCPNp8NKoLDkW">每天（指定时间）</option>
-                <option value="weekly" data-page-node-id="qZeNKQaoFiisrKfc8wFtW4">每周（指定星期）</option>
-                <option value="monthly" data-page-node-id="9IBn1DFAQ6HQER1MrRXO5U">每月（指定日期）</option>
-                <option value="custom" data-page-node-id="fXQkRWwRyzfLYe2CGgIy8h">自定义 cron</option>
-              </select>
+      <!-- 新建/编辑定时任务：4 步向导弹窗 -->
+      <div class="sched-modal-overlay" id="sched-job-modal" style="display:none" onclick="schedModalBackdrop(event)">
+        <div class="sched-modal" onclick="event.stopPropagation()">
+          <div class="sched-modal-header">
+            <div class="title">⏰ <span id="sched-modal-title">新建定时任务</span></div>
+            <button class="modal-close" onclick="hideAddJobForm()" title="关闭">✕</button>
+          </div>
+          <div class="sched-modal-body">
+            <div class="sched-steps" id="sched-steps">
+              <div class="sched-step active" data-step="1" onclick="schedGoStep(1)" title="点击跳转到此步骤"><span class="num">1</span><span>任务设置</span></div>
+              <div class="sched-step-line"></div>
+              <div class="sched-step" data-step="2" onclick="schedGoStep(2)" title="点击跳转到此步骤"><span class="num">2</span><span>连接数据库源</span></div>
+              <div class="sched-step-line"></div>
+              <div class="sched-step" data-step="3" onclick="schedGoStep(3)" title="点击跳转到此步骤"><span class="num">3</span><span>系统资源采集</span></div>
+              <div class="sched-step-line"></div>
+              <div class="sched-step" data-step="4" onclick="schedGoStep(4)" title="点击跳转到此步骤"><span class="num">4</span><span>后续任务</span></div>
             </div>
-            <div id="job-schedule-params" class="form-grid" data-page-node-id="MPRO1bTvIX2OXVmBuI6Wb1"></div>
-            <div style="margin-top:8px;font-size:12px;color:var(--text-muted);" data-page-node-id="igeA6QE5ULpKadydhVLLrB">
-              当前配置预览: <code id="job-cron-preview" data-page-node-id="cFJuAIYFoJesSH2CbRyPrF">每天 02:00 执行</code>
+
+            <!-- 步骤 1：执行频率 -->
+            <div class="sched-pane active" id="sched-pane-1">
+              <div class="sched-form-grid">
+                <div class="sched-field full">
+                  <label>任务名称 <span class="req">*</span></label>
+                  <input type="text" id="sched-job-name" placeholder="例如：生产库每日巡检">
+                </div>
+                <div class="sched-field full">
+                  <label>执行频率</label>
+                  <div class="freq-tabs" id="sched-freq-tabs">
+                    <button type="button" class="freq-tab" data-freq="hourly" onclick="schedSelectFreq('hourly')">每小时</button>
+                    <button type="button" class="freq-tab active" data-freq="daily" onclick="schedSelectFreq('daily')">每天</button>
+                    <button type="button" class="freq-tab" data-freq="weekly" onclick="schedSelectFreq('weekly')">每周</button>
+                    <button type="button" class="freq-tab" data-freq="monthly" onclick="schedSelectFreq('monthly')">每月</button>
+                    <button type="button" class="freq-tab" data-freq="yearly" onclick="schedSelectFreq('yearly')">每年</button>
+                    <button type="button" class="freq-tab" data-freq="custom" onclick="schedSelectFreq('custom')">自定义 Cron</button>
+                  </div>
+                  <div class="freq-panel" data-panel="hourly">
+                    <span class="sep">每小时的第</span>
+                    <select id="sched-freq-hourly-min">
+                      <option value="0">0 分</option><option value="5">5 分</option><option value="10">10 分</option>
+                      <option value="15">15 分</option><option value="20">20 分</option><option value="30">30 分</option>
+                      <option value="45">45 分</option>
+                    </select>
+                    <span class="sep">执行</span>
+                  </div>
+                  <div class="freq-panel active" data-panel="daily">
+                    <span class="sep">每天</span>
+                    <input type="time" id="sched-freq-daily-time" value="02:00">
+                    <span class="sep">执行</span>
+                  </div>
+                  <div class="freq-panel" data-panel="weekly">
+                    <span class="sep">每周</span>
+                    <select id="sched-freq-weekly-dow">
+                      <option value="mon">周一</option><option value="tue">周二</option><option value="wed">周三</option>
+                      <option value="thu">周四</option><option value="fri">周五</option><option value="sat">周六</option>
+                      <option value="sun">周日</option><option value="1-5">工作日</option><option value="0,6">周末</option>
+                    </select>
+                    <input type="time" id="sched-freq-weekly-time" value="02:00">
+                    <span class="sep">执行</span>
+                  </div>
+                  <div class="freq-panel" data-panel="monthly">
+                    <span class="sep">每月</span>
+                    <select id="sched-freq-monthly-dom">
+                      <option value="1">1 号</option><option value="5">5 号</option><option value="10">10 号</option>
+                      <option value="15">15 号</option><option value="20">20 号</option><option value="25">25 号</option>
+                      <option value="28">28 号</option>
+                    </select>
+                    <input type="time" id="sched-freq-monthly-time" value="02:00">
+                    <span class="sep">执行</span>
+                  </div>
+                  <div class="freq-panel" data-panel="yearly">
+                    <div class="sched-year-row">
+                      <span class="sep">执行月份</span>
+                      <div class="sched-month-chips" id="sched-freq-year-month-chips"></div>
+                      <div class="freq-presets">
+                        <button type="button" class="freq-preset" onclick="schedYearPreset('all')">全选</button>
+                        <button type="button" class="freq-preset" onclick="schedYearPreset('quarter')">每季度首月</button>
+                        <button type="button" class="freq-preset" onclick="schedYearPreset('clear')">清空</button>
+                      </div>
+                    </div>
+                    <div class="sched-year-row">
+                      <span class="sep">每年</span>
+                      <select id="sched-freq-year-dom">
+                        <option value="1">1 号</option><option value="5">5 号</option><option value="10">10 号</option>
+                        <option value="15">15 号</option><option value="20">20 号</option><option value="25">25 号</option>
+                        <option value="28">28 号</option>
+                      </select>
+                      <input type="time" id="sched-freq-year-time" value="02:00">
+                      <span class="sep">执行</span>
+                    </div>
+                  </div>
+                  <div class="freq-panel" data-panel="custom" style="display:none">
+                    <input type="text" id="sched-cron-input" placeholder="分 时 日 月 周，例如：0 2 * * *" style="flex:1">
+                  </div>
+                  <div class="cron-preview">📅 当前配置：<b id="sched-cron-preview">每天 02:00 执行</b></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 步骤 2：数据库连接 -->
+            <div class="sched-pane" id="sched-pane-2">
+              <div class="sched-form-grid">
+                <div class="sched-field full">
+                  <label>选择已有数据源</label>
+                  <select id="sched-datasource" onchange="schedOnDatasourceChange()">
+                    <option value="">-- 手动输入连接信息 --</option>
+                  </select>
+                  <div class="hint">选择数据源后将复用其连接配置；也可手动填写。</div>
+                </div>
+                <div class="sched-field">
+                  <label>数据库类型 <span class="req">*</span></label>
+                  <select id="sched-db-type" onchange="schedOnDbTypeChange()">
+                    <option value="mysql">MySQL</option>
+                    <option value="pg">PostgreSQL</option>
+                    <option value="oracle">Oracle</option>
+                    <option value="sqlserver">SQL Server</option>
+                    <option value="dm">达梦 DM</option>
+                    <option value="kingbase">人大金仓</option>
+                    <option value="gbase">GBase</option>
+                    <option value="mongodb">MongoDB</option>
+                    <option value="redis">Redis</option>
+                  </select>
+                </div>
+                <div class="sched-field">
+                  <label>巡检模板</label>
+                  <select id="sched-template">
+                    <option value="">使用默认模板（自动选择）</option>
+                  </select>
+                </div>
+                <div class="sched-field">
+                  <label>主机地址 <span class="req">*</span></label>
+                  <input type="text" id="sched-host" placeholder="localhost">
+                </div>
+                <div class="sched-field">
+                  <label>端口 <span class="req">*</span></label>
+                  <input type="number" id="sched-port" value="3306">
+                </div>
+                <div class="sched-field">
+                  <label>用户名 <span class="req">*</span></label>
+                  <input type="text" id="sched-user" placeholder="root" autocomplete="off">
+                </div>
+                <div class="sched-field">
+                  <label>密码</label>
+                  <input type="password" id="sched-password" placeholder="数据库密码" autocomplete="new-password">
+                </div>
+                <div class="sched-field" id="sched-database-wrap">
+                  <label>数据库名</label>
+                  <input type="text" id="sched-database" placeholder="默认 postgres">
+                </div>
+                <div class="sched-field" id="sched-service-wrap" style="display:none">
+                  <label>服务名 / SID</label>
+                  <input type="text" id="sched-service-name" placeholder="ORCL">
+                </div>
+                <div class="sched-field" id="sched-sysdba-wrap" style="display:none">
+                  <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                    <input type="checkbox" id="sched-sysdba" style="width:16px;height:16px"> 使用 SYSDBA 连接
+                  </label>
+                </div>
+                <div class="sched-field full">
+                  <div id="sched-test-status" style="font-size:12px;color:var(--text-muted)"></div>
+                  <button type="button" class="btn btn-ghost" style="align-self:flex-start;font-size:12px" onclick="schedTestDb()">🔗 测试连接</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- 步骤 3：系统资源采集 -->
+            <div class="sched-pane" id="sched-pane-3">
+              <div class="sched-radio-cards">
+                <div class="sched-radio-card active" data-sys="none" onclick="schedSetSysCollect('none')">
+                  <div class="t">不采集</div>
+                  <div class="d">仅执行数据库巡检，不采集服务器 CPU/内存/磁盘</div>
+                </div>
+                <div class="sched-radio-card" data-sys="ssh" onclick="schedSetSysCollect('ssh')">
+                  <div class="t">SSH 采集</div>
+                  <div class="d">通过 SSH 连接数据库所在服务器，采集系统资源指标</div>
+                </div>
+                <div class="sched-radio-card" data-sys="zabbix" onclick="schedSetSysCollect('zabbix')">
+                  <div class="t">Zabbix</div>
+                  <div class="d">从 Zabbix 读取主机监控数据（需已配置 Zabbix）</div>
+                </div>
+              </div>
+              <div id="sched-ssh-fields" style="display:none;margin-top:16px">
+                <div class="sched-form-grid">
+                  <div class="sched-field">
+                    <label>SSH 主机</label>
+                    <input type="text" id="sched-ssh-host" placeholder="默认与数据库主机相同">
+                  </div>
+                  <div class="sched-field">
+                    <label>SSH 端口</label>
+                    <input type="number" id="sched-ssh-port" value="22">
+                  </div>
+                  <div class="sched-field">
+                    <label>SSH 用户</label>
+                    <input type="text" id="sched-ssh-user" placeholder="root">
+                  </div>
+                  <div class="sched-field">
+                    <label>SSH 密码</label>
+                    <input type="password" id="sched-ssh-password" autocomplete="new-password">
+                  </div>
+                </div>
+              </div>
+              <div id="sched-zabbix-fields" style="display:none;margin-top:16px">
+                <div class="sched-field full">
+                  <label>Zabbix 主机名 / IP</label>
+                  <input type="text" id="sched-zabbix-host" placeholder="Zabbix 中的主机名称或 IP">
+                  <div class="hint">使用「通知配置 → Zabbix」中已保存的 API 地址与凭据。</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 步骤 4：通知与确认 -->
+            <div class="sched-pane" id="sched-pane-4">
+              <div class="sched-check-row">
+                <input type="checkbox" id="sched-notify-on" checked onchange="schedUpdateEmailSubOptions()">
+                <div>
+                  <div>巡检完成后发送通知</div>
+                  <div class="d">关闭后仅生成报告，不发送任何通知。</div>
+                </div>
+              </div>
+              <div class="sched-check-row" style="padding-left:24px">
+                <input type="checkbox" id="sched-notify-email" checked>
+                <div><div>发送邮件通知</div><div class="d">使用「通知配置 → 邮件」中的收件人与 SMTP 设置。</div></div>
+              </div>
+              <div class="sched-form-grid" style="margin-top:8px;padding-left:24px">
+                <div class="sched-field full">
+                  <label>额外收件人（可选，逗号分隔）</label>
+                  <input type="text" id="sched-email-to" placeholder="dba@example.com, ops@example.com">
+                </div>
+                <div class="sched-field full">
+                  <label>抄送（可选，逗号分隔）</label>
+                  <input type="text" id="sched-email-cc" placeholder="manager@example.com">
+                </div>
+              </div>
+              <div class="sched-check-row" style="padding-left:24px">
+                <input type="checkbox" id="sched-notify-anomaly" checked>
+                <div><div>仅异常时通知</div><div class="d">勾选后，巡检结果无高风险/中风险问题时不再发送邮件。</div></div>
+              </div>
+              <div class="sched-check-row" style="padding-left:24px">
+                <input type="checkbox" id="sched-notify-attach" checked>
+                <div><div>附带 HTML 报告</div><div class="d">将完整巡检报告作为附件发送。</div></div>
+              </div>
+              <div class="sched-summary" id="sched-summary"></div>
             </div>
           </div>
-
-          <div style="margin-top:20px;" data-page-node-id="XsumAudPwpQL6iBVAMBC2R">
-            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;" data-page-node-id="GQB1xpvY0j1XXgByb0q3QC">
-              <input type="checkbox" id="job-notify" checked data-page-node-id="Bj3xOI5DRgeXXhs0RSMqu6" />
-              <span data-page-node-id="DEMMFOaOQfb08YFwABRENk">巡检完成后发送通知</span>
-            </label>
+          <div class="sched-modal-footer">
+            <button class="btn btn-ghost" id="sched-btn-prev" onclick="schedPrevStep()" style="display:none">← 上一步</button>
+            <div class="spacer"></div>
+            <button class="btn btn-ghost" onclick="hideAddJobForm()">取消</button>
+            <button class="btn btn-primary" id="sched-btn-next" onclick="schedNextStep()">下一步 →</button>
+            <button class="btn btn-primary" id="sched-btn-save" onclick="saveJob()" style="display:none">💾 保存任务</button>
           </div>
+        </div>
+      </div>
 
-          <div class="btn-row" style="margin-top:20px;" data-page-node-id="tiwldK4qPTMbD23s20ayjm">
-            <button class="btn btn-ghost" onclick="testJobDb()" style="font-size:12px;" data-page-node-id="6HoJikIyeiRWVRs33Gy9pn">🔗 测试连接</button>
-            <div style="flex:1" data-page-node-id="3eor6ovYzx86vb7cL4R7Nq"></div>
-            <button class="btn btn-primary" onclick="saveJob()" data-page-node-id="Qqgs9awhg4rFi3lJDg5n3r">💾 保存任务</button>
-            <button class="btn btn-ghost" onclick="hideAddJobForm()" data-page-node-id="kD8UCdPCkyATTPQrtvoWhP">取消</button>
+      <!-- 执行日志弹窗 -->
+      <div class="sched-modal-overlay" id="sched-log-modal" style="display:none" onclick="schedLogBackdrop(event)">
+        <div class="sched-modal" style="max-width:880px" onclick="event.stopPropagation()">
+          <div class="sched-modal-header">
+            <div class="title">📜 <span id="sched-log-title">执行日志</span></div>
+            <button class="modal-close" onclick="closeJobLogModal()" title="关闭">✕</button>
+          </div>
+          <div class="sched-modal-body" id="sched-log-body">
+            <div class="sched-log-empty">加载中...</div>
+          </div>
+          <div class="sched-modal-footer">
+            <button class="btn btn-ghost" onclick="clearJobLogs()">🧹 清空日志</button>
+            <div class="spacer"></div>
+            <button class="btn btn-ghost" onclick="closeJobLogModal()">关闭</button>
           </div>
         </div>
       </div>
@@ -8861,6 +9257,11 @@ function wfCloseRunDrawer() {
       <!-- ══ Page: Notifier ══ -->
       <div class="page" id="page-notifier">
         {% include 'partials/fusion/notifier.html' %}
+      </div>
+
+      <!-- ══ Page: Zabbix 监控设置 ══ -->
+      <div class="page" id="page-zabbix">
+        {% include 'partials/fusion/zabbix.html' %}
       </div>
 
       <!-- ══ Page: Backup ══ -->
@@ -12092,6 +12493,8 @@ if (_ADMIN_TOKEN) sessionStorage.setItem('dbcheck_admin', _ADMIN_TOKEN);
 // ─── State ───
 let dbType = 'oracle';
 let sshEnabled = false;
+// 系统资源采集方式：'none' | 'ssh' | 'zabbix'
+let sysCollectMode = 'none';
 let ebpfEnabled = true;
 let _inspSshPassword = '';  // 缓存数据源SSH密码，供testSsh使用
 let currentTaskId = null;
@@ -12629,6 +13032,7 @@ function showPage(name) {
     trend:   [i18n('webui.trend_title') || '历史趋势',                    i18n('webui.trend_desc') || ''],
     scheduler:[i18n('webui.nav_scheduler') || '定时巡检',                  i18n('webui.scheduler_desc') || '管理定时巡检任务'],
     notifier:[i18n('webui.nav_notifier') || '通知配置',                   i18n('webui.notifier_desc') || '配置邮件和 Webhook 通知'],
+    zabbix:  [i18n('webui.nav_zabbix') || 'Zabbix 监控设置',              i18n('webui.zabbix_desc') || '配置 Zabbix 服务器地址与凭据'],
     ai:      [i18n('webui.ai_title') || 'AI 诊断',                       i18n('webui.ai_desc') || ''],
     datasources: [i18n('webui.nav_datasources') || '数据源管理',        i18n('webui.datasources_desc') || ''],
     rules:   [i18n('webui.nav_rules') || '巡检规则',                    i18n('webui.rules_desc') || ''],
@@ -12673,6 +13077,7 @@ function showPage(name) {
   document.getElementById('topbar-title').textContent = t[0];
   document.getElementById('topbar-sub').textContent  = t[1];
   if (name === 'reports') loadReports();
+  if (name === 'wizard') loadWizardHistoryPage();
   if (name === 'trend') loadTrendInstances();
   if (name === 'scheduler') loadSchedulerJobs();
   if (name === 'datasources') loadDataSources();
@@ -12683,6 +13088,7 @@ function showPage(name) {
     if (window.FusionNotifier) FusionNotifier.load();
     else if (typeof loadNotifierConfig === 'function') loadNotifierConfig();
   }
+  if (name === 'zabbix' && window.FusionZabbix) FusionZabbix.load();
   if (name === 'ai') loadAIConfig();
   if (name === 'rag') showRagPage();
   if (name === 'doc-kb') loadDocKb();
@@ -12749,6 +13155,10 @@ function showPage(name) {
   }
   if (name === 'monitor-slow') loadMonitorSlow();
   if (name === 'monitor-conn') loadMonitorConn();
+  if (name !== 'wizard') {
+    var wm = document.getElementById('wizard-config-modal');
+    if (wm) wm.style.display = 'none';
+  }
   // SQL 编辑器需要 height 约束（其他页面用 min-height 允许滚动）
   var mainEl = document.querySelector('.main');
   if (mainEl) {
@@ -12992,12 +13402,14 @@ function startWizard() {
   // 1. 重置数据库类型为 Oracle
   dbType = 'oracle';
   sshEnabled = false;
+  sysCollectMode = 'none';
   selectDbType('oracle');
 
   // 2. 清除所有表单字段（port/user/ssh-port 由默认值覆盖，需保留）
   const fids = ['f-name','f-host','f-password','f-database','f-tenant',
                 'f-service-name','f-inspector','f-ssh-host',
-                'f-ssh-user','f-ssh-password','f-ssh-key'];
+                'f-ssh-user','f-ssh-password','f-ssh-key',
+                'f-zb-host','f-zb-hostname'];
   fids.forEach(id => {
     const el = document.getElementById(id);
     if (el) el.value = '';
@@ -13005,11 +13417,9 @@ function startWizard() {
   document.getElementById('f-sysdba').checked = false;
   document.getElementById('f-desensitize').checked = false;
 
-  // 3. 重置 SSH 开关 UI
-  document.getElementById('ssh-toggle').className = 'toggle';
-  document.getElementById('ssh-toggle-sub').textContent = i18n('webui.ssh_enable_state_off');
-  document.getElementById('ssh-fields').className = 'ssh-fields form-grid';
-  document.getElementById('btn-test-ssh').style.display = 'none';
+  // 3. 重置系统资源采集方式与面板（f-host 已被清空，这里不会误回填主机）
+  setSysCollectMode('none');
+  document.getElementById('zb-config-status').innerHTML = '';
   // 重置 eBPF 开关（默认启用）
   ebpfEnabled = true;
   document.getElementById('ebpf-toggle').className = 'toggle on';
@@ -13045,28 +13455,17 @@ function startWizard() {
   document.getElementById('log-box').innerHTML = '';
   document.getElementById('btn-run').disabled = false;
   document.getElementById('btn-run').innerHTML = i18n('webui.btn_start_run');
+  var _wmt = document.getElementById('wi-config-modal-title-text');
+  if (_wmt) _wmt.textContent = '新建巡检任务';
+  var _wmc = document.getElementById('wizard-config-modal');
+  if (_wmc) _wmc.style.display = 'flex';
 }
 
 // ─── Steps ───
 const STEP_COUNT = 5;
 function gotoStep(n) {
-  // Step2 → Step3 校验：必须选择数据源或填写连接信息
-  if (n === 3) {
-    const dsSel = document.getElementById('f-datasource');
-    const hasDs = dsSel && dsSel.value;
-    if (!hasDs) {
-      const name  = (document.getElementById('f-name')  || {}).value.trim();
-      const host  = (document.getElementById('f-host')  || {}).value.trim();
-      const port  = (document.getElementById('f-port')  || {}).value.trim();
-      const user  = (document.getElementById('f-user')  || {}).value.trim();
-      // Redis 传统模式无用户名，仅 ACL 场景需要，允许留空
-      const _userReq = dbType !== 'redis' && dbType !== 'redis-cluster';
-      if (!name || !host || !port || (_userReq && !user)) {
-        toast(i18n('webui.wizard_conn_required') || '请选择已保存的数据源，或填写完整的数据库连接信息（实例标签、主机地址、端口、用户名）', 'warning');
-        return;
-      }
-    }
-  }
+  // 支持自由切换步骤：序号可直接点击跳转，不在这里强制校验连接信息。
+  // 连接信息校验统一放在 startInspection()，避免绕过校验直接启动巡检。
   for (let i = 1; i <= STEP_COUNT; i++) {
     document.getElementById('step' + i).style.display = (i === n) ? '' : 'none';
     const s = document.getElementById('s' + i);
@@ -13085,6 +13484,20 @@ function gotoStep(n) {
 }
 
 // ─── Load Datasources for Select ───
+// 数据库类型别名归一化：与 sql_editor.js 的 normalizeDbType、
+// inspection.js 的 wiWizardType 保持同一口径，避免出现第三种判法。
+// 存储里的类型带驱动变体后缀（oracle_jdbc / sqlserver_jdbc）或别名
+// （postgresql / dm8 / mssql），而第 1 步选的是「数据库家族」。
+// 不做归一就会把已有的 JDBC 源全部筛掉——表现为「明明有 Oracle 数据源，
+// 下拉却提示没有匹配」，且第 5 步确认面板也跟着失真。
+const DB_TYPE_ALIAS = { postgresql: 'pg', postgres: 'pg', mssql: 'sqlserver', dm8: 'dm' };
+function normalizeDbType(t) {
+  t = String(t || '').toLowerCase().trim();
+  t = DB_TYPE_ALIAS[t] || t;
+  if (t.slice(-5) === '_jdbc') t = t.slice(0, -5);   // 剥驱动变体后缀
+  return DB_TYPE_ALIAS[t] || t;                       // 去后缀后再收一次别名
+}
+
 async function loadDatasourcesForSelect() {
   try {
     const res = await fetch('/api/pro/datasources');
@@ -13092,11 +13505,13 @@ async function loadDatasourcesForSelect() {
     const sel = document.getElementById('f-datasource');
     sel.innerHTML = '<option value="">-- 手动输入连接信息 --</option>';
     if (data.ok && data.datasources) {
-      // 按当前选中的数据库类型过滤已保存数据源
-      const filterType = dbType ? dbType.toLowerCase() : null;
+      // 按当前选中的数据库类型过滤已保存数据源。
+      // 类型未知时按「不过滤」处理：不能兜底成 oracle，否则 MySQL/SQLServer
+      // 的数据源会被静默当成 Oracle 类型列出并对接（连不上、还错显服务名/SYSDBA）。
+      const filterType = dbType ? normalizeDbType(dbType) : null;
       let hasMatch = false;
       data.datasources.forEach(ds => {
-        if (!filterType || (ds.db_type && ds.db_type.toLowerCase() === filterType)) {
+        if (!filterType || (ds.db_type && normalizeDbType(ds.db_type) === filterType)) {
           hasMatch = true;
           const opt = document.createElement('option');
           opt.value = ds.id;
@@ -13271,8 +13686,16 @@ async function onDatasourceChange() {
         document.getElementById('f-ssh-key').value = ds.ssh_key_file || '';
         document.getElementById('f-ssh-key-password').value = ds.ssh_key_password || '';
         _inspSshPassword = ds.ssh_password || '';  // 缓存供 testSsh 兜底
-        // 自动启用 SSH
-        if (!sshEnabled) toggleSsh();
+        // 数据源自带 SSH 配置：切到 SSH 采集
+        setSysCollectMode('ssh');
+      } else {
+        // 数据源没有 SSH：回到不采集，并把上一台主机留下的 Zabbix 目标清掉，
+        // 否则换数据源后会拿着旧主机 IP 去 Zabbix 取数
+        setSysCollectMode('none');
+        const fzb = document.getElementById('f-zb-host');
+        const fzh = document.getElementById('f-zb-hostname');
+        if (fzb) fzb.value = '';
+        if (fzh) fzh.value = '';
       }
     } else {
       document.getElementById('f-name').value = '';
@@ -13287,14 +13710,15 @@ async function onDatasourceChange() {
 function resetFormFromDatasource() {
   // 清除自动填充的内容，让用户手动输入
   ['f-name','f-host','f-port','f-user','f-password','f-database','f-service-name','f-tenant',
-   'f-ssh-host','f-ssh-port','f-ssh-user','f-ssh-password','f-ssh-key'].forEach(id => {
+   'f-ssh-host','f-ssh-port','f-ssh-user','f-ssh-password','f-ssh-key',
+   'f-zb-host','f-zb-hostname'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.value = '';
   });
   document.getElementById('f-password').placeholder = '数据库密码';
   document.getElementById('f-encrypt').checked = false;
   document.getElementById('f-trust-server-cert').checked = true;
-  if (sshEnabled) toggleSsh();
+  setSysCollectMode('none');
 }
 
 // ─── DB Type ───
@@ -13727,17 +14151,110 @@ async function executeFixSql(taskId, sql) {
 //  i18n 初始化
 // ══════════════════════════════════════════════════════════════
 
-// ─── SSH Toggle ───
+// ─── 系统资源采集方式（不采集 / SSH / Zabbix）───
+// sysCollectMode 是唯一状态源；sshEnabled 由它同步，兼容既有调用点。
+function setSysCollectMode(mode) {
+  sysCollectMode = (mode === 'ssh' || mode === 'zabbix') ? mode : 'none';
+  sshEnabled = (sysCollectMode === 'ssh');
+  // 单选按钮与卡片高亮一起同步：数据源回填这类场景是程序化调用，没有真实点击
+  document.querySelectorAll('input[name="syscollect-mode"]').forEach(function (r) {
+    r.checked = (r.value === sysCollectMode);
+  });
+  ['none', 'ssh', 'zabbix'].forEach(function (m) {
+    var el = document.getElementById('sopt-' + m);
+    if (el) el.classList.toggle('active', m === sysCollectMode);
+  });
+  var sshPanel = document.getElementById('ssh-panel');
+  if (sshPanel) sshPanel.style.display = sysCollectMode === 'ssh' ? '' : 'none';
+  var sshFields = document.getElementById('ssh-fields');
+  if (sshFields) sshFields.className = 'ssh-fields form-grid' + (sysCollectMode === 'ssh' ? ' visible' : '');
+  var zbPanel = document.getElementById('zabbix-panel');
+  if (zbPanel) zbPanel.style.display = sysCollectMode === 'zabbix' ? '' : 'none';
+  var btnSsh = document.getElementById('btn-test-ssh');
+  if (btnSsh) btnSsh.style.display = sysCollectMode === 'ssh' ? '' : 'none';
+  var btnZb = document.getElementById('btn-test-zabbix');
+  if (btnZb) btnZb.style.display = sysCollectMode === 'zabbix' ? '' : 'none';
+  var dbHost = ((document.getElementById('f-host') || {}).value || '').trim();
+  if (sysCollectMode === 'ssh') {
+    var sshHost = document.getElementById('f-ssh-host');
+    // 默认与数据库主机相同，少填一格；已手工填过就不覆盖
+    if (sshHost && !sshHost.value) sshHost.value = dbHost;
+  }
+  if (sysCollectMode === 'zabbix') {
+    var zbHost = document.getElementById('f-zb-host');
+    if (zbHost && !zbHost.value) zbHost.value = dbHost;
+    loadZabbixConfigStatus();
+  }
+}
+
+// 兼容旧调用：数据源带 SSH 配置时会自动开启 SSH 采集
 function toggleSsh() {
-  sshEnabled = !sshEnabled;
-  document.getElementById('ssh-toggle').className = 'toggle' + (sshEnabled ? ' on' : '');
-  document.getElementById('ssh-toggle-sub').textContent = sshEnabled ? i18n('webui.ssh_enable_state_on') : i18n('webui.ssh_enable_state_off');
-  var el = document.getElementById('ssh-fields');
-  el.className = 'ssh-fields form-grid' + (sshEnabled ? ' visible' : '');
-  el.style.display = sshEnabled ? '' : 'none';
-  document.getElementById('btn-test-ssh').style.display = sshEnabled ? '' : 'none';
-  if (sshEnabled && !document.getElementById('f-ssh-host').value) {
-    document.getElementById('f-ssh-host').value = document.getElementById('f-host').value;
+  setSysCollectMode(sshEnabled ? 'none' : 'ssh');
+}
+
+// Zabbix 面板只指定目标主机；地址与凭据是全局配置，先把「配好了没有」显示出来
+async function loadZabbixConfigStatus() {
+  var el = document.getElementById('zb-config-status');
+  if (!el) return;
+  try {
+    var res = await fetch('/api/zabbix/config', { credentials: 'same-origin' });
+    var data = await res.json();
+    var z = (data && data.data && data.data.zabbix) || {};
+    if (z.url) {
+      var tpl = i18n('webui.sysinfo_zabbix_configured') || '已配置 Zabbix：{}（如需修改请到「Zabbix 监控设置」页面）';
+      el.innerHTML = '<div class="status-banner info" style="margin:0">📡 ' +
+        escHtml(tpl.replace('{}', z.url)) + '</div>';
+    } else {
+      el.innerHTML = '<div class="status-banner err" style="margin:0">⚠️ ' +
+        escHtml(i18n('webui.sysinfo_zabbix_unconfigured') ||
+          '未配置 Zabbix 连接，请先到「Zabbix 监控设置」页面配置地址与凭据。') + '</div>';
+    }
+  } catch (e) {
+    var tpl2 = i18n('webui.sysinfo_zabbix_read_fail') || '无法读取 Zabbix 配置：{}';
+    el.innerHTML = '<div class="status-banner info" style="margin:0">' +
+      escHtml(tpl2.replace('{}', e.message)) + '</div>';
+  }
+}
+
+// 「测试 Zabbix 主机」走与巡检相同的采集路径，取到即代表巡检时也能取到
+async function testZabbixHost() {
+  var el = document.getElementById('ssh-test-status');
+  if (!el) return;
+  var ip = ((document.getElementById('f-zb-host') || {}).value || '').trim();
+  var hostname = ((document.getElementById('f-zb-hostname') || {}).value || '').trim();
+  if (!ip && !hostname) {
+    el.innerHTML = '<div class="status-banner err">' + escHtml(
+      i18n('webui.sysinfo_zabbix_need_host') || '请输入 Zabbix 主机 IP 或主机名') + '</div>';
+    return;
+  }
+  el.innerHTML = '<div class="status-banner info"><span class="spinner"></span> ' + escHtml(
+    i18n('webui.sysinfo_zabbix_testing') || '正在测试 Zabbix 主机...') + '</div>';
+  try {
+    var qs = new URLSearchParams();
+    if (ip) qs.set('host_ip', ip);
+    if (hostname) qs.set('hostname', hostname);
+    var res = await fetch('/api/zabbix/sysinfo-test?' + qs.toString(), { credentials: 'same-origin' });
+    var data = await res.json();
+    if (data.ok && data.data) {
+      var d = data.data;
+      var osLabel = d.os === 'windows' ? 'Windows' : (d.os === 'linux' ? 'Linux' : '');
+      el.innerHTML = '<div class="status-banner ok">✅ ' +
+        escHtml(i18n('webui.sysinfo_zabbix_ok') || 'Zabbix 主机可采集') +
+        (d.name ? '（' + escHtml(d.name) + (osLabel ? '，' + osLabel : '') + '）' : '') +
+        '　CPU ' + (d.cpu != null ? escHtml(d.cpu) + '%' : '--') +
+        '　' + escHtml(i18n('webui.zabbix_col_mem') || '内存') + ' ' +
+        (d.memory != null ? escHtml(d.memory) + '%' : '--') +
+        '　' + escHtml(i18n('webui.zabbix_col_disk') || '磁盘') + ' ' +
+        escHtml(d.disk_count || 0) + ' ' +
+        (d.disk_max != null ? '· ' + escHtml(i18n('webui.zabbix_disk_max') || '最高') + ' ' + escHtml(d.disk_max) + '%' : '') +
+        '</div>';
+    } else {
+      el.innerHTML = '<div class="status-banner err">❌ ' + escHtml(
+        (i18n('webui.sysinfo_zabbix_fail') || 'Zabbix 测试失败') + '：' + (data.error || '')) + '</div>';
+    }
+  } catch (e) {
+    el.innerHTML = '<div class="status-banner err">❌ ' + escHtml(
+      (i18n('webui.sysinfo_zabbix_fail') || 'Zabbix 测试失败') + '：' + e.message) + '</div>';
   }
 }
 
@@ -14014,7 +14531,19 @@ function fillConfirmPanel() {
   const name = document.getElementById('f-name').value.trim() || (nameDefaults[dbType]||'_Server');
   const host = document.getElementById('f-host').value.trim() || 'localhost';
   const port = document.getElementById('f-port').value || (portDefaults[dbType]||'1521');
-  const sshLabel = sshEnabled ? `${document.getElementById('f-ssh-host').value || host}:${document.getElementById('f-ssh-port').value||22}` : i18n('webui.ssh_not_configured');
+  // 系统资源采集：按方式回显，让第 5 步能看出这次报告会不会带主机指标
+  let sshLabel;
+  if (sysCollectMode === 'ssh') {
+    sshLabel = '🔐 SSH ' +
+      ((document.getElementById('f-ssh-host') || {}).value || host) + ':' +
+      ((document.getElementById('f-ssh-port') || {}).value || 22);
+  } else if (sysCollectMode === 'zabbix') {
+    const zbTarget = ((document.getElementById('f-zb-host') || {}).value ||
+                      (document.getElementById('f-zb-hostname') || {}).value || host);
+    sshLabel = '📡 Zabbix ' + zbTarget;
+  } else {
+    sshLabel = i18n('webui.ssh_not_configured') || '未配置（仅数据库指标）';
+  }
 
   const tagClass = dbType === 'mysql' ? 'tag-mysql' : dbType === 'oracle' || dbType === 'oracle_jdbc' ? 'tag-oracle' : dbType === 'dm' ? 'tag-dm' : dbType === 'sqlserver' ? 'tag-sqlserver' : dbType === 'tidb' ? 'tag-tidb' : dbType === 'yashandb' ? 'tag-yashandb' : dbType === 'mongodb' ? 'tag-mongodb' : 'tag-pg';
   document.getElementById('cf-dbtype').innerHTML = `<span class="tag ${tagClass}">${typeLabel}</span>`;
@@ -14062,6 +14591,24 @@ function fillConfirmPanel() {
 // ─── Start Inspection ───
 async function startInspection() {
   const btn = document.getElementById('btn-run');
+
+  // 校验连接信息：必须选择已保存的数据源，或填写完整连接信息。
+  // 序号可自由跳转，所以这道校验从 gotoStep() 移到这里兜底，防止跳过第 2 步直接执行。
+  const dsSel = document.getElementById('f-datasource');
+  const hasDs = dsSel && dsSel.value;
+  if (!hasDs) {
+    const cName = document.getElementById('f-name').value.trim();
+    const cHost = document.getElementById('f-host').value.trim();
+    const cPort = document.getElementById('f-port').value.trim();
+    const cUser = document.getElementById('f-user').value.trim();
+    // Redis 传统模式无用户名，仅 ACL 场景需要，允许留空
+    const _userReq = dbType !== 'redis' && dbType !== 'redis-cluster';
+    if (!cName || !cHost || !cPort || (_userReq && !cUser)) {
+      toast(i18n('webui.wizard_conn_required') || '请选择已保存的数据源，或填写完整的数据库连接信息（实例标签、主机地址、端口、用户名）', 'warning');
+      return;
+    }
+  }
+
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> ' + i18n('webui.btn_starting');
 
@@ -14109,6 +14656,12 @@ async function startInspection() {
     payload.ssh_key_file = document.getElementById('f-ssh-key').value.trim();
     payload.ssh_key_password = document.getElementById('f-ssh-key-password').value.trim();
     payload.ssh_ebpf = ebpfEnabled;
+  }
+  // 系统资源采集方式：显式传给后端，作为 Zabbix / SSH 的取舍依据
+  payload.syscollect_mode = sysCollectMode;
+  if (sysCollectMode === 'zabbix') {
+    payload.zabbix_host = document.getElementById('f-zb-host').value.trim() || host;
+    payload.zabbix_hostname = document.getElementById('f-zb-hostname').value.trim();
   }
   // 附加巡检模板 ID
   const templateId = document.getElementById('f-template')?.value;
@@ -26110,8 +26663,12 @@ function mkdirRemote() {
   <script>window._IS_ADMIN = ({{ 'true' if user_role == 'admin' else 'false' }});</script>
   <script src="/static/js/inspection_config.js"></script>
   <script src="/static/js/fusion/notifier.js?v={{ version }}-fusion3"></script>
-  <script src="/static/js/fusion/datasources.js?v={{ version }}-fusion16"></script>
-  <script src="/static/js/fusion/inspection_config.js?v={{ version }}-fusion11"></script>
+  <script src="/static/js/fusion/zabbix.js?v={{ version }}-fusion1"></script>
+  <script src="/static/js/fusion/datasources.js?v={{ version }}-fusion17"></script>
+  <script src="/static/js/fusion/inspection.js?v={{ version }}-fusion5"></script>
+  <script src="/static/js/fusion/scheduler.js?v={{ version }}-fusion3"></script>
+  <script src="/static/js/fusion/trend.js?v={{ version }}-fusion5"></script>
+  <script src="/static/js/fusion/inspection_config.js?v={{ version }}-fusion14"></script>
   <script src="/static/js/fusion/sql_editor.js?v={{ version }}-fusion24"></script>
   <script src="/static/js/fusion/ds_picker.js?v={{ version }}-fusion5"></script>
   {% if aias_source_ui %}
@@ -26916,6 +27473,78 @@ const STATIC_DB_PH_MAP = {'pg':'postgres','ivorysql':'ivorysql','kingbase':'king
     });
   }
 
+  // ── 数据库类型卡片 hover 说明浮层 ─────────────────────────
+  // 浮层挂在 <body> 上用 position:fixed：向导的 .wi-config-modal-body 是
+  // overflow:auto，一行 8 列时边缘卡片居中弹出的说明会被内容框裁掉。
+  let _dbTypeTipEl = null;
+  let _dbTypeTipCard = null;
+  let _dbTypeTipBound = false;
+
+  function dbTypeTipEl() {
+    if (!_dbTypeTipEl) {
+      _dbTypeTipEl = document.createElement('div');
+      _dbTypeTipEl.className = 'db-type-tip';
+      document.body.appendChild(_dbTypeTipEl);
+    }
+    return _dbTypeTipEl;
+  }
+
+  function hideDbTypeTip() {
+    _dbTypeTipCard = null;
+    if (_dbTypeTipEl) _dbTypeTipEl.classList.remove('show');
+  }
+
+  function showDbTypeTip(card) {
+    const text = (card && card.dataset.tip) || '';
+    if (!text) { hideDbTypeTip(); return; }
+    if (_dbTypeTipCard === card) return;          // 同一张卡重复 mouseover，不重算
+    const tip = dbTypeTipEl();
+    tip.textContent = text;
+    tip.classList.remove('show', 'below');
+    tip.style.left = '0px';
+    tip.style.top = '0px';
+    const r = card.getBoundingClientRect();
+    const tr = tip.getBoundingClientRect();
+    const gap = 8, edge = 8;
+    const vw = document.documentElement.clientWidth;
+    const vh = document.documentElement.clientHeight;
+    const below = r.top - tr.height - gap < edge;  // 上方放不下就翻到下方
+    let top = below ? r.bottom + gap : r.top - tr.height - gap;
+    if (below && top + tr.height + gap > vh) top = Math.max(edge, vh - tr.height - gap);
+    let left = r.left + r.width / 2 - tr.width / 2;
+    left = Math.min(Math.max(edge, left), Math.max(edge, vw - tr.width - edge));
+    tip.style.left = Math.round(left) + 'px';
+    tip.style.top = Math.round(top) + 'px';
+    // 箭头始终指回卡片中线（浮层被夹到视口边缘时也能对上）
+    const arrowX = Math.min(Math.max(12, r.left + r.width / 2 - left), Math.max(12, tr.width - 12));
+    tip.style.setProperty('--tip-arrow-x', Math.round(arrowX) + 'px');
+    tip.classList.toggle('below', below);
+    tip.classList.add('show');
+    _dbTypeTipCard = card;
+  }
+
+  function bindDbTypeTip(container) {
+    if (_dbTypeTipBound || !container) return;
+    _dbTypeTipBound = true;
+    const cardOf = function (node) {
+      return node && node.closest ? node.closest('.type-card') : null;
+    };
+    container.addEventListener('mouseover', function (ev) {
+      const card = cardOf(ev.target);
+      if (card && container.contains(card)) showDbTypeTip(card);
+    });
+    container.addEventListener('mouseout', function (ev) {
+      const card = cardOf(ev.target);
+      if (!card) return;
+      const to = ev.relatedTarget;
+      if (!(to && card.contains(to))) hideDbTypeTip();
+    });
+    container.addEventListener('click', hideDbTypeTip);
+    // 滚动/缩放后坐标失效，直接收起，下次 hover 再定位
+    window.addEventListener('scroll', hideDbTypeTip, true);
+    window.addEventListener('resize', hideDbTypeTip);
+  }
+
   // 动态生成数据库类型卡片
   function generateDbTypeCards() {
     const container = document.getElementById('type-card-container');
@@ -26943,12 +27572,15 @@ const STATIC_DB_PH_MAP = {'pg':'postgres','ivorysql':'ivorysql','kingbase':'king
           <div class="tc-logo">${iconHtml}</div>
           <div class="tc-check" id="chk-${dbType.value}"></div>
         </div>
-        <div class="tc-name">${dbType.label}${pluginBadge}${compatBadge}</div>
-        <div class="tc-desc">${dbType.description || ''}</div>
+        <div class="tc-name">${dbType.label}${pluginBadge}${compatBadge}<span class="tc-info-icon">ⓘ</span></div>
       `;
+      // 说明文字改由 hover 浮层呈现：走 dataset 赋值，不把后端文本拼进 HTML
+      card.dataset.tip = dbType.description || '';
+      if (!card.dataset.tip) card.querySelector('.tc-info-icon').remove();
       container.appendChild(card);
     });
     renderDbTypeFilterChips();
+    bindDbTypeTip(container);
   }
 
   // 填充所有数据库类型下拉框
@@ -26968,7 +27600,11 @@ const STATIC_DB_PH_MAP = {'pg':'postgres','ivorysql':'ivorysql','kingbase':'king
     fillGroupedSelect(document.getElementById('baseline-db-type'), dbTypes, { placeholder: '请选择' });
 
     // 5. 定时巡检任务页面的数据库类型选择（无占位，保持"必选"语义）
-    fillGroupedSelect(document.getElementById('job-db-type'), dbTypes, { placeholder: '' });
+    // 元素 id 是 sched-db-type。此前这里填的是 markup 里并不存在的 job-db-type
+    // （旧 id 残留），每次启动都静默空跑，于是 #sched-db-type 只剩 9 个硬编码
+    // 内置类型，oracle_jdbc / sqlserver_jdbc 等驱动变体根本无法被选中，
+    // 提交与测试连接拿到的 db_type 都是空 —— 编辑已有任务时表现最明显。
+    fillGroupedSelect(document.getElementById('sched-db-type'), dbTypes, { placeholder: '' });
 
     // 6. 动态生成reports页面的数据库类型过滤按钮
     generateReportFilterButtons();

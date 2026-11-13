@@ -224,6 +224,9 @@ class DatabaseInstance:
     dir_id: str = ""  # 目录 ID（树形归属；与 group 独立，group 继续供监控大屏使用）
     enabled: bool = True
     description: str = ""
+    # 软删除标记：删除后进入「已删除」页签，可恢复；彻底删除才会清理历史数据
+    deleted: bool = False
+    deleted_at: str = ""
     created_at: str = ""
     updated_at: str = ""
     # MongoDB 专用连接配置
@@ -369,7 +372,7 @@ class InstanceManager:
                         except Exception:
                             d['tags'] = []
                     # sysdba / ssh_enabled / enabled / encrypt / trust_server_certificate / use_sid 从 INTEGER 还原为 bool
-                    for bool_field in ('sysdba', 'ssh_enabled', 'enabled', 'encrypt', 'trust_server_certificate', 'use_sid'):
+                    for bool_field in ('sysdba', 'ssh_enabled', 'enabled', 'encrypt', 'trust_server_certificate', 'use_sid', 'deleted'):
                         d[bool_field] = bool(d.get(bool_field, False))
                     # 存量行 connection_mode 可能为 NULL/''，按类型归一化：
                     # sqlserver_jdbc 语义即 JDBC，缺省必须归 'jdbc'，否则会被固化成
@@ -806,6 +809,15 @@ class InstanceManager:
                 c.execute('ALTER TABLE instances ADD COLUMN "dir_id" TEXT DEFAULT \'\'')
             except Exception:
                 pass
+            # 迁移：软删除标记（删除进入回收站，可恢复）
+            try:
+                c.execute('ALTER TABLE instances ADD COLUMN "deleted" INTEGER DEFAULT 0')
+            except Exception:
+                pass
+            try:
+                c.execute('ALTER TABLE instances ADD COLUMN "deleted_at" TEXT DEFAULT \'\'')
+            except Exception:
+                pass
             # 确保表存在
             c.execute("""
                 CREATE TABLE IF NOT EXISTS instances (
@@ -822,6 +834,7 @@ class InstanceManager:
                     tags TEXT DEFAULT '[]', "group" TEXT DEFAULT 'default',
                     dir_id TEXT DEFAULT '',
                     enabled INTEGER DEFAULT 1, description TEXT DEFAULT '',
+                    deleted INTEGER DEFAULT 0, deleted_at TEXT DEFAULT '',
                     created_at TEXT DEFAULT '', updated_at TEXT DEFAULT '',
                     connection_mode TEXT DEFAULT 'odbc',
                     encrypt INTEGER DEFAULT 0,
@@ -838,9 +851,10 @@ class InstanceManager:
                     (id, name, db_type, host, port, "user", password, "database", service_name, gbase_server_name, tenant, sysdba,
                      connect_mode, auth_source, auth_mechanism, replica_set, tls, tls_ca_file, tls_cert_key_file, tls_allow_invalid_certs,
                      ssh_host, ssh_port, ssh_user, ssh_password, ssh_key_file, ssh_key_password, ssh_enabled,
-                     tags, "group", dir_id, enabled, description, created_at, updated_at, connection_mode,
+                     tags, "group", dir_id, enabled, description, deleted, deleted_at,
+                     created_at, updated_at, connection_mode,
                      encrypt, trust_server_certificate, use_sid, driver_version, jdbc_url)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     d.get("id", ""), d.get("name", ""), d.get("db_type", ""),
                     d.get("host", ""), d.get("port", 0), d.get("user", ""),
@@ -861,7 +875,10 @@ class InstanceManager:
                     json.dumps(d.get("tags", []), ensure_ascii=False),
                     d.get("group", "default"), d.get("dir_id", "") or 'dir_unassigned',
                     1 if d.get("enabled", True) else 0,
-                    d.get("description", ""), d.get("created_at", ""), d.get("updated_at", ""),
+                    d.get("description", ""),
+                    1 if d.get("deleted") else 0,
+                    d.get("deleted_at", "") or "",
+                    d.get("created_at", ""), d.get("updated_at", ""),
                     # 空值归一化，避免存量空字符串导致路由拿到无效模式。
                     # sqlserver_jdbc 类型语义即 JDBC，缺省必须归一为 'jdbc'，
                     # 否则会被固化成 'odbc'，测试连接时错误走到 pyodbc 报错。
@@ -1506,8 +1523,73 @@ class InstanceManager:
 
         return {"ok": True, "message": "实例及历史数据删除成功"}
 
-    def get_all_instances(self, mask_password: bool = True) -> List[Dict]:
-        """获取所有实例，密码脱敏"""
+    def set_deleted(self, instance_ids: List[str], deleted: bool) -> Dict[str, Any]:
+        """批量软删除 / 恢复（只改标记，不清理历史数据）。
+
+        软删除的数据源仍保留在 instances.db 中，默认查询会过滤掉；
+        「已删除」页签通过 include_deleted 查询并可恢复。
+        """
+        ids = [str(i) for i in (instance_ids or []) if i]
+        if not ids:
+            return {"ok": False, "message": "请选择数据源", "count": 0}
+        now = datetime.now().isoformat()
+        changed = 0
+        for iid in ids:
+            inst = self._instances.get(iid)
+            if not inst:
+                continue
+            if isinstance(inst, dict):
+                inst['deleted'] = bool(deleted)
+                inst['deleted_at'] = now if deleted else ''
+                inst['updated_at'] = now
+            else:
+                inst.deleted = bool(deleted)
+                inst.deleted_at = now if deleted else ''
+                inst.updated_at = now
+            changed += 1
+        if changed:
+            self._save_data()
+        return {"ok": True, "message": "操作成功", "count": changed}
+
+    def soft_delete_instances(self, instance_ids: List[str]) -> Dict[str, Any]:
+        """批量软删除（移入回收站）"""
+        result = self.set_deleted(instance_ids, True)
+        if result.get('ok'):
+            result['deleted'] = result.get('count', 0)
+        return result
+
+    def restore_instances(self, instance_ids: List[str]) -> Dict[str, Any]:
+        """批量恢复软删除的数据源"""
+        result = self.set_deleted(instance_ids, False)
+        if result.get('ok'):
+            result['restored'] = result.get('count', 0)
+        return result
+
+    def hard_delete_instances(self, instance_ids: List[str]) -> Dict[str, Any]:
+        """批量彻底删除（清理巡检历史与趋势数据，不可恢复）"""
+        deleted = 0
+        errors = []
+        for iid in [str(i) for i in (instance_ids or []) if i]:
+            try:
+                res = self.delete_instance(iid)
+                if res.get('ok'):
+                    deleted += 1
+                else:
+                    errors.append(res.get('message') or res.get('error') or iid)
+            except Exception as e:
+                errors.append(str(e))
+        out = {"ok": True, "deleted": deleted, "errors": errors}
+        if errors:
+            out['message'] = '；'.join(errors[:3]) + ('…' if len(errors) > 3 else '')
+        return out
+
+    def get_all_instances(self, mask_password: bool = True,
+                          include_deleted: bool = False) -> List[Dict]:
+        """获取所有实例，密码脱敏。
+
+        include_deleted=False 时过滤软删除实例（默认行为），
+        巡检/调度/监控等后台链路不会误用已删除的数据源。
+        """
         self._ensure_instances_fresh()
         result = []
         for inst in self._instances.values():
@@ -1516,6 +1598,8 @@ class InstanceManager:
                 d = inst.copy()
             else:
                 d = inst.to_dict()
+            if not include_deleted and d.get('deleted'):
+                continue
             if mask_password and d.get('password'):
                 d['password'] = '********'
             result.append(self._enrich_instance(d))

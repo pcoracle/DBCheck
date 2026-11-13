@@ -910,9 +910,11 @@
     $('ds-picker-search').focus();
   }
 
-  // 目录树展开/收起：点击 caret 不触发筛选
+  // 目录树展开/收起：点击 caret 不触发筛选。
+  // 必须限定为本模块的 caret 元素：别处的树可能把 data-caret 用作其它语义，
+  // 在捕获阶段无条件 stopPropagation 会吃掉那些树的节点点击。
   document.addEventListener('click', function (ev) {
-    var caret = ev.target.closest ? ev.target.closest('[data-caret]') : null;
+    var caret = ev.target.closest ? ev.target.closest('.ds-tree-caret[data-caret]') : null;
     if (!caret) return;
     ev.stopPropagation();
     toggleNode(caret.getAttribute('data-caret'));

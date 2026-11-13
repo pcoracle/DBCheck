@@ -435,6 +435,8 @@ ES.update({
     "menu.monitor-conn": "Monitor de pool de conexiones",
     "menu.monitor-slow": "Monitor de consultas lentas",
     "menu.notifier": "Gestión de notificaciones",
+    "menu.ai-assistant": "AI Assistant",
+    "menu.zabbix": "Configuración de Zabbix",
     "menu.oracle-client": "Cliente Oracle",
     "menu.plugin-market": "Mercado de complementos",
     "menu.rag": "Base de conocimientos",

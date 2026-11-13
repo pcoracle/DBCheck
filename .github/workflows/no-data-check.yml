@@ -1,0 +1,30 @@
+name: No Data In Repo
+
+# 数据入库硬闸：数据库文件、运行态数据与凭据配置一律不得进入版本库。
+# .gitignore 可被 git add -f 绕过，故用脚本按类别判定「已跟踪文件 + 暂存区」。
+# 详见 scripts/check_no_data_files.py 与 AGENTS.md 的数据提交约束。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  no-data-check:
+    name: Block database/runtime data in the repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+        with:
+          # 需要完整索引才能同时判定已跟踪文件与本次改动
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Verify no database or runtime data is committed
+        run: python scripts/check_no_data_files.py

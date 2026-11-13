@@ -42,6 +42,10 @@
     chapterId: 0,
     search: '',
     dbTypes: [],
+    // 基线参数搜索：关键词 + 命中的基线 + 每个模板的章节/查询命中映射
+    baselineParam: '',
+    baselineHits: [],
+    baselineMatches: {},   // templateId -> {params, chapters:{cid:[qid]}, query_count}
     stacked: false,
     railCollapsed: false,
     cloneRouteOk: true,
@@ -346,10 +350,17 @@
     if (countEl) countEl.textContent = state.templates.length;
     if (!box) return;
     if (!state.templates.length) {
-      box.innerHTML = '<div class="icx-tpl-sub">' + esc(t('webui.icx_tpl_empty', '没有匹配的模板')) + '</div>';
+      var emptyKey = state.baselineParam ? 'webui.icx_bl_no_tpl' : 'webui.icx_tpl_empty';
+      var emptyFb = state.baselineParam ? '没有匹配该基线参数的模板配置项' : '没有匹配的模板';
+      box.innerHTML = '<div class="icx-tpl-sub">' + esc(t(emptyKey, emptyFb)) + '</div>';
       return;
     }
     box.innerHTML = state.templates.map(function (x) {
+      var bm = baselineMatchFor(x.id);
+      var hitLine = bm
+        ? '<div class="icx-tpl-sub icx-bl-hit">🎯 ' + esc(t('webui.icx_bl_hit_items', '命中')) + ' ' +
+          bm.query_count + ' ' + esc(t('webui.icx_bl_items', '项配置')) + '</div>'
+        : '';
       return '<div class="icx-tpl-item' + (Number(x.id) === state.templateId ? ' active' : '') + '"' +
         ' role="option" data-id="' + attr(x.id) + '"' +
         ' title="' + attr((x.template_name || '') + ' · ' + (x.description || '')) + '"' +
@@ -358,7 +369,7 @@
         '<span class="icx-tpl-name-text">' + esc(x.template_name) + '</span>' + tplBadges(x) + '</div>' +
         '<div class="icx-tpl-sub">' + esc(x.db_type) + ' · ' + esc(x.version || 'v1') + ' · ' +
         esc(t('webui.icx_tpl_counts', '章节/SQL')) + ' ' + (x.chapter_count || 0) + '/' + (x.query_count || 0) +
-        '</div></div>';
+        '</div>' + hitLine + '</div>';
     }).join('');
   }
 
@@ -371,16 +382,103 @@
 
   function onTplDbType(v) { state.dbTypes = v ? [v] : []; renderTypeLabel(); loadTemplates(); }
 
+  // ── 基线参数搜索：按基线配置管理里的参数名筛选模板/章节/SQL ──
+  function baselineMatchFor(tid) {
+    if (!state.baselineParam) return null;
+    return state.baselineMatches[Number(tid || state.templateId)] || null;
+  }
+
+  function ensureBaselineParamOptions() {
+    if (state._blOptsLoaded) return;
+    state._blOptsLoaded = true;   // 失败也只试一次，避免每次 focus 都打接口
+    get('/api/inspection/baselines/param-names').then(function (d) {
+      if (!d || d.success === false) { state._blOptsLoaded = false; return; }
+      var dl = $('icx-bl-param-options');
+      if (!dl) return;
+      dl.innerHTML = (d.data || []).map(function (x) {
+        var label = (x.description_zh || '') + (x.db_types && x.db_types.length ? '（' + x.db_types.join(' / ') + '）' : '');
+        return '<option value="' + attr(x.param_name) + '">' + esc(label) + '</option>';
+      }).join('');
+    }).catch(function () { state._blOptsLoaded = false; });
+  }
+
+  function onBaselineParamSearch(v) {
+    state.baselineParam = String(v || '').trim();
+    if (state._blTimer) clearTimeout(state._blTimer);
+    state._blTimer = setTimeout(function () { loadTemplates(true); }, 250);
+  }
+
+  function pickBaselineParam(name) {
+    var input = $('icx-bl-search');
+    if (input) input.value = name;
+    state.baselineParam = String(name || '').trim();
+    loadTemplates(true);
+  }
+
+  function clearBaselineParam() {
+    var input = $('icx-bl-search');
+    if (input) input.value = '';
+    state.baselineParam = '';
+    loadTemplates(true);
+  }
+
+  // 命中参数 chips：同名参数跨多种数据库类型时合并展示，点 chip 精确筛选该参数
+  function renderBaselineStatus() {
+    var box = $('icx-bl-status');
+    var input = $('icx-bl-search');
+    if (input) input.classList.toggle('icx-bl-active', !!state.baselineParam);
+    if (!box) return;
+    if (!state.baselineParam) { box.style.display = 'none'; box.innerHTML = ''; return; }
+    var groups = {}, order = [];
+    (state.baselineHits || []).forEach(function (b) {
+      var g = groups[b.param_name];
+      if (!g) { g = groups[b.param_name] = { name: b.param_name, types: [] }; order.push(b.param_name); }
+      if (g.types.indexOf(b.db_type) < 0) g.types.push(b.db_type);
+    });
+    var html = '<div class="icx-bl-status-head"><span>' +
+      esc(order.length
+        ? t('webui.icx_bl_status_hit', '命中基线参数') + ' ' + order.length
+        : t('webui.icx_bl_status_none', '基线配置中没有匹配的参数名')) +
+      '</span><button type="button" class="icx-bl-clear" data-blclear="1" title="' +
+      attr(t('webui.icx_bl_clear', '清除基线参数筛选')) + '">✕</button></div>';
+    if (order.length) {
+      html += '<div class="icx-bl-chips">' + order.map(function (n) {
+        var g = groups[n];
+        return '<button type="button" class="icx-bl-chip" data-blparam="' + attr(n) + '" title="' +
+          attr(g.types.join(' / ')) + '">' + esc(n) +
+          '<span class="icx-bl-chip-n">' + g.types.length + '</span></button>';
+      }).join('') + '</div>';
+    }
+    box.innerHTML = html;
+    box.style.display = '';
+    if (!box._blBound) {
+      box._blBound = true;
+      box.addEventListener('click', function (e) {
+        var el = e.target.closest ? e.target.closest('[data-blparam],[data-blclear]') : null;
+        if (!el) return;
+        if (el.hasAttribute('data-blclear')) clearBaselineParam();
+        else pickBaselineParam(el.getAttribute('data-blparam'));
+      });
+    }
+  }
+
   function loadTemplates(keepCurrent) {
     var qs = [];
     (state.dbTypes || []).forEach(function (v) {
       qs.push('db_type=' + encodeURIComponent(v));
     });
     if (state.search) qs.push('keyword=' + encodeURIComponent(state.search));
+    if (state.baselineParam) qs.push('baseline_param=' + encodeURIComponent(state.baselineParam));
     return get('/api/inspection/templates' + (qs.length ? '?' + qs.join('&') : '')).then(function (d) {
       if (!d || d.success === false) throw new Error((d && d.message) || t('webui.icx_load_fail', '加载失败'));
       state.templates = d.data || [];
+      state.baselineHits = d.baseline_params || [];
+      state.baselineMatches = {};
+      state.templates.forEach(function (x) {
+        if (x.baseline_match) state.baselineMatches[Number(x.id)] = x.baseline_match;
+      });
       renderTypeLabel();
+      renderBaselineStatus();
       if (!keepCurrent || !state.templates.some(function (x) { return Number(x.id) === state.templateId; })) {
         state.templateId = state.templates.length ? Number(state.templates[0].id) : 0;
       }
@@ -606,16 +704,33 @@
     return c.chapter_title_zh || c.chapter_title_en || ('#' + c.chapter_number);
   }
 
+  // 基线参数筛选生效时，中栏只保留含命中查询的章节
+  function visibleChapters() {
+    var bm = baselineMatchFor(state.templateId);
+    if (!bm) return state.chapters;
+    return state.chapters.filter(function (c) {
+      var qids = bm.chapters[c.id] || bm.chapters[String(c.id)];
+      return qids && qids.length;
+    });
+  }
+
   function renderChapters() {
     var box = $('icx-chapter-list');
     if (!box) return;
-    if (!state.chapters.length) {
-      box.innerHTML = '<div class="icx-empty-line">' + esc(t('webui.icx_ch_empty', '暂无章节，请点击 ＋ 添加')) + '</div>';
+    var bm = baselineMatchFor(state.templateId);
+    var chapters = visibleChapters();
+    if (!chapters.length) {
+      var msg = bm
+        ? t('webui.icx_bl_no_chapter', '该模板下没有匹配此基线参数的章节')
+        : t('webui.icx_ch_empty', '暂无章节，请点击 ＋ 添加');
+      box.innerHTML = '<div class="icx-empty-line">' + esc(msg) + '</div>';
       return;
     }
-    box.innerHTML = '<ul class="icx-ch-ul">' + state.chapters.map(function (c) {
+    box.innerHTML = '<ul class="icx-ch-ul">' + chapters.map(function (c) {
+      var qids = bm ? (bm.chapters[c.id] || bm.chapters[String(c.id)] || []) : null;
+      var count = qids ? qids.length : (c.query_count || 0);
       return '<li class="icx-ch-item' + (Number(c.id) === state.chapterId ? ' active' : '') +
-        (c.enabled ? '' : ' off') + '" data-chapter-id="' + attr(c.id) + '"' +
+        (c.enabled ? '' : ' off') + (qids ? ' icx-bl-hit-ch' : '') + '" data-chapter-id="' + attr(c.id) + '"' +
         ' onclick="FusionInspection.selectChapter(' + Number(c.id) + ')"' +
         ' ondblclick="FusionInspection.openChapterDetail(' + Number(c.id) + ')"' +
         ' title="' + attr(t('webui.icx_ch_click_hint', '单击选中，双击全屏查看章节详情')) + '">' +
@@ -623,7 +738,7 @@
         '<div class="icx-ch-text"><span class="icx-ch-title">' + esc(c.chapter_title_zh || '') + '</span>' +
         (c.chapter_title_en ? '<span class="icx-ch-title-en">' + esc(c.chapter_title_en) + '</span>' : '') +
         '</div></div>' +
-        '<span class="icx-ch-count">' + (c.query_count || 0) + '</span>' +
+        '<span class="icx-ch-count' + (qids ? ' icx-bl-hit' : '') + '">' + count + '</span>' +
         (isAdmin() ? '<span class="icx-ch-x" title="' + attr(t('webui.icx_ch_delete', '删除章节')) + '"' +
           ' onclick="event.stopPropagation();FusionInspection.deleteChapter(' + Number(c.id) + ')">✕</span>' : '') +
         '</li>';
@@ -635,8 +750,9 @@
     var box = $('icx-chapter-list');
     if (!box) return;
     var ul = box.querySelector('.icx-ch-ul');
-    if (!ul || !window.Sortable || !isAdmin()) {
-      // 没有 Sortable 时给出键盘/按钮式排序兜底
+    // 基线参数筛选中列表只是全部章节的一个子集，拖拽排序会写坏整体顺序，禁用；
+    // 没有 Sortable 时给出键盘/按钮式排序兜底
+    if (!ul || !window.Sortable || !isAdmin() || baselineMatchFor(state.templateId)) {
       if (ul && isAdmin() && !window.Sortable) ul.classList.add('icx-no-drag');
       return;
     }
@@ -674,8 +790,10 @@
     return get('/api/inspection/templates/' + state.templateId + '/chapters').then(function (d) {
       if (!d || d.success === false) throw new Error((d && d.message) || t('webui.icx_load_fail', '加载失败'));
       state.chapters = d.data || [];
-      if (!keepChapter || !state.chapters.some(function (c) { return Number(c.id) === state.chapterId; })) {
-        state.chapterId = state.chapters.length ? Number(state.chapters[0].id) : 0;
+      // 自动选中章节时只在「可见章节」里挑：基线参数筛选生效时跳到第一个命中章节
+      var visible = visibleChapters();
+      if (!keepChapter || !visible.some(function (c) { return Number(c.id) === state.chapterId; })) {
+        state.chapterId = visible.length ? Number(visible[0].id) : 0;
       }
       renderChapters();
       var ch = currentChapter();
@@ -817,9 +935,14 @@
   function buildToolbarHtml(cid) {
     var c = containers(cid);
     var all = c.queries || [];
+    var bm = baselineMatchFor(state.templateId);
     var html = '<div class="icx-q-toolbar">' +
       '<span class="icx-q-toolbar-title">' + esc(t('webui.icx_q_list_title', 'SQL 查询列表')) + '</span>' +
       '<span class="icx-count" title="' + attr(t('webui.icx_q_total', '查询总数')) + '">' + all.length + '</span>';
+    if (bm) {
+      html += '<span class="icx-bl-tag" title="' + attr(t('webui.icx_bl_tag_tip', '正在按基线参数筛选，仅显示引用该参数的查询项')) + '">🎯 ' +
+        esc(t('webui.icx_bl_tag', '基线参数筛选')) + '</span>';
+    }
     if (all.length > 3) {
       html += '<input type="search" class="icx-q-filter" placeholder="' +
         attr(t('webui.icx_q_filter_ph', '筛选键名 / SQL / 描述')) + '" value="' + attr(c.filter || '') + '"' +
@@ -839,6 +962,71 @@
     return one.length > m ? one.slice(0, m) + '…' : one;
   }
 
+  // 基线参数筛选命中时，把展示文本里的参数名整词高亮（先收集区间再分段转义，防 XSS）
+  function hlParam(text, params) {
+    var s = String(text == null ? '' : text);
+    if (!s || !params || !params.length) return esc(s);
+    var lower = s.toLowerCase(), ranges = [];
+    params.forEach(function (p) {
+      var pl = String(p || '').toLowerCase();
+      if (!pl) return;
+      var idx = 0;
+      while ((idx = lower.indexOf(pl, idx)) >= 0) {
+        var before = idx > 0 ? lower.charAt(idx - 1) : '';
+        var after = lower.charAt(idx + pl.length);
+        if (!/[a-z0-9_]/.test(before) && !/[a-z0-9_]/.test(after)) ranges.push([idx, idx + pl.length]);
+        idx += pl.length;
+      }
+    });
+    if (!ranges.length) return esc(s);
+    ranges.sort(function (a, b) { return a[0] - b[0]; });
+    var out = '', pos = 0;
+    ranges.forEach(function (r) {
+      if (r[0] < pos) return;
+      out += esc(s.slice(pos, r[0])) + '<mark class="icx-hl">' + esc(s.slice(r[0], r[1])) + '</mark>';
+      pos = r[1];
+    });
+    return out + esc(s.slice(pos));
+  }
+
+  // 基线参数筛选生效时，在 SQL 编辑器里把命中的参数名整词标亮（markText），
+  // 让「参数藏在 SQL 体里」的查询展开后也能一眼看到命中位置
+  function markBaselineHits(cm, queryId) {
+    if (!cm || !cm.getDoc || !cm.markText) return;
+    (cm._icxBlMarks || []).forEach(function (mk) { try { mk.clear(); } catch (e) {} });
+    cm._icxBlMarks = [];
+    var bm = baselineMatchFor(state.templateId);
+    if (!bm || !queryId) return;
+    var params = ((bm.queries && (bm.queries[queryId] || bm.queries[String(queryId)])) || [])
+      .concat((bm.generic && (bm.generic[queryId] || bm.generic[String(queryId)])) || []);
+    if (!params.length) params = bm.params || [];
+    if (!params.length) return;
+    var lower = String(cm.getValue() || '').toLowerCase();
+    var ranges = [];
+    params.forEach(function (p) {
+      var pl = String(p || '').toLowerCase();
+      if (!pl) return;
+      var idx = 0;
+      while ((idx = lower.indexOf(pl, idx)) >= 0) {
+        var before = idx > 0 ? lower.charAt(idx - 1) : '';
+        var after = lower.charAt(idx + pl.length);
+        if (!/[a-z0-9_]/.test(before) && !/[a-z0-9_]/.test(after)) ranges.push([idx, idx + pl.length]);
+        idx += pl.length;
+      }
+    });
+    if (!ranges.length) return;
+    ranges.sort(function (a, b) { return a[0] - b[0]; });
+    var doc = cm.getDoc(), pos = -1;
+    ranges.forEach(function (r) {
+      if (r[0] < pos) return;
+      try {
+        cm._icxBlMarks.push(cm.markText(doc.posFromIndex(r[0]), doc.posFromIndex(r[1]),
+          { className: 'icx-cm-hl' }));
+      } catch (e) {}
+      pos = r[1];
+    });
+  }
+
   function buildRowsHtml(cid) {
     var c = containers(cid);
     var all = c.queries || [];
@@ -846,32 +1034,70 @@
       return '<div class="icx-empty-line">' +
         esc(t('webui.icx_q_empty', '暂无 SQL 查询，点击「＋ 添加查询」新增')) + '</div>';
     }
+    // 基线参数筛选：只保留后端命中映射里的查询项，可与列表关键词筛选叠加
+    var bm = baselineMatchFor(state.templateId);
+    var allowed = null;
+    if (bm) {
+      allowed = {};
+      (bm.chapters[c.chapterId] || bm.chapters[String(c.chapterId)] || []).forEach(function (id) {
+        allowed[id] = 1;
+      });
+    }
     var kw = String(c.filter || '').trim().toLowerCase();
-    var list = kw ? all.filter(function (q) {
+    var list = all.filter(function (q) {
+      if (allowed && !allowed[q.id]) return false;
+      if (!kw) return true;
       return [q.query_key, q.query_sql, q.query_description_zh, q.query_description_en]
         .join(' ').toLowerCase().indexOf(kw) >= 0;
-    }) : all;
+    });
     if (!list.length) {
-      return '<div class="icx-empty-line">' + esc(t('webui.icx_q_no_match', '没有匹配的查询')) + '</div>';
+      var noMatch = (bm && (!allowed || !Object.keys(allowed).length))
+        ? t('webui.icx_bl_no_query', '该章节下没有匹配此基线参数的查询项')
+        : t('webui.icx_q_no_match', '没有匹配的查询');
+      return '<div class="icx-empty-line">' + esc(noMatch) + '</div>';
     }
     return '<ul class="icx-q-ul">' + list.map(function (q) {
       var zh = String(q.query_description_zh || '').trim();
       var key = String(q.query_key || '').trim();
+      // 每条查询各自命中的参数：SQL 整词点名（queries）+ 全量参数查询覆盖（generic）
+      var qDirect = [], qGen = [];
+      if (bm) {
+        qDirect = (bm.queries && (bm.queries[q.id] || bm.queries[String(q.id)])) || [];
+        qGen = (bm.generic && (bm.generic[q.id] || bm.generic[String(q.id)])) || [];
+      }
+      var qParams = [];
+      if (bm) {
+        qDirect.concat(qGen).forEach(function (p) { if (qParams.indexOf(p) < 0) qParams.push(p); });
+        if (!qParams.length) qParams = bm.params || [];
+      }
+      var isHit = !!(bm && qParams.length);
+      var genericOnly = isHit && !qDirect.length && !!qGen.length;
       // 展示层次：中文说明给人看（主），英文标识给程序用（次）
+      var keyDisplay = key || t('webui.icx_q_unnamed', '未命名');
       var nameHtml = zh
-        ? '<span class="icx-q-name">' + esc(zh) + '</span>'
-        : '<span class="icx-q-name missing">' + esc(key || t('webui.icx_q_unnamed', '未命名')) +
+        ? '<span class="icx-q-name">' + (bm ? hlParam(zh, qParams) : esc(zh)) + '</span>'
+        : '<span class="icx-q-name missing">' + (bm && key ? hlParam(key, qParams) : esc(keyDisplay)) +
           '<span class="icx-q-name-hint">' + esc(t('webui.icx_q_no_desc', '（未填中文说明）')) + '</span></span>';
-      var keyHtml = (zh && key) ? '<code class="icx-q-key">' + esc(key) + '</code>' : '';
+      var keyHtml = (zh && key) ? '<code class="icx-q-key">' + (bm ? hlParam(key, qParams) : esc(key)) + '</code>' : '';
+      // 参数名多数藏在 SQL 体里，行头看不到——用命中标签点明命中了哪个参数；
+      // 仅靠「全量参数查询」覆盖的加通用标注（SQL 文本里没有参数名，高亮无从标起）
+      var hitTag = '';
+      if (isHit) {
+        hitTag = '<span class="icx-q-hit-tag' + (genericOnly ? ' icx-q-hit-gen' : '') + '" title="' +
+          attr(t('webui.icx_bl_hit_tag_tip', '命中的基线参数') + ': ' + qParams.join(', ') +
+            (genericOnly ? ' — ' + t('webui.icx_bl_generic_tip', '该查询读取全量参数目录，可覆盖未点名列出的参数') : '')) +
+          '">🎯 ' + esc(qParams[0]) + (qParams.length > 1 ? ' +' + (qParams.length - 1) : '') +
+          (genericOnly ? ' · ' + esc(t('webui.icx_bl_generic', '通用查询')) : '') + '</span>';
+      }
       var lines = String(q.query_sql || '').split('\n').length;
       var tip = (zh ? zh + (key ? '（' + key + '）' : '') : (key || t('webui.icx_q_unnamed', '未命名'))) +
         ' — ' + t('webui.icx_q_row_tip', '点击展开查看 / 编辑') +
         (q.query_sql ? '\n\nSQL（' + lines + ' 行）：\n' + sqlSummary(q.query_sql, 220) : '');
-      return '<li class="icx-q-row" data-query-id="' + attr(q.id) + '">' +
+      return '<li class="icx-q-row' + (isHit ? ' icx-q-hit' : '') + '" data-query-id="' + attr(q.id) + '">' +
         '<div class="icx-q-head" role="button" tabindex="0" title="' + attr(tip) + '"' +
           ' onclick="FusionInspection.toggleQueryEdit(' + Number(q.id) + ',\'' + attr(cid) + '\')"' +
           ' onkeydown="if(event.key===\'Enter\')FusionInspection.toggleQueryEdit(' + Number(q.id) + ',\'' + attr(cid) + '\')">' +
-          '<span class="icx-q-caret" aria-hidden="true"></span>' + nameHtml + keyHtml +
+          '<span class="icx-q-caret" aria-hidden="true"></span>' + nameHtml + keyHtml + hitTag +
           '<span class="icx-q-state ' + (q.enabled ? 'on' : 'off') + '" title="' +
             attr(q.enabled ? t('webui.icx_q_on', '已启用（参与巡检）') : t('webui.icx_q_off', '已禁用（不参与巡检）')) + '">' +
             (q.enabled ? '✅' : '❌') + '</span>' +
@@ -1027,6 +1253,7 @@
       host.appendChild(ta);
     }
     edit = { queryId: q.id || null, cid: cid, row: row, slot: slot, cm: cm, dirty: false };
+    if (cm && q.id) markBaselineHits(cm, q.id);
     slot.addEventListener('input', markDirty);
     document.addEventListener('keydown', globalEsc);
     updateSqlMeta();
@@ -1173,7 +1400,11 @@
     cm.on('change', function () {
       markDirty();
       if (cm._szTimer) clearTimeout(cm._szTimer);
-      cm._szTimer = setTimeout(function () { autoSize(cm); updateSqlMeta(); }, 120);
+      cm._szTimer = setTimeout(function () {
+        autoSize(cm); updateSqlMeta();
+        // 编辑会移动/清掉旧标记，防抖后按最新文本重新标亮命中参数
+        if (edit && edit.cm === cm) markBaselineHits(cm, edit.queryId);
+      }, 120);
     });
     setTimeout(function () { try { autoSize(cm); cm.refresh(); } catch (e) {} }, 30);
     return cm;
@@ -1447,6 +1678,7 @@
     if (edit.cm) {
       var ref = edit.cm;
       ref.setValue(out);
+      markBaselineHits(ref, edit.queryId);   // setValue 清掉了标记，按格式化后的文本重标
       autoSize(ref);
       setTimeout(function () { autoSize(ref); try { ref.refresh(); } catch (e) {} }, 60);
     } else if (edit.slot) {
@@ -1639,6 +1871,8 @@
     }
     ensureCm();
     ensureSortable().then(function () { renderChapters(); });
+    var blInput = $('icx-bl-search');
+    if (blInput) blInput.value = state.baselineParam;   // 页签切换后输入框与筛选状态保持一致
     return loadTemplates();
   }
 
@@ -1647,6 +1881,10 @@
     toggleRail: toggleRail,
     onTplSearch: onTplSearch,
     onTplDbType: onTplDbType,
+    onBaselineParamSearch: onBaselineParamSearch,
+    ensureBaselineParamOptions: ensureBaselineParamOptions,
+    pickBaselineParam: pickBaselineParam,
+    clearBaselineParam: clearBaselineParam,
     toggleTypePanel: toggleTypePanel,
     closeTypePanel: closeTypePanel,
     syncMode: syncMode,

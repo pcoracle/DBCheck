@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
 # Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
+
 """``/api/chat/*`` 接口层：把这些路径接到本仓库已有的助手 view 函数上。
 
 助手页（``assets/web/static/js/fusion/aias.js``）里的 fetch 路径统一按 ``/api/chat/*`` 写，

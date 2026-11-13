@@ -1511,6 +1511,14 @@ def run_inspection_task(task_id, db_info, inspector_name, template_id=None, chap
         if db_info.get('ssh_host'):
             ssh_info = {k: db_info[k] for k in ('ssh_host', 'ssh_port', 'ssh_user', 'ssh_password', 'ssh_key_file', 'ssh_key_password', 'ssh_ebpf') if k in db_info}
 
+        # 系统资源采集方式与 Zabbix 目标主机：同样走 ssh_info 这个透传袋。
+        # ssh_info 已是本仓库既有的通用参数容器（MongoDB/Redis/SQLServer 专有参数都往里塞），
+        # 各插件 getData 只读取自己认识的键，多放的键无副作用；这样不必给十几个
+        # 插件签名逐个加参数。真正消费点在 inspection 引擎的「收集系统信息」步骤。
+        for _zk in ('syscollect_mode', 'zabbix_host', 'zabbix_hostname'):
+            if db_info.get(_zk):
+                ssh_info[_zk] = db_info[_zk]
+
         # MongoDB 专用参数透传到 ssh_info（供插件 getData → MongoConnectionConfig 使用）
         if db_type == 'mongodb':
             for _mk in ('database', 'connect_mode', 'auth_source', 'auth_mechanism',
@@ -3756,6 +3764,183 @@ def api_trend():
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)})
 
+
+# ══════════════════════════════════════════════════════════════
+#  历史趋势分析（只读：仅 SELECT，不写 history.db）
+#    · /api/trend/analysis     指标注册表 + 异常生命周期 + 变化语义 + 结论
+#    · /api/trend/metric/detail 单指标全窗口血缘（每点来源摘要，轻量）
+#    · /api/trend/metric/raw    单快照点原始数据（分页 + 命中行 + 独立复算）
+# ══════════════════════════════════════════════════════════════
+
+def _trend_lang():
+    """趋势文案语言：跟随会话语言，默认中文。"""
+    try:
+        return (session.get('lang') or 'zh')[:2] or 'zh'
+    except Exception:
+        return 'zh'
+
+
+def _trend_guard(db_type, host, port):
+    """趋势三接口共用的参数校验 + 实例可见性校验。
+
+    返回 (ok, payload, status)。趋势数据按 host/port 从 history.db 直接读，
+    必须先按历史实例主键过可见性，否则任何登录用户都能猜 host:port 拉他人指标。
+    """
+    if not host or not port:
+        return False, {'ok': False, 'error': _t('webui.err_missing_host_port')}, 400
+    try:
+        from modules.inspection.db_history import _db_key
+        from modules.access import principal_from_session, assert_visible
+        user = principal_from_session()
+        inst_key = _db_key(db_type, host, port)
+        ok, err = assert_visible(user, 'history_instance', inst_key)
+        if not ok:
+            return False, {'ok': False, **err}, 403
+        return True, None, 200
+    except Exception as e:
+        return False, {'ok': False, 'error': str(e)}, 200
+
+
+@app.route('/api/trend/analysis', methods=['GET'])
+def api_trend_analysis():
+    """历史趋势分析：返回指标注册表、异常项生命周期、指标变化语义与整体结论。"""
+    db_type = request.args.get('db_type', '')
+    host = request.args.get('host', '')
+    port = request.args.get('port', '')
+    ok, bad, status = _trend_guard(db_type, host, port)
+    if not ok:
+        return jsonify(bad), status
+    try:
+        days = int(request.args.get('days', 0) or 0)
+    except (TypeError, ValueError):
+        days = 0
+    try:
+        from modules.inspection.trend_analysis import analyze
+        data = analyze(BASE_DIR, db_type, host, str(port), days, _trend_lang())
+        return jsonify({'ok': True, 'analysis': data})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)})
+
+
+@app.route('/api/trend/metric/detail', methods=['GET'])
+def api_trend_metric_detail():
+    """某指标在全窗口的「血缘映射」：每个快照点 → 实际命中的来源。"""
+    db_type = request.args.get('db_type', '')
+    host = request.args.get('host', '')
+    port = request.args.get('port', '')
+    key = (request.args.get('key') or '').strip()
+    ok, bad, status = _trend_guard(db_type, host, port)
+    if not ok:
+        return jsonify(bad), status
+    if not key:
+        return jsonify({'ok': False, 'error': 'key required'})
+    try:
+        days = int(request.args.get('days', 0) or 0)
+    except (TypeError, ValueError):
+        days = 0
+    try:
+        from modules.inspection.trend_analysis import provenance_series
+        data = provenance_series(str(Path(BASE_DIR) / 'data' / 'history.db'),
+                                 db_type, host, str(port), days, key, _trend_lang())
+        return jsonify({'ok': True, 'detail': data})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)})
+
+
+def _trend_lookup_query_sql(query_key, db_type, template_id=None):
+    """按 query_key 反查采集 SQL（供溯源抽屉「采集 SQL」页签展示）。
+
+    同一个 query_key 会在多种数据库模板里重复出现（例如 tablespace_usage 在
+    Oracle / 达梦模板里各有一份），所以查找要有优先级：
+      1. 快照记录的 template_id —— 最精确，就是这次巡检实际用的模板；
+      2. 快照的 db_type 对应的默认模板 —— 命中同类数据库的方言；
+      3. 任意模板 —— 兜底，并在结果里标明 matched_by=any_template，避免误导。
+    """
+    if not query_key:
+        return {}
+    sql = ("SELECT q.query_key, q.query_sql, q.query_description_zh, "
+           "       t.id AS template_id "
+           "FROM inspection_query q "
+           "JOIN inspection_chapter c ON c.id = q.chapter_id "
+           "JOIN inspection_template t ON t.id = c.template_id ")
+    matched_by = 'any_template'
+    params = [query_key]
+    where = "WHERE q.query_key=? ORDER BY t.is_default DESC, t.id LIMIT 1"
+    try:
+        if template_id:
+            matched_by = 'snapshot_template'
+            where = "WHERE t.id=? AND q.query_key=? LIMIT 1"
+            params = [int(template_id), query_key]
+        elif db_type:
+            matched_by = 'db_type_template'
+            where = ("WHERE t.db_type=? AND q.query_key=? "
+                     "ORDER BY t.is_default DESC, t.id LIMIT 1")
+            params = [db_type, query_key]
+    except (TypeError, ValueError):
+        matched_by = 'any_template'
+        where = "WHERE q.query_key=? ORDER BY t.is_default DESC, t.id LIMIT 1"
+        params = [query_key]
+    try:
+        from modules.inspection import dal
+        conn = dal.get_db_connection()
+        try:
+            row = conn.execute(sql + where, params).fetchone()
+            if not row and matched_by != 'any_template':
+                # 快照模板/库类型里没有该 key 时退回全局，保证至少能展示 SQL
+                row = conn.execute(
+                    sql + "WHERE q.query_key=? ORDER BY t.is_default DESC, t.id LIMIT 1",
+                    (query_key,)
+                ).fetchone()
+                matched_by = 'any_template'
+        finally:
+            conn.close()
+        if not row:
+            return {'query_key': query_key, 'query_sql': '', 'found': False,
+                    'reason': 'key_not_in_template', 'matched_by': matched_by}
+        got = dict(row)
+        return {'query_key': got.get('query_key') or query_key,
+                'query_sql': got.get('query_sql') or '',
+                'query_desc': got.get('query_description_zh') or '',
+                'found': bool(got.get('query_sql')),
+                'template_id': got.get('template_id') or template_id,
+                'matched_by': matched_by}
+    except Exception:
+        return {}
+
+
+@app.route('/api/trend/metric/raw', methods=['GET'])
+def api_trend_metric_raw():
+    """某快照点上某指标的原始数据（分页），可选附带采集 SQL。"""
+    db_type = request.args.get('db_type', '')
+    host = request.args.get('host', '')
+    port = request.args.get('port', '')
+    key = (request.args.get('key') or '').strip()
+    sid = request.args.get('snapshot_id', '')
+    ok, bad, status = _trend_guard(db_type, host, port)
+    if not ok:
+        return jsonify(bad), status
+    if not key or not str(sid).isdigit():
+        return jsonify({'ok': False, 'error': 'key/snapshot_id required'})
+    try:
+        offset = max(0, int(request.args.get('offset', 0) or 0))
+        limit = max(1, min(int(request.args.get('limit', 100) or 100), 500))
+    except (TypeError, ValueError):
+        offset, limit = 0, 100
+    try:
+        from modules.inspection.trend_analysis import snapshot_raw
+        data = snapshot_raw(BASE_DIR, db_type, host, str(port), int(sid), key,
+                            offset=offset, limit=limit, lang=_trend_lang())
+        if not data.get('ok'):
+            return jsonify(data), 404 if data.get('error') == 'snapshot_not_found' else 200
+        if request.args.get('with_sql') in ('1', 'true', 'yes'):
+            prov = data.get('provenance') or {}
+            origin = prov.get('origin') or {}
+            data['sql'] = _trend_lookup_query_sql(origin.get('query_key'), db_type,
+                                                  data.get('template_id'))
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)})
+
 @app.route('/api/ai_config', methods=['GET'])
 def api_ai_config():
     cfg_path = os.path.join(BASE_DIR, 'dbc_config.json')
@@ -4755,6 +4940,16 @@ def api_start_inspection():
                 'ssh_ebpf':     data.get('ssh_ebpf', True),
             })
 
+        # 系统资源采集方式与 Zabbix 目标：向导第 3 步提交。
+        # 走 datasource_id 的巡检没有 ssh_host，但仍要能把采集方式带下去。
+        syscollect_mode = (data.get('syscollect_mode') or '').strip()
+        if syscollect_mode in ('none', 'ssh', 'zabbix'):
+            db_info['syscollect_mode'] = syscollect_mode
+        if data.get('zabbix_host'):
+            db_info['zabbix_host'] = str(data.get('zabbix_host')).strip()
+        if data.get('zabbix_hostname'):
+            db_info['zabbix_hostname'] = str(data.get('zabbix_hostname')).strip()
+
         task_id = str(uuid.uuid4())
         template_id = data.get('template_id') or None
         tasks[task_id] = {
@@ -4799,6 +4994,7 @@ from modules.inspection.dal import (
     init_database as icfg_init_db,
     create_baseline, get_baselines_by_db_type, get_baseline,
     update_baseline, delete_baseline, init_default_baselines, force_reset_baselines,
+    get_baseline_param_names, search_templates_by_baseline_param,
 )
 
 
@@ -4887,6 +5083,15 @@ def api_list_baselines():
             ).fetchall()]
             conn.close()
         return jsonify({'success': True, 'data': rows})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/inspection/baselines/param-names', methods=['GET'])
+def api_baseline_param_names():
+    """基线参数名去重列表（巡检配置页「基线参数搜索」自动补全用，轻量接口）"""
+    try:
+        return jsonify({'success': True, 'data': get_baseline_param_names()})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)})
 
@@ -5040,17 +5245,178 @@ def api_save_server_thresholds():
         return jsonify({'success': False, 'message': str(e)})
 
 
+# ── Zabbix 监控设置 ──────────────────────────────────────────────
+# 全局连接配置（dbc_config.json 的 zabbix_monitor 节点）+ 连通性/取数自检。
+# 巡检向导第 3 步「系统资源采集」的 Zabbix 分支只读这份配置，自身不保存凭据。
+
+def _zabbix_client_from_request(payload):
+    """按请求里提交的凭据建客户端；提交的是脱敏占位符或缺项时回落到已保存配置。"""
+    from modules.zabbix.client import ZabbixClient
+    from modules.zabbix.config import load_zabbix_config
+
+    saved = load_zabbix_config()
+    merged = dict(saved)
+    for field in ('url', 'username'):
+        value = str(payload.get(field) or '').strip()
+        if value:
+            merged[field] = value
+    # Token/密码页面回显为 ***，原样提交表示「沿用已保存值」
+    for field in ('api_token', 'password'):
+        value = str(payload.get(field) or '')
+        if value and '***' not in value:
+            merged[field] = value
+    if 'verify_ssl' in payload:
+        merged['verify_ssl'] = bool(payload.get('verify_ssl'))
+    return ZabbixClient(
+        url=merged.get('url'), api_token=merged.get('api_token'),
+        username=merged.get('username'), password=merged.get('password'),
+        verify_ssl=bool(merged.get('verify_ssl', True)), timeout=15)
+
+
+@app.route('/api/zabbix/config', methods=['GET'])
+def api_zabbix_config_get():
+    """读取 Zabbix 配置（凭据脱敏，另带 has_* 标记供页面判断是否已设置）。"""
+    try:
+        from modules.zabbix.config import get_masked_config, is_configured
+        return jsonify({'ok': True, 'data': get_masked_config(), 'configured': is_configured()})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/zabbix/config', methods=['POST'])
+def api_zabbix_config_save():
+    """保存 Zabbix 配置（凭据加密落盘）。改的是全局监控凭据，限管理员。"""
+    user, denied = _require_dir_admin()
+    if denied:
+        return denied
+    try:
+        from modules.zabbix.config import save_zabbix_config
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data.get('zabbix'), dict):
+            return jsonify({'ok': False, 'error': '缺少 zabbix 配置内容'}), 400
+        url = str(data['zabbix'].get('url') or '').strip()
+        if url and not url.lower().startswith(('http://', 'https://')):
+            return jsonify({'ok': False, 'error': 'Zabbix 地址需以 http:// 或 https:// 开头'}), 400
+        ok = save_zabbix_config(data['zabbix'])
+        return jsonify({'ok': ok, 'message': 'Zabbix 配置已保存' if ok else '保存 Zabbix 配置失败'})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/zabbix/test', methods=['POST'])
+def api_zabbix_test():
+    """连通性自检：先验 API 版本（免认证），再验凭据是否有效。"""
+    try:
+        from modules.zabbix.config import load_zabbix_config
+        payload = request.get_json(silent=True) or {}
+        if not str(payload.get('url') or '').strip() and not (load_zabbix_config().get('url') or '').strip():
+            return jsonify({'ok': False, 'error': '请先填写 Zabbix 服务器地址'})
+        client = _zabbix_client_from_request(payload)
+        ok, info = client.test_connection()
+        return jsonify({'ok': ok, 'data': info, 'error': info.get('error', '')})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+def _zbx_num(v, default=None):
+    """把 Zabbix 可能返回的 '95.2%' 这类文本转成数值。
+
+    直接对混合类型做 max() 会抛 TypeError，这里统一过滤成数值或 None。
+    """
+    if isinstance(v, (int, float)):
+        return v
+    s = str(v or '').strip().rstrip('%')
+    try:
+        return float(s)
+    except ValueError:
+        return default
+
+
+@app.route('/api/zabbix/sysinfo-test', methods=['GET'])
+def api_zabbix_sysinfo_test():
+    """按 IP/主机名实采一次系统资源，用于第 3 步「测试 Zabbix 主机」按钮。
+
+    走的是与巡检完全相同的采集路径（collect_zabbix_system_info），
+    所以这里能取到数据 = 巡检时也能取到。
+    """
+    host_ip = (request.args.get('host_ip') or '').strip()
+    hostname = (request.args.get('hostname') or '').strip()
+    if not host_ip and not hostname:
+        return jsonify({'ok': False, 'error': '请输入主机 IP 或主机名'})
+    try:
+        from modules.zabbix.sysinfo import collect_zabbix_system_info
+        info = collect_zabbix_system_info(host_ip=host_ip, hostname=hostname)
+        zb = info.get('_zabbix') or {}
+        mem = info.get('memory') or {}
+        disks = [d for d in (info.get('disk_list') or []) if isinstance(d, dict)]
+        percents = [v for v in (_zbx_num(d.get('usage_percent')) for d in disks) if v is not None]
+        return jsonify({'ok': True, 'data': {
+            'name': info.get('hostname', ''),
+            'host': zb.get('host', ''),
+            'ip': zb.get('ip', ''),
+            # os 与源系统契约一致：'linux' / 'windows'
+            'os': zb.get('os', ''),
+            'os_text': info.get('platform_text', ''),
+            'cpu': _zbx_num((info.get('cpu') or {}).get('usage_percent')),
+            'memory': _zbx_num(mem.get('usage_percent')),
+            'disk_count': len(disks),
+            'disk_max': max(percents, default=None),
+            # 以下为补充字段，供设置页展示更完整的自查结果
+            'cpu_model': (info.get('cpu') or {}).get('Model name', ''),
+            'cpu_count': info.get('cpu_count', ''),
+            'memory_detail': mem,
+            'boot_time': info.get('boot_time', ''),
+            'load_average': info.get('load_average', ''),
+        }})
+    except Exception as e:
+        # 配置缺失 / 主机未纳管 / 无监控项：原样提示，用户需要知道是哪一步没通
+        return jsonify({'ok': False, 'error': str(e)})
+
+
+@app.route('/api/zabbix/hosts', methods=['GET'])
+def api_zabbix_hosts():
+    """按关键字搜 Zabbix 主机（设置页与向导用来确认主机已被纳管）。
+
+    必须把关键字交给 API 做 search：主机多时 limit 会按 sortfield 截断，
+    拉全量再本地过滤很可能把目标主机截掉。
+    """
+    search = (request.args.get('search') or '').strip()
+    limit = min(int(request.args.get('limit') or 100), 500)
+    try:
+        from modules.zabbix.config import get_client_from_config
+        from modules.zabbix.items import host_available, host_ip, host_status
+        try:
+            client = get_client_from_config(timeout=15)
+        except Exception:
+            # 允许用请求里的凭据试搜（配置还没保存时也能验证）
+            client = _zabbix_client_from_request(request.args)
+        hosts = client.get_hosts(search=search or None, limit=limit) or []
+        data = [{'hostid': h.get('hostid'), 'host': h.get('host', ''), 'name': h.get('name', ''),
+                 'ip': host_ip(h), 'status': host_status(h), 'available': host_available(h)}
+                for h in hosts]
+        return jsonify({'ok': True, 'data': data, 'total': len(data)})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)})
+
+
 # ── 巡检模板 API ───────────────────────────────────────────
 
 @app.route('/api/inspection/templates', methods=['GET'])
 def api_list_icfg_templates():
-    """获取巡检模板列表，支持按 db_type（可多选）/ keyword 过滤（三栏左栏筛选器用）"""
+    """获取巡检模板列表，支持按 db_type（可多选）/ keyword / baseline_param 过滤（三栏左栏筛选器用）"""
     try:
         # 多选：?db_type=a&db_type=b 或 ?db_type=a,b 都接受
         raw_types = []
         for v in request.args.getlist('db_type'):
             raw_types.extend([x.strip() for x in str(v).split(',') if x.strip()])
         keyword = (request.args.get('keyword') or '').strip().lower()
+        baseline_param = (request.args.get('baseline_param') or '').strip()
         # 前端 db_type 简称 → 数据库 template 全称映射
         _DB_TYPE_MAP = {'pg': 'postgresql', 'dm': 'dm8', 'ivorysql': 'ivorysql'}
         if raw_types:
@@ -5069,7 +5435,26 @@ def api_list_icfg_templates():
                                 'version', 'description')).lower()
                 return keyword in hay
             rows = [r for r in rows if _hit(r)]
-        return jsonify({'success': True, 'data': _icfg_filter(rows)})
+        baseline_params = []
+        if baseline_param:
+            # 基线参数搜索：只保留引用了命中参数的模板，并附带章节/查询命中映射，
+            # 供前端在中栏（章节）与右栏（SQL 列表）继续逐层筛选。
+            found = search_templates_by_baseline_param(baseline_param)
+            baseline_params = found.get('baselines') or []
+            matches = found.get('matches') or {}
+            kept = []
+            for r in rows:
+                m = matches.get(int(r['id']))
+                if m:
+                    r = dict(r)
+                    r['baseline_match'] = m
+                    kept.append(r)
+            rows = kept
+        rows = _icfg_filter(rows)
+        resp = {'success': True, 'data': rows}
+        if baseline_param:
+            resp['baseline_params'] = baseline_params
+        return jsonify(resp)
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)})
 
@@ -5897,6 +6282,16 @@ def api_scheduler_list():
 def _build_scheduler_job_cfg(data, job_id):
     """根据请求数据构建定时任务配置（不含 enabled，由调用方决定启用状态）"""
     datasource_id = data.get('datasource_id')
+    # 通知 / 采集选项：前端向导（步骤3/4）透传，未提供时保持旧行为
+    extra = {
+        'notify_email': bool(data.get('notify_email', False)),
+        'notify_attach': bool(data.get('notify_attach', False)),
+        'notify_anomaly': bool(data.get('notify_anomaly', True)),
+        'email_to': data.get('email_to') or '',
+        'email_cc': data.get('email_cc') or '',
+        'syscollect_mode': data.get('syscollect_mode') or 'none',
+        'syscollect': data.get('syscollect') or {},
+    }
     if datasource_id:
         return {
             'id': job_id,
@@ -5908,7 +6303,8 @@ def _build_scheduler_job_cfg(data, job_id):
             'db_info': {
                 'datasource_id': datasource_id,
                 'label': data.get('label', datasource_id),
-            }
+            },
+            **extra,
         }
     return {
         'id': job_id,
@@ -5937,7 +6333,8 @@ def _build_scheduler_job_cfg(data, job_id):
             # JDBC 驱动管理：驱动版本与 Oracle SID 模式（前端 saveJob 已透传，此前被丢弃）
             'driver_version': data.get('driver_version') or None,
             'use_sid': bool(data.get('use_sid', False)),
-        }
+        },
+        **extra,
     }
 
 
@@ -6040,6 +6437,64 @@ def api_scheduler_run_now(job_id):
         sm = _get_scheduler()
         success = sm.run_job_now(job_id)
         return jsonify({'ok': success, 'msg': 'Task triggered' if success else 'Task not found'})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/scheduler/preview', methods=['POST'])
+def api_scheduler_preview():
+    """预览 Cron 接下来 5 次执行时间（供定时巡检向导实时校验）"""
+    try:
+        import datetime as _dt
+        from apscheduler.triggers.cron import CronTrigger
+        from modules.web.scheduler import _normalize_cron_expression
+        data = request.json or {}
+        cron = data.get('cron') or {}
+        expr = (cron.get('expression') or '').strip()
+        tz = _dt.timezone(_dt.timedelta(hours=8))
+        if expr:
+            trigger = CronTrigger.from_crontab(_normalize_cron_expression(expr), timezone=tz)
+        else:
+            kw = {}
+            for unit in ('second', 'minute', 'hour', 'day', 'month', 'day_of_week'):
+                v = cron.get(unit)
+                if v not in (None, '', '*'):
+                    kw[unit] = v
+            if not kw:
+                return jsonify({'ok': False, 'error': '请先设置执行频率'}), 400
+            trigger = CronTrigger(timezone=tz, **kw)
+        now = _dt.datetime.now(tz)
+        runs = []
+        prev = now
+        for _ in range(5):
+            nxt = trigger.get_next_fire_time(None, prev)
+            if not nxt:
+                break
+            runs.append(nxt.isoformat(timespec='seconds'))
+            prev = nxt + _dt.timedelta(seconds=1)
+        return jsonify({'ok': True, 'runs': runs})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+
+
+@app.route('/api/scheduler/jobs/<job_id>/logs', methods=['GET'])
+def api_scheduler_job_logs(job_id):
+    """获取定时任务执行记录"""
+    try:
+        from modules.web import scheduler as sched_mod
+        limit = request.args.get('limit', 50)
+        return jsonify({'ok': True, 'logs': sched_mod.get_job_logs(job_id, limit)})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/scheduler/jobs/<job_id>/logs', methods=['DELETE'])
+def api_scheduler_clear_job_logs(job_id):
+    """清空定时任务执行记录"""
+    try:
+        from modules.web import scheduler as sched_mod
+        removed = sched_mod.clear_job_logs(job_id)
+        return jsonify({'ok': True, 'removed': removed})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
@@ -7275,6 +7730,107 @@ def api_pro_datasources():
         import traceback
         traceback.print_exc()
         return jsonify({'ok': False, 'error': 'Pro 模块加载失败: ' + str(e)})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/pro/datasources/deleted', methods=['GET'])
+def api_pro_datasources_deleted():
+    """获取已软删除的数据源（回收站），供数据库巡检页「已删除」页签使用。"""
+    try:
+        from modules.pro import get_instance_manager
+        from modules.access import principal_from_session, filter_visible
+        im = get_instance_manager()
+        user = principal_from_session()
+        instances = filter_visible(
+            user, im.get_all_instances(mask_password=True, include_deleted=True), 'instance')
+        deleted = [i for i in instances if i.get('deleted')]
+        return jsonify({'ok': True, 'datasources': deleted})
+    except ImportError as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'ok': False, 'error': 'Pro 模块加载失败: ' + str(e)})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+def _pro_ds_visible_ids(instance_ids):
+    """校验批量操作的数据源可见性，返回 (合法 id 列表, 错误响应或 None)。"""
+    from modules.pro import get_instance_manager
+    from modules.access import principal_from_session, assert_visible
+    ids = [str(i) for i in (instance_ids or []) if i]
+    if not ids:
+        return None, (jsonify({'ok': False, 'error': '请选择数据源'}), 400)
+    user = principal_from_session()
+    for iid in ids:
+        ok, err = assert_visible(user, 'instance', iid)
+        if not ok:
+            return None, (jsonify({'ok': False, **err}), 403)
+    return ids, None
+
+
+@app.route('/api/pro/datasources/batch-soft-delete', methods=['POST'])
+def api_pro_datasources_batch_soft_delete():
+    """批量软删除数据源（进入回收站，可恢复）。"""
+    try:
+        from modules.pro import get_instance_manager
+        data = request.get_json(silent=True) or {}
+        ids, denied = _pro_ds_visible_ids(data.get('ids'))
+        if denied:
+            return denied
+        im = get_instance_manager()
+        result = im.soft_delete_instances(ids)
+        return jsonify(result), (200 if result.get('ok') else 400)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/pro/datasources/batch-restore', methods=['POST'])
+def api_pro_datasources_batch_restore():
+    """批量恢复回收站中的数据源。"""
+    try:
+        from modules.pro import get_instance_manager
+        data = request.get_json(silent=True) or {}
+        ids, denied = _pro_ds_visible_ids(data.get('ids'))
+        if denied:
+            return denied
+        im = get_instance_manager()
+        result = im.restore_instances(ids)
+        return jsonify(result), (200 if result.get('ok') else 400)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/pro/datasources/batch-hard-delete', methods=['POST'])
+def api_pro_datasources_batch_hard_delete():
+    """批量彻底删除数据源（不可恢复，同时清理巡检历史）。"""
+    try:
+        from modules.pro import get_instance_manager
+        from modules.access import remove_owner
+        data = request.get_json(silent=True) or {}
+        ids, denied = _pro_ds_visible_ids(data.get('ids'))
+        if denied:
+            return denied
+        im = get_instance_manager()
+        result = im.hard_delete_instances(ids)
+        for iid in ids:
+            try:
+                remove_owner('instance', iid)
+            except Exception:
+                pass
+            try:
+                _invalidateDatasourceCaches(iid)
+            except Exception:
+                pass
+        return jsonify(result)
     except Exception as e:
         import traceback
         traceback.print_exc()

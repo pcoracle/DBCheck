@@ -435,6 +435,8 @@ JA.update({
     "menu.monitor-conn": "接続プールの監視",
     "menu.monitor-slow": "スロークエリ監視",
     "menu.notifier": "通知管理",
+    "menu.ai-assistant": "AI Assistant",
+    "menu.zabbix":  "Zabbix設定",
     "menu.oracle-client": "Oracleクライアント",
     "menu.plugin-market": "プラグイン市場",
     "menu.rag": "ナレッジベース",

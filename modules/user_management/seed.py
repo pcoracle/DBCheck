@@ -35,6 +35,9 @@ menus_data = [
     ('dm8-offline',      'menu.dm8-offline',     0, 28),
     ('datasources',     'menu.datasources',      0, 31),
     ('inspection-config','menu.inspection-config',0, 32),
+    # 巡检编排：前端有 nav-flow 与 page-flow，此前种子缺行导致
+    # loadVisibleMenus() 把导航项置为 display:none，所有人（含 admin）都进不去
+    ('flow',             'menu.flow',          0, 33),
     ('baseline-config',  'menu.baseline-config', 0, 33),
     ('server-thresholds','menu.server-thresholds',0, 34),
     ('rules',            'menu.rules',           0, 35),
@@ -49,6 +52,7 @@ menus_data = [
     ('ai',               'menu.ai',              0, 53),
     ('oracle-client',    'menu.oracle-client',   0, 54),
     ('notifier',         'menu.notifier',        0, 55),
+    ('zabbix',           'menu.zabbix',          0, 55),
     ('apikey',           'menu.apikey',          0, 56),
     ('shares',           'menu.shares',          0, 57),
     ('intelligence',      'menu.intelligence',     0, 58),

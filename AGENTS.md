@@ -71,10 +71,49 @@
 ```bash
 python scripts/check_license_headers.py --fix
 python scripts/check_license_headers.py
+python scripts/check_no_data_files.py
+python scripts/sync_menu_seed.py --check
 ```
 
 第二次运行必须输出 `OK: N files checked, 0 missing` 且退出码为 0。CI 亦会
 自动校验；若失败，PR 将被标红。
+
+新增带侧栏入口的功能页时，三处必须同时落地，否则会出现「页面写了但没人能进去」：
+`web_templates/index.html` 的 `nav-item`、`modules/user_management/seed.py` 的
+`menus_data` 行、以及九语言字典的 `menu.<code>` 键。执行
+`python scripts/sync_menu_seed.py --write` 可自动补齐后两处；`--check` 会在
+CI 上拦住漂移。注意 `menus_data` 缺行不只是少一条授权记录——前端
+`loadVisibleMenus()` 按 `/api/um/user/menus` 返回的 `menu_code` 决定导航项
+显隐，缺行的页面对包括管理员在内的所有人都不可见。
+
+### 9. 数据库与运行态数据：一律不得入库
+
+任何**含真实业务数据或凭据**的文件都不得提交、推送或以 `git add -f` 绕过忽略规则
+塞进版本库。本仓库推送到公开代码托管站点，一旦入库即等于对外泄露，删除提交记录
+也未必能收回（历史 blob、fork、CI 缓存、镜像都可能已被抓取）。
+
+禁止入库的类别：
+
+1. 数据库文件及其运行态附属：`*.db`、`*.sqlite`、`*.sqlite3`，以及 `-wal` / `-shm` /
+   `-journal` / `.bak-*` 副本。`-wal` 里就是尚未落盘的真实行数据，等同泄库。
+2. `data/` 目录整体：库文件、巡检报告、AWR 上传与解析产物、缓存、备份、执行日志。
+   本项目没有任何需要随包分发的 `.db`——种子数据全部是 JSON
+   （`modules/config/*_seed.json`、`plugins/*/baseline_data.json`），因此全局忽略数据库
+   文件不会误伤构建产物。
+3. 凭据与密钥：`dbc_config.json`、`ai_config.json`、`notifier_config.json`、
+   `scheduler_jobs.json`、`instances.json`、`.env`、`.web_secret`、`.jwt_secret`、
+   `.db_key`、`license.key`、`*.lic`。
+4. 一次性产物：`qa-temp/`、`dist/`、`tests/`、`docs/design/`、`copyright_registration/`。
+
+提交纪律：
+
+- 只用显式文件列表 `git add <具体文件>`；**禁止** `git add .` / `git add -A` /
+  `git add -f`。`-f` 会绕过 `.gitignore`，历史上 `data/reports/oracle_awr.html`
+  就是这样进了库。
+- 整改误提交用 `git rm --cached <路径>`（保留本地文件），不要直接删本地数据。
+- 新增数据类目录时，先补 `.gitignore` 类别规则再写代码，不要靠提交时人工记得避开。
+- 确需入库的例外（例如随包分发的空模板库）必须同时写进 `.gitignore` 的显式放行行与
+  `scripts/check_no_data_files.py` 的 `ALLOWED_EXCEPTIONS`，并注明用途；不得默默 `-f`。
 
 ---
 
@@ -144,7 +183,57 @@ Before submitting, run:
 ```bash
 python scripts/check_license_headers.py --fix
 python scripts/check_license_headers.py
+python scripts/check_no_data_files.py
+python scripts/sync_menu_seed.py --check
 ```
 
 The second run MUST print `OK: N files checked, 0 missing` with exit code 0.
 CI runs the same check automatically; a failure turns the PR red.
+
+Any new feature page with a sidebar entry must land in all three places at once,
+otherwise you get "page built but nobody can open it": the `nav-item` in
+`web_templates/index.html`, a `menus_data` row in
+`modules/user_management/seed.py`, and the `menu.<code>` key in all nine
+language dictionaries. `python scripts/sync_menu_seed.py --write` fills in the
+last two; `--check` blocks the drift in CI. A missing `menus_data` row is not
+merely a missing grant — `loadVisibleMenus()` decides sidebar visibility from the
+`menu_code` returned by `/api/um/user/menus`, so the page becomes unreachable for
+everyone, administrators included.
+
+### 9. Database and Runtime Data Must NEVER Enter the Repository
+
+No file containing real business data or credentials may be committed, pushed,
+or forced past the ignore rules with `git add -f`. This repository is published
+on a public hosting site, so once a file is in the repo it is effectively
+disclosed — deleting a commit does not reliably take it back (history blobs,
+forks, CI caches and mirrors may already have it).
+
+Forbidden categories:
+
+1. Database files and their runtime sidecars: `*.db`, `*.sqlite`, `*.sqlite3`,
+   plus `-wal` / `-shm` / `-journal` / `.bak-*` copies. A `-wal` file holds real
+   row data that has not been flushed yet — leaking it is leaking the database.
+2. The whole `data/` directory: databases, inspection reports, AWR uploads and
+   parsed artifacts, caches, backups and execution logs. This project ships no
+   `.db` at all — all seed data is JSON (`modules/config/*_seed.json`,
+   `plugins/*/baseline_data.json`) — so ignoring database files globally cannot
+   break a build.
+3. Credentials and keys: `dbc_config.json`, `ai_config.json`,
+   `notifier_config.json`, `scheduler_jobs.json`, `instances.json`, `.env`,
+   `.web_secret`, `.jwt_secret`, `.db_key`, `license.key`, `*.lic`.
+4. Throwaway artifacts: `qa-temp/`, `dist/`, `tests/`, `docs/design/`,
+   `copyright_registration/`.
+
+Commit discipline:
+
+- Stage an explicit file list only (`git add <file>`). **Never** use
+  `git add .`, `git add -A` or `git add -f`. `-f` bypasses `.gitignore`, and
+  `data/reports/oracle_awr.html` got into the history exactly that way.
+- To undo a wrong commit, use `git rm --cached <path>` (keeps the local file);
+  do not delete the local data itself.
+- When adding a new kind of data directory, extend the `.gitignore` category
+  rules first — do not rely on remembering to dodge it at commit time.
+- A genuine exception (for example an empty shipped template database) must be
+  recorded both as an explicit un-ignore line in `.gitignore` and in
+  `ALLOWED_EXCEPTIONS` in `scripts/check_no_data_files.py`, with its purpose
+  stated; never rely on a silent `-f`.

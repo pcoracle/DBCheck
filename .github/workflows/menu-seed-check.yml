@@ -1,0 +1,28 @@
+name: Menu Seed Sync Check
+
+# 侧栏 nav-item、menus_data 种子与九语言 menu.* 键三者一致性校验。
+# 三者不一致的后果都是真实故障：缺种子行的页面对所有人不可见
+# （loadVisibleMenus 按 menu_code 决定导航显隐）；缺 i18n 键的界面
+# 会直接显示原始键名。详见 scripts/sync_menu_seed.py 与 AGENTS.md。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  menu-seed-check:
+    name: Verify nav / seed menu / i18n keys stay in sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Check menu seed and i18n sync
+        run: python scripts/sync_menu_seed.py --check

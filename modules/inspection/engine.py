@@ -62,6 +62,31 @@ HEALTH_THRESHOLD = {'excellent': 90, 'good': 75, 'fair': 60, 'poor': 0}
 IGNORE_MOUNTS = {'/mnt/iso', '/media', '/run/media', '/iso', '/cdrom'}
 
 
+def resolve_syscollect_modes(collect_bag):
+    """判定这次巡检用哪种方式采集目标主机系统资源，返回 (want_zabbix, want_ssh)。
+
+    ``collect_bag`` 就是透传下来的 ssh_info 字典（本仓库把采集相关的附加参数都放这里）。
+    规则：
+      - 显式 ``syscollect_mode='none'`` → 两种都不采，报告里不出现系统资源章节；
+      - ``'zabbix'`` 且给了 Zabbix 目标 → 只走 Zabbix，不再占用 SSH 账号；
+      - ``'zabbix'`` 但没给目标 → 都不走，由调用方提示用户，不悄悄改用 SSH；
+      - ``'ssh'`` → 只走 SSH；
+      - 老调用没带 mode → 按字段存在与否推断，Zabbix 优先，兼容既有行为。
+    任何情况都不会回退到采集「巡检工具所在本机」——那会把无关主机的磁盘/内存误报进来。
+    """
+    bag = collect_bag or {}
+    has_zbx = bool(bag.get('zabbix_host') or bag.get('zabbix_hostname'))
+    has_ssh = bool(bag.get('ssh_host'))
+    mode = (bag.get('syscollect_mode') or '').strip()
+    if mode == 'none':
+        return False, False
+    if mode == 'zabbix':
+        return has_zbx, False
+    if mode == 'ssh':
+        return False, has_ssh
+    return has_zbx, has_ssh
+
+
 # ============================================================
 # 远程系统信息收集器
 # ============================================================
@@ -919,7 +944,30 @@ class BaseInspectionEngine:
         self.print_progress_bar(current_step, total_steps, prefix=_prog_prefix, suffix=self._t(f'{self.db_type}_progress_sysinfo', default='dm8_progress_sysinfo'))
         try:
             system_info = None
-            if self.ssh_info and self.ssh_info.get('ssh_host'):
+            _collect_bag = self.ssh_info or {}
+            # 系统资源采集优先级：Zabbix > SSH（判定见 resolve_syscollect_modes）
+            want_zabbix, want_ssh = resolve_syscollect_modes(_collect_bag)
+            _mode_given = (_collect_bag.get('syscollect_mode') or '').strip()
+            if _mode_given == 'zabbix' and not want_zabbix:
+                print(self._t('engine.zabbix_no_target_skip',
+                              default='已选择 Zabbix 采集，但未指定主机 IP/主机名，跳过系统资源采集'))
+            if want_zabbix:
+                # 已被 Zabbix 纳管的主机（含没有 SSH 的 Windows）直接取监控数据，
+                # 不再要求额外开一个 SSH 采集账号
+                try:
+                    from modules.zabbix.sysinfo import collect_zabbix_system_info
+                    system_info = collect_zabbix_system_info(
+                        host_ip=_collect_bag.get('zabbix_host') or '',
+                        hostname=_collect_bag.get('zabbix_hostname') or '')
+                    system_info['_is_target_server'] = True
+                    print(self._t('engine.zabbix_collecting',
+                                  default='通过 Zabbix 采集目标主机系统资源: {host}').format(
+                        host=_collect_bag.get('zabbix_host') or _collect_bag.get('zabbix_hostname')))
+                except Exception as e:
+                    # Zabbix 失败不静默回退本机；能改用 SSH 就改用 SSH，否则留空
+                    system_info = None
+                    print(self._t('engine.zabbix_collect_fail', default='Zabbix 采集失败: {e}').format(e=e))
+            if system_info is None and want_ssh and _collect_bag.get('ssh_host'):
                 # 仅当配置了「查询服务器」(SSH) 且连接成功时，才采集「目标数据库服务器」的系统资源。
                 # 系统资源告警（磁盘/内存）必须反映目标库主机，绝不能把巡检工具所在本机误报进去。
                 print(self._t(f'{self.db_type}_ssh_collecting', default='dm8_ssh_collecting').format(host=self.ssh_info['ssh_host']))

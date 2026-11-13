@@ -3011,6 +3011,8 @@ ZH_TW.update({
     "webui.screen_ssh": "SSH 跳板",
     "webui.screen_err_title": "錯誤詳情（點擊節點查看）",
     "menu.notifier": "通知管理",
+    "menu.ai-assistant": "AI 巡检助手",
+    "menu.zabbix":  "Zabbix監控設定",
     "menu.oracle-client": "Oracle客戶端",
     "menu.plugin-market": "插件市場",
     "menu.rag": "知識庫",

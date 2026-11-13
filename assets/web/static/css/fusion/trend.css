@@ -1,0 +1,431 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
+ * Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
+ *
+ * 历史趋势分析页面样式（仅作用于 #page-trend，避免污染其它页面）
+ */
+
+#page-trend {
+  --tr-radius: 12px;
+  --tr-gap: 14px;
+}
+
+/* ── 工具栏 ─────────────────────────────────────────── */
+#page-trend .tr-toolbar {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--tr-radius);
+}
+#page-trend .tr-field { display: flex; flex-direction: column; gap: 6px; min-width: 220px; }
+#page-trend .tr-field-grow { flex: 1 1 320px; }
+#page-trend .tr-field-narrow { flex: 0 0 150px; min-width: 150px; }
+#page-trend .tr-field label { font-size: 12px; color: var(--text-muted); }
+#page-trend .tr-select,
+#page-trend .tr-input {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+  transition: border-color .15s ease;
+}
+#page-trend .tr-select:focus,
+#page-trend .tr-input:focus { border-color: var(--accent); }
+
+#page-trend .tr-btn {
+  padding: 9px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all .15s ease;
+  white-space: nowrap;
+}
+#page-trend .tr-btn:hover { border-color: var(--accent); color: var(--accent); }
+#page-trend .tr-btn-primary {
+  background: linear-gradient(135deg, var(--accent), var(--sky));
+  border-color: transparent;
+  color: #fff;
+  font-weight: 600;
+}
+#page-trend .tr-btn-primary:hover { color: #fff; filter: brightness(1.06); }
+#page-trend .tr-icon-btn {
+  width: 30px; height: 30px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+#page-trend .tr-icon-btn:hover { color: var(--danger); border-color: var(--danger); }
+
+/* ── 空态 ───────────────────────────────────────────── */
+#page-trend .tr-empty {
+  padding: 64px 24px;
+  text-align: center;
+  background: var(--surface);
+  border: 1px dashed var(--border);
+  border-radius: var(--tr-radius);
+  color: var(--text-muted);
+}
+#page-trend .tr-empty-icon { font-size: 44px; margin-bottom: 14px; opacity: .85; }
+#page-trend .tr-empty-title { font-size: 16px; font-weight: 600; color: var(--text); margin-bottom: 8px; }
+#page-trend .tr-empty-note { font-size: 12.5px; line-height: 1.8; max-width: 520px; margin: 0 auto; }
+
+/* ── 结论横幅 ───────────────────────────────────────── */
+#page-trend .tr-verdict {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 20px;
+  margin-bottom: var(--tr-gap);
+  border-radius: var(--tr-radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  position: relative;
+  overflow: hidden;
+}
+#page-trend .tr-verdict::before {
+  content: '';
+  position: absolute; left: 0; top: 0; bottom: 0;
+  width: 4px;
+  background: var(--accent);
+}
+#page-trend .tr-verdict.worsening::before { background: var(--danger); }
+#page-trend .tr-verdict.attention::before { background: var(--warning); }
+#page-trend .tr-verdict.improving::before { background: var(--success); }
+#page-trend .tr-verdict.stable::before { background: var(--sky); }
+#page-trend .tr-verdict-icon { font-size: 30px; line-height: 1; }
+#page-trend .tr-verdict-main { flex: 1; min-width: 0; }
+#page-trend .tr-verdict-title { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
+#page-trend .tr-verdict-reason { font-size: 13px; color: var(--text-muted); line-height: 1.7; }
+#page-trend .tr-verdict-badge {
+  flex: 0 0 auto;
+  padding: 7px 16px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .4px;
+}
+#page-trend .tr-verdict-badge.worsening { background: var(--danger-soft); color: var(--danger); }
+#page-trend .tr-verdict-badge.attention { background: var(--warn-soft); color: var(--warning); }
+#page-trend .tr-verdict-badge.improving { background: var(--accent-soft); color: var(--success); }
+#page-trend .tr-verdict-badge.stable { background: var(--sky-soft); color: var(--sky); }
+
+/* ── 概览统计 ───────────────────────────────────────── */
+#page-trend .tr-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--tr-gap);
+  margin-bottom: var(--tr-gap);
+}
+#page-trend .tr-stat {
+  padding: 16px 18px;
+  border-radius: var(--tr-radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+#page-trend .tr-stat-icon {
+  width: 40px; height: 40px;
+  flex: 0 0 40px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  font-size: 19px;
+}
+#page-trend .tr-stat-num { font-size: 22px; font-weight: 700; line-height: 1.1; }
+#page-trend .tr-stat-label { font-size: 12px; color: var(--text-muted); margin-top: 3px; }
+
+/* ── 卡片容器（异常看板 / 健康风险图 / 指标趋势） ─────── */
+#page-trend .tr-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--tr-radius);
+  overflow: hidden;
+  margin-bottom: var(--tr-gap);
+}
+#page-trend .tr-card > .tr-legend { padding: 0 16px 12px; }
+#page-trend .tr-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+#page-trend .tr-panel-title { font-size: 14px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+#page-trend .tr-pill {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface2);
+  color: var(--text-muted);
+}
+#page-trend .tr-tabs { display: flex; gap: 4px; background: var(--surface2); padding: 3px; border-radius: 8px; }
+#page-trend .tr-tab {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all .15s ease;
+}
+#page-trend .tr-tab:hover { color: var(--text); }
+#page-trend .tr-tab.active { background: var(--surface); color: var(--accent); font-weight: 600; box-shadow: var(--shadow-1); }
+
+/* 指标工具条：筛选 + 搜索 + 分组/覆盖/排序 + 折叠 */
+#page-trend .tr-metric-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+#page-trend .tr-search { flex: 1 1 200px; min-width: 160px; width: auto; }
+#page-trend .tr-select-sm { width: auto; min-width: 118px; flex: 0 0 auto; }
+#page-trend .tr-btn-mini { padding: 7px 12px; font-size: 12px; flex: 0 0 auto; }
+#page-trend .tr-note { padding: 8px 16px 14px; font-size: 12px; color: var(--text-muted); }
+
+/* 健康评分与风险项折线图 */
+#page-trend .tr-chart-box {
+  padding: 6px 12px 0;
+  height: 240px;
+}
+#page-trend .tr-chart-box .tr-hr-svg { width: 100%; height: 100%; display: block; }
+#page-trend .tr-legend-line { width: 16px; height: 3px; border-radius: 2px; display: inline-block; }
+
+/* ── 指标列表 ───────────────────────────────────────── */
+#page-trend .tr-metric-list { max-height: 640px; overflow-y: auto; padding: 8px 10px 14px; }
+#page-trend .tr-group { border-radius: 9px; }
+#page-trend .tr-group-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: .4px;
+  color: var(--text-muted);
+  padding: 12px 8px 6px;
+  text-transform: uppercase;
+  cursor: pointer;
+  user-select: none;
+}
+#page-trend .tr-group-title:hover { color: var(--text); }
+#page-trend .tr-group-caret { display: inline-block; transform: rotate(0deg); transition: transform .15s ease; }
+#page-trend .tr-group.collapsed .tr-group-caret { transform: rotate(-90deg); }
+#page-trend .tr-group.collapsed .tr-group-body { display: none; }
+#page-trend .tr-metric {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  cursor: pointer;
+  transition: background .15s ease;
+}
+#page-trend .tr-metric:hover { background: var(--surface2); }
+#page-trend .tr-metric.is-anomaly { background: var(--danger-soft); }
+#page-trend .tr-metric.is-anomaly:hover { filter: brightness(1.04); }
+#page-trend .tr-metric-main { flex: 1; min-width: 0; }
+#page-trend .tr-metric-label { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#page-trend .tr-metric-sub { font-size: 11.5px; color: var(--text-muted); margin-top: 2px; }
+#page-trend .tr-metric-value { text-align: right; min-width: 96px; }
+#page-trend .tr-metric-num { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
+#page-trend .tr-metric-num .tr-unit { font-size: 11px; font-weight: 400; color: var(--text-muted); margin-left: 3px; }
+#page-trend .tr-metric-delta { font-size: 11.5px; font-weight: 600; margin-top: 2px; }
+#page-trend .tr-metric-delta.up-bad, #page-trend .tr-metric-delta.down-bad { color: var(--danger); }
+#page-trend .tr-metric-delta.up-good, #page-trend .tr-metric-delta.down-good { color: var(--success); }
+#page-trend .tr-metric-delta.flat { color: var(--text-muted); }
+#page-trend .tr-spark { flex: 0 0 96px; height: 34px; }
+#page-trend .tr-spark svg { width: 100%; height: 100%; display: block; overflow: visible; }
+
+#page-trend .tr-badge {
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+#page-trend .tr-badge.critical { background: var(--danger-soft); color: var(--danger); }
+#page-trend .tr-badge.high { background: var(--warn-soft); color: var(--warning); }
+#page-trend .tr-badge.medium { background: var(--sky-soft); color: var(--sky); }
+#page-trend .tr-badge.low, #page-trend .tr-badge.healthy { background: var(--accent-soft); color: var(--success); }
+#page-trend .tr-badge.stable { background: var(--surface2); color: var(--text-muted); }
+#page-trend .tr-badge.worsening { background: var(--danger-soft); color: var(--danger); }
+#page-trend .tr-badge.improving { background: var(--accent-soft); color: var(--success); }
+
+/* ── 异常生命周期 ───────────────────────────────────── */
+#page-trend .tr-legend { display: flex; gap: 14px; padding: 10px 16px 0; font-size: 11.5px; color: var(--text-muted); }
+#page-trend .tr-legend-item { display: inline-flex; align-items: center; gap: 5px; }
+#page-trend .tr-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+#page-trend .tr-dot-new { background: var(--danger); }
+#page-trend .tr-dot-persistent { background: var(--warning); }
+#page-trend .tr-dot-resolved { background: var(--success); }
+
+#page-trend .tr-issue-list { max-height: 420px; overflow-y: auto; padding: 10px 14px 16px; }
+#page-trend .tr-issue {
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: 9px;
+  padding: 11px 13px;
+  margin-bottom: 10px;
+  background: var(--surface2);
+}
+#page-trend .tr-issue.new { border-left-color: var(--danger); }
+#page-trend .tr-issue.persistent { border-left-color: var(--warning); }
+#page-trend .tr-issue.resolved { border-left-color: var(--success); opacity: .82; }
+#page-trend .tr-issue-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+#page-trend .tr-issue-name { font-size: 13px; font-weight: 600; flex: 1; min-width: 120px; }
+#page-trend .tr-issue-meta { font-size: 11.5px; color: var(--text-muted); margin-top: 6px; line-height: 1.7; }
+#page-trend .tr-issue-desc { font-size: 12px; color: var(--text-muted); margin-top: 4px; line-height: 1.7; }
+#page-trend .tr-issue-fix {
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--sky);
+  cursor: pointer;
+  user-select: none;
+}
+#page-trend .tr-issue-sql {
+  display: none;
+  margin-top: 6px;
+  padding: 8px 10px;
+  background: var(--code-bg);
+  border-radius: 6px;
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text);
+}
+#page-trend .tr-empty-inline { padding: 30px 12px; text-align: center; color: var(--text-muted); font-size: 12.5px; }
+
+/* ── 溯源抽屉 ───────────────────────────────────────── */
+#page-trend .tr-drawer-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, .45);
+  z-index: 3200;
+  display: none;
+  backdrop-filter: blur(2px);
+}
+#page-trend .tr-drawer-mask.open { display: block; }
+#page-trend .tr-drawer {
+  position: absolute;
+  top: 0; right: 0; bottom: 0;
+  width: min(720px, 92vw);
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  box-shadow: -24px 0 60px -30px rgba(0, 0, 0, .6);
+}
+#page-trend .tr-drawer-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--border);
+}
+#page-trend .tr-drawer-head-text { flex: 1; min-width: 0; }
+#page-trend .tr-drawer-title { font-size: 15px; font-weight: 700; }
+#page-trend .tr-drawer-sub { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+#page-trend .tr-drawer-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+#page-trend .tr-drawer-body { flex: 1; overflow-y: auto; padding: 16px 18px 28px; }
+
+#page-trend .tr-lineage { display: flex; flex-direction: column; gap: 8px; }
+#page-trend .tr-point {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface2);
+}
+#page-trend .tr-point.sel { border-color: var(--accent); }
+#page-trend .tr-point-ts { font-size: 12px; color: var(--text-muted); flex: 0 0 132px; font-variant-numeric: tabular-nums; }
+#page-trend .tr-point-val { font-size: 14px; font-weight: 700; flex: 0 0 92px; font-variant-numeric: tabular-nums; }
+#page-trend .tr-point-src { flex: 1; min-width: 0; font-size: 12px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#page-trend .tr-point-btn {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+#page-trend .tr-point-btn:hover { color: var(--accent); border-color: var(--accent); }
+
+#page-trend .tr-raw-meta { font-size: 12px; color: var(--text-muted); margin-bottom: 10px; line-height: 1.8; }
+#page-trend .tr-raw-ok { color: var(--success); font-weight: 600; }
+#page-trend .tr-raw-bad { color: var(--danger); font-weight: 600; }
+#page-trend .tr-raw-table { overflow: auto; border: 1px solid var(--border); border-radius: 9px; }
+#page-trend .tr-raw-table table { width: 100%; border-collapse: collapse; font-size: 12px; }
+#page-trend .tr-raw-table th,
+#page-trend .tr-raw-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#page-trend .tr-raw-table th { background: var(--surface2); color: var(--text-muted); font-weight: 600; position: sticky; top: 0; }
+#page-trend .tr-raw-table tr.hit td { background: var(--accent-soft); }
+#page-trend .tr-sql {
+  padding: 14px;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+}
+
+/* ── 响应式 ─────────────────────────────────────────── */
+@media (max-width: 1100px) {
+  #page-trend .tr-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 640px) {
+  #page-trend .tr-stats { grid-template-columns: minmax(0, 1fr); }
+  #page-trend .tr-field-narrow { flex: 1 1 100%; }
+}
+
+/* 滚动条 */
+#page-trend .tr-metric-list::-webkit-scrollbar,
+#page-trend .tr-issue-list::-webkit-scrollbar,
+#page-trend .tr-drawer-body::-webkit-scrollbar { width: 6px; height: 6px; }
+#page-trend .tr-metric-list::-webkit-scrollbar-thumb,
+#page-trend .tr-issue-list::-webkit-scrollbar-thumb,
+#page-trend .tr-drawer-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }

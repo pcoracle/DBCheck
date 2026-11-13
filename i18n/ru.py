@@ -435,6 +435,8 @@ RU.update({
     "menu.monitor-conn": "Монитор пула соединений",
     "menu.monitor-slow": "Монитор медленных запросов",
     "menu.notifier": "Управление уведомлениями",
+    "menu.ai-assistant": "AI Assistant",
+    "menu.zabbix": "Настройки Zabbix",
     "menu.oracle-client": "Клиент Oracle",
     "menu.plugin-market": "Рынок плагинов",
     "menu.rag": "База знаний",

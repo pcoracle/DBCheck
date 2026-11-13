@@ -999,3 +999,137 @@ body > .icx-type-panel label.icx-tp-item {
 body > .icx-type-panel label.icx-tp-item:hover { background: var(--surface2); }
 body > .icx-type-panel .icx-tp-count { margin-left: auto; font-size: 11px; color: var(--text-muted); }
 
+/* ── 基线参数搜索：输入框激活态 / 命中参数 chips / 命中标记 ── */
+#page-inspection-config .icx-rail-tools input.icx-bl-active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+#page-inspection-config .icx-bl-status {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px 7px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  border-radius: 7px;
+}
+
+#page-inspection-config .icx-bl-status-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+#page-inspection-config .icx-bl-clear {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  line-height: 1;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+#page-inspection-config .icx-bl-clear:hover { color: var(--danger); border-color: var(--danger); }
+
+#page-inspection-config .icx-bl-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+
+#page-inspection-config .icx-bl-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 2px 7px;
+  font-size: 11px;
+  font-family: var(--font-mono, monospace);
+  color: var(--text);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#page-inspection-config .icx-bl-chip:hover { border-color: var(--accent); color: var(--accent); }
+#page-inspection-config .icx-bl-chip-n { font-size: 10px; color: var(--text-muted); }
+
+#page-inspection-config .icx-tpl-sub.icx-bl-hit,
+#page-inspection-config .icx-ch-count.icx-bl-hit { color: var(--accent); font-weight: 600; }
+
+#page-inspection-config .icx-bl-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-radius: 20px;
+  white-space: nowrap;
+}
+
+#page-inspection-config mark.icx-hl {
+  padding: 0 1px;
+  color: inherit;
+  background: color-mix(in srgb, var(--warn, #d29922) 32%, transparent);
+  border-radius: 3px;
+}
+
+/* 命中章节：边框/底色带一点强调色，让「筛选出来的章节」一眼可辨 */
+#page-inspection-config .icx-ch-item.icx-bl-hit-ch {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+#page-inspection-config .icx-ch-item.icx-bl-hit-ch:not(.active) {
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface2));
+}
+
+/* 命中查询行：整行高亮（左侧强调条 + 淡底），参数藏在 SQL 里也能看到命中态 */
+#page-inspection-config .icx-q-row.icx-q-hit {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+#page-inspection-config .icx-q-row.icx-q-hit > .icx-q-head {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+#page-inspection-config .icx-q-row.icx-q-hit.editing { border-color: var(--accent); }
+
+/* 命中标签：点明这条查询命中了哪个基线参数（多个时显示 +N，悬停看全量） */
+#page-inspection-config .icx-q-hit-tag {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 200px;
+  padding: 1px 7px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-family: var(--font-mono, monospace);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* SQL 编辑器内的参数名高亮（CodeMirror markText），与行内 mark 同色系 */
+#page-inspection-config .icx-cm-hl {
+  background: color-mix(in srgb, var(--warn, #d29922) 38%, transparent);
+  border-radius: 3px;
+}
+
+/* 通用参数查询覆盖命中的标签：虚线边框以示与「SQL 点名」区别 */
+#page-inspection-config .icx-q-hit-tag.icx-q-hit-gen { border-style: dashed; }
+

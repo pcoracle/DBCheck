@@ -2410,6 +2410,193 @@ def force_reset_baselines(db_type: str = None, db_path: str = None):
         conn.close()
 
 
+# JDBC 变体类型 → 引擎本体：基线参数在两者间通用，
+# 搜索模板配置项时 oracle_jdbc 等变体基线也应命中本体类型的模板。
+_BASELINE_DB_ALIAS = {
+    'oracle_jdbc': 'oracle',
+    'sqlserver_jdbc': 'sqlserver',
+    'db2_jdbc': 'db2',
+}
+
+# 「全量参数目录」查询：读取该引擎全部参数/设置的 SQL（无 name 过滤时）。
+# 基线参数没被任何模板点名、但同类型模板存在这类查询时，视为参数可被查到
+# （通用覆盖命中），避免「参数明明在被查、只因 SQL 没点名就筛不出来」。
+_GENERIC_PARAM_SQL_PAT = None
+_NAME_FILTER_SQL_PAT = None
+
+
+def _generic_query_patterns():
+    """惰性编译通用参数查询 / name 过滤的识别正则。"""
+    global _GENERIC_PARAM_SQL_PAT, _NAME_FILTER_SQL_PAT
+    if _GENERIC_PARAM_SQL_PAT is None:
+        import re
+        _GENERIC_PARAM_SQL_PAT = re.compile(
+            r'(from\s+pg_settings\b|from\s+v\$parameter\b|from\s+v\$dm_ini\b'
+            r'|from\s+system\.settings\b|from\s+sys\.configurations\b'
+            r'|show\s+all\b|show\s+(global\s+)?variables\b'
+            r'|from\s+gv\$parameter\b)', re.IGNORECASE)
+        _NAME_FILTER_SQL_PAT = re.compile(
+            r'(name\s*(=|in\s*\(|like)|variable_name\s*(=|in\s*\(|like)'
+            r'|variables\s+(like|where)|setting\s*\()', re.IGNORECASE)
+    return _GENERIC_PARAM_SQL_PAT, _NAME_FILTER_SQL_PAT
+
+
+def get_baseline_param_names(db_path: str = None) -> List[Dict]:
+    """按参数名聚合基线参数（巡检配置页「基线参数搜索」的自动补全用）。
+
+    :param db_path: 数据库文件路径
+    :return: ``[{'param_name', 'db_types': [...], 'description_zh'}, ...]``，
+             按参数名排序，描述取第一个非空值
+    """
+    conn = get_db_connection(db_path)
+    try:
+        rows = conn.execute(
+            'SELECT param_name, db_type, description_zh FROM inspection_baseline '
+            'ORDER BY param_name, db_type').fetchall()
+        grouped = {}
+        order = []
+        for r in rows:
+            name = r['param_name']
+            g = grouped.get(name)
+            if g is None:
+                g = {'param_name': name, 'db_types': [], 'description_zh': ''}
+                grouped[name] = g
+                order.append(name)
+            if r['db_type'] not in g['db_types']:
+                g['db_types'].append(r['db_type'])
+            if not g['description_zh'] and r['description_zh']:
+                g['description_zh'] = r['description_zh']
+        return [grouped[n] for n in order]
+    finally:
+        conn.close()
+
+
+def search_templates_by_baseline_param(param_keyword: str, db_path: str = None) -> Dict:
+    """搜索基线参数名，定位匹配的模板配置项（巡检配置页筛选用）。
+
+    匹配规则：
+    - 基线侧：``param_name`` 包含关键词（忽略大小写）；
+    - 模板侧：与基线同引擎类型的模板（JDBC 变体归入本体）中，查询的
+      query_key / query_sql / 中英文描述包含完整参数名（词边界匹配，
+      忽略大小写）即命中，避免短参数名误命中更长的标识符；
+    - 通用覆盖：未被任何模板 SQL 点名的命中参数，若同类型模板存在读取
+      全量参数目录的查询（无 name 过滤的 pg_settings / v$parameter /
+      SHOW VARIABLES / system.settings / sys.configurations / V$DM_INI
+      等），视为该查询能查到这些参数，计入命中并放入 ``generic`` 映射。
+
+    :param param_keyword: 基线参数名关键词
+    :param db_path: 数据库文件路径
+    :return: ``{'baselines': [命中的基线摘要], 'matches': {template_id: {
+             'params': [命中参数名], 'chapters': {chapter_id: [query_id, ...]},
+             'queries': {query_id: [该查询直接点名的参数名]},
+             'generic': {query_id: [经通用参数查询覆盖的参数名]}, 'query_count': N}}}``；
+             无命中时 matches 为空字典
+    """
+    import re
+
+    kw = str(param_keyword or '').strip().lower()
+    result = {'baselines': [], 'matches': {}}
+    if not kw:
+        return result
+
+    conn = get_db_connection(db_path)
+    try:
+        conn.row_factory = sqlite3.Row
+        baselines = [dict(r) for r in conn.execute(
+            'SELECT id, db_type, param_name, risk_level, enabled, '
+            '       description_zh, description_en '
+            'FROM inspection_baseline ORDER BY db_type, param_name')]
+        hits = [b for b in baselines if kw in str(b.get('param_name') or '').lower()]
+        if not hits:
+            return result
+        result['baselines'] = hits
+
+        # 每个命中参数名编译一个整词正则（忽略大小写）
+        patterns = {}
+        for b in hits:
+            name = str(b.get('param_name') or '')
+            if name and name not in patterns:
+                patterns[name] = re.compile(
+                    r'(?<![A-Za-z0-9_])' + re.escape(name) + r'(?![A-Za-z0-9_])',
+                    re.IGNORECASE)
+
+        rows = conn.execute(
+            'SELECT q.id AS query_id, q.chapter_id, q.query_key, q.query_sql, '
+            '       q.query_description_zh, q.query_description_en, '
+            '       c.template_id, t.db_type '
+            'FROM inspection_query q '
+            'JOIN inspection_chapter c ON c.id = q.chapter_id '
+            'JOIN inspection_template t ON t.id = c.template_id').fetchall()
+
+        def _norm(db_type):
+            v = str(db_type or '').lower()
+            return _BASELINE_DB_ALIAS.get(v, v)
+
+        # 引擎类型 → 该类型下命中的基线
+        by_type = {}
+        for b in hits:
+            by_type.setdefault(_norm(b['db_type']), []).append(b)
+
+        matches = {}
+        gp_pat, nf_pat = _generic_query_patterns()
+        generic_by_type = {}          # 归一类型 → [(template_id, chapter_id, query_id)] 通用参数查询
+        direct_params_by_type = {}    # 归一类型 → 被任一模板 SQL 整词点名过的参数名
+
+        def _attach(tid, cid, qid, params, store_key):
+            """把参数命中挂到模板的匹配映射上（直接点名 / 通用覆盖共用）。"""
+            m = matches.setdefault(
+                tid, {'params': [], 'chapters': {}, 'queries': {}, 'query_count': 0})
+            for p in params:
+                if p not in m['params']:
+                    m['params'].append(p)
+            qids = m['chapters'].setdefault(cid, [])
+            if qid not in qids:
+                qids.append(qid)
+                m['query_count'] += 1
+            qparams = m[store_key].setdefault(qid, [])
+            for p in params:
+                if p not in qparams:
+                    qparams.append(p)
+
+        for r in rows:
+            ntype = _norm(r['db_type'])
+            tid, cid, qid = int(r['template_id']), int(r['chapter_id']), int(r['query_id'])
+            sql_text = str(r['query_sql'] or '')
+            if not nf_pat.search(sql_text) and gp_pat.search(sql_text):
+                generic_by_type.setdefault(ntype, []).append((tid, cid, qid))
+            blist = by_type.get(ntype)
+            if not blist:
+                continue
+            hay = ' '.join(str(r[k] or '') for k in
+                           ('query_key', 'query_sql',
+                            'query_description_zh', 'query_description_en'))
+            hit_params = [b['param_name'] for b in blist
+                          if patterns[b['param_name']].search(hay)]
+            if not hit_params:
+                continue
+            _attach(tid, cid, qid, hit_params, 'queries')
+            direct_params_by_type.setdefault(ntype, set()).update(hit_params)
+
+        # 第二遍：没被任何模板点名的命中参数，若同类型模板存在全量参数查询，
+        # 记为「通用覆盖」命中（queries 之外的 generic 映射，前端据此区分标注）。
+        for ntype, blist in by_type.items():
+            direct = direct_params_by_type.get(ntype, set())
+            pending = [b['param_name'] for b in blist if b['param_name'] not in direct]
+            if not pending:
+                continue
+            for (tid, cid, qid) in generic_by_type.get(ntype, []):
+                m = matches.setdefault(
+                    tid, {'params': [], 'chapters': {}, 'queries': {},
+                          'generic': {}, 'query_count': 0})
+                m.setdefault('generic', {})
+                _attach(tid, cid, qid, pending, 'generic')
+
+        result['matches'] = matches
+        return result
+    finally:
+        conn.close()
+
+
 if __name__ == '__main__':
     # 初始化数据库
     init_database()

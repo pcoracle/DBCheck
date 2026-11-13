@@ -39,6 +39,14 @@
       <input type="search" id="icx-tpl-search" autocomplete="off"
              placeholder="搜索模板 / 版本 / 说明" data-i18n-placeholder="webui.icx_tpl_search_ph"
              oninput="FusionInspection.onTplSearch(this.value)" />
+      <input type="search" id="icx-bl-search" autocomplete="off"
+             list="icx-bl-param-options"
+             placeholder="搜索基线参数名，筛选模板配置项" data-i18n-placeholder="webui.icx_bl_search_ph"
+             title="搜索基线配置管理中的参数名称，筛选出引用该参数的模板 / 章节 / SQL" data-i18n-title="webui.icx_bl_search_tip"
+             onfocus="FusionInspection.ensureBaselineParamOptions()"
+             oninput="FusionInspection.onBaselineParamSearch(this.value)" />
+      <datalist id="icx-bl-param-options"></datalist>
+      <div class="icx-bl-status" id="icx-bl-status" style="display:none"></div>
       <div class="icx-dbfilter">
         <button type="button" class="icx-dbfilter-btn" id="icx-dbfilter-btn"
                 title="按数据库类型筛选（可多选）" data-i18n-title="webui.icx_dbfilter_title"
