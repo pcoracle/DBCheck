@@ -2,44 +2,320 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
  * Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
+ *
+ * AWR 在线生成页（#page-awr-gen）：左「数据源 + 快照 + 上传」，
+ * 中「最近报告」，右「在线预览 / AI 诊断」。接口见 awr.js。
+ *
+ * 布局契约（改之前先读这段）：本页是三栏固定视口布局，每栏各自内部滚动，
+ * 不允许整页滚动。全站基础布局是 .app-shell{min-height:100vh} +
+ * .main{min-height:100vh}，父链高度都是 auto，子级 height:100% 会退化成 auto：
+ *   · .awrg-list 的 overflow:auto 永远不触发 → 报告越多整页越长，只能滚整个
+ *     文档（表现为「没有滚动条，要靠翻页」）；
+ *   · .awrg-wrap 默认 align-items:stretch → 侧栏与预览栏被列表的高度拉伸，
+ *     三栏不在同一基线上（表现为「错位」）。
+ * 所以进入本页时 showPage() 给 body 加 .awr-gen-fixed、给 .main 加
+ * .awr-gen-active，把整条 flex 链锁成确定高度（100vh - 32px，32px 是底部固定
+ * 状态栏的占位），与 reports / sql-editor / ai-assistant 页同一范式。
  */
-#page-awr-gen { display: flex; flex-direction: column; min-height: 0; height: 100%; overflow: hidden; }
-.awrg-wrap { display: flex; gap: 8px; flex: 1 1 auto; min-height: 0; padding: 6px 8px 8px; }
-.awrg-side, .awrg-recent, .awrg-main {
-  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
-  display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+
+/* ── 高度链：仅本页激活时锁定，切走即释放，不影响其它页面的文档滚动 ── */
+/* body 有 min-height:100vh 且 padding-bottom:32px（状态栏占位），两者相加会让
+   文档比视口高 32px。锁滚动必须同时落在 html 上，只写 body 拦不住文档滚动。 */
+html.awr-gen-fixed, body.awr-gen-fixed { overflow: hidden; }
+body.awr-gen-fixed .app-shell {
+  height: calc(100vh - 32px);
+  min-height: calc(100vh - 32px);
 }
-.awrg-side { flex: 0 0 280px; padding: 10px; gap: 10px; overflow: auto; }
-.awrg-recent { flex: 0 0 260px; }
-.awrg-main { flex: 1 1 auto; min-width: 0; }
-.awrg-head { display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  padding: 8px 10px; border-bottom: 1px solid var(--border);
-  font-size: 12px; font-weight: 600; color: var(--text-muted); }
+body.awr-gen-fixed .main.awr-gen-active {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+body.awr-gen-fixed .main.awr-gen-active .content {
+  flex: 1 1 0%;          /* 基准取 0%：嵌套定高时 auto 基准=内容高度，会多出几十像素 */
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
+}
+body.awr-gen-fixed .main.awr-gen-active .topbar { flex: 0 0 auto; }
+
+#page-awr-gen {
+  /* 三栏宽度：由 awr.js 的拖拽分隔条写入内联变量并持久化到 localStorage。
+     左栏 / 中栏定宽，主栏吃掉剩余空间，所以拖前两条分隔条就等于调三栏比例。 */
+  --awrg-side-w: 300px;
+  --awrg-recent-w: 260px;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0%;
+  min-height: 0;
+  overflow: hidden;
+}
+.awrg-wrap {
+  display: flex;
+  gap: 0;                /* 栏间距由 10px 的分隔条提供，拖拽热区即视觉间距 */
+  flex: 1 1 0%;
+  min-height: 0;
+  padding: 6px 8px 8px;
+}
+.awrg-side, .awrg-recent, .awrg-main {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-sizing: border-box;   /* 拖出来的 280px 就是看到的 280px（含边框内边距） */
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;          /* 允许被压缩，否则内容会顶破栏宽 */
+  overflow: hidden;
+}
+.awrg-side { flex: 0 0 var(--awrg-side-w); padding: 10px; gap: 12px; overflow: auto; }
+.awrg-recent { flex: 0 0 var(--awrg-recent-w); }
+.awrg-main { flex: 1 1 auto; }
+
+/* ── 栏宽拖拽手柄 ── */
+.awrg-resizer {
+  flex: 0 0 10px;
+  align-self: stretch;
+  position: relative;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+  border-radius: 6px;
+  transition: background .15s ease;
+}
+/* 默认只是一个居中的短抓手，不与两侧卡片的整高边框叠成三道竖线 */
+.awrg-resizer::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 3px;
+  height: 36px;
+  transform: translate(-50%, -50%);
+  border-radius: 2px;
+  background: var(--text-muted);
+  opacity: .38;   /* 淡但有形：光标进到 10px 热区还会变 col-resize */
+  transition: height .15s ease, width .15s ease, background .15s ease, opacity .15s ease;
+}
+.awrg-resizer:hover,
+.awrg-resizer.awrg-resizing { background: var(--accent-soft); }
+.awrg-resizer:hover::before,
+.awrg-resizer:focus-visible::before,
+.awrg-resizer.awrg-resizing::before {
+  width: 4px;
+  height: 72px;
+  background: var(--accent);
+  opacity: 1;
+}
+body.awrg-col-resizing { cursor: col-resize; user-select: none; }
+
+/* ── 栏头：标题可收缩、按钮组可换行（260px 窄栏 + 多按钮时不再挤压/裁切） ── */
+.awrg-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.awrg-head > span:first-child { flex: 1 1 auto; min-width: 0; }
 .awrg-side .awrg-head { padding: 0 0 8px; }
-.awrg-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-muted); }
-.awrg-field select, .awrg-side input[type=file] {
-  background: var(--surface2); color: var(--text); border: 1px solid var(--border);
-  border-radius: 6px; padding: 5px 8px; font-size: 12px; width: 100%; box-sizing: border-box; }
-.awrg-primary { height: 34px; border: none; border-radius: 8px; cursor: pointer;
-  background: var(--accent); color: #04131a; font-weight: 600; }
-.awrg-primary:disabled { opacity: .6; cursor: default; }
-.awrg-progress, .awrg-hint { font-size: 12px; color: var(--text-muted); line-height: 1.6; word-break: break-word; }
-.awrg-list { flex: 1 1 auto; min-height: 0; overflow: auto; }
-.awrg-item { padding: 7px 10px; border-bottom: 1px solid rgba(255,255,255,.04); cursor: pointer; font-size: 12px; }
-.awrg-item:hover { background: var(--surface2); }
-.awrg-item.active { background: rgba(0,200,160,.12); color: var(--accent); }
-.awrg-item .awrg-item-meta { display: block; color: var(--text-muted); font-size: 11px; }
-.awrg-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  padding: 8px 10px; border-bottom: 1px solid var(--border); }
-.awrg-title { font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.awrg-actions { display: flex; gap: 6px; flex: 0 0 auto; }
-.awrg-mini { background: transparent; border: 1px solid var(--border); color: var(--text-muted);
-  border-radius: 6px; font-size: 11px; padding: 3px 9px; cursor: pointer; }
+.awrg-actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.awrg-mini {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  border-radius: 6px;
+  font-size: 11px;
+  padding: 3px 9px;
+  cursor: pointer;
+  white-space: nowrap;
+}
 .awrg-mini:hover { color: var(--accent); border-color: var(--accent); }
-.awrg-body { flex: 1 1 auto; min-height: 0; display: flex; }
-.awrg-frame { flex: 1 1 auto; width: 100%; border: 0; background: #fff; }
-.awrg-ai { flex: 1 1 auto; margin: 0; padding: 12px 14px; overflow: auto;
-  font-size: 13px; line-height: 1.7; color: var(--text); background: var(--surface2); }
+
+/* ── 左栏表单 ── */
+.awrg-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 2px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.awrg-field select, .awrg-side input[type=file] {
+  background: var(--surface2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 12px;
+  width: 100%;
+  box-sizing: border-box;
+}
+.awrg-field select { height: 30px; }
+.awrg-primary {
+  height: 34px;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  background: var(--accent);
+  color: #04131a;
+  font-weight: 600;
+}
+.awrg-primary:disabled { opacity: .6; cursor: default; }
+
+/* 进度是多行文本（awr.js 用 \n 拼步骤），必须保留换行，否则会挤成一长串 */
+.awrg-progress {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.6;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.awrg-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+/* ── 中栏：最近报告 ── */
+.awrg-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding: 6px 12px;
+}
+/* 全局 select 是 width:100% + padding:9px 12px，不收回会把「全部来源」四个字
+   裁掉一半，也会把同一行的计数文字顶出去。这里给足固定宽度、另行收紧内边距。 */
+.awrg-filter select {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 104px;
+  max-width: 62%;
+  height: 28px;
+  padding: 0 6px 0 8px;
+  font-size: 12px;
+  line-height: 26px;
+}
+.awrg-filter .awrg-hint {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.awrg-list {
+  flex: 1 1 0%;
+  min-height: 0;
+  overflow: auto;
+  padding-bottom: 4px;
+}
+.awrg-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.awrg-item + .awrg-item { border-top: 1px solid var(--border); }
+.awrg-item:hover { background: var(--surface2); }
+.awrg-item.active { background: rgba(0,200,160,.12); }
+.awrg-item.active .awrg-item-title { color: var(--accent); }
+.awrg-item .awrg-check { flex: 0 0 auto; margin-top: 3px; }
+.awrg-item-main { flex: 1 1 auto; min-width: 0; }
+.awrg-item-title {
+  font-size: 12.5px;
+  color: var(--text);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.awrg-item-range {
+  font-size: 11.5px;
+  color: var(--accent);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.awrg-item-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.awrg-item-del {
+  flex: 0 0 auto;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 4px;
+  opacity: .55;
+}
+.awrg-item-del:hover { color: var(--danger); opacity: 1; }
+.awrg-badge-warn {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  background: #fff3cd;
+  color: #856404;
+}
+
+/* ── 右栏：预览 / AI 诊断 ── */
+.awrg-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex: 0 0 auto;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.awrg-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.awrg-body { flex: 1 1 0%; min-height: 0; display: flex; }
+.awrg-frame { flex: 1 1 0%; width: 100%; border: 0; background: #fff; }
+.awrg-ai {
+  flex: 1 1 0%;
+  min-height: 0;
+  margin: 0;
+  padding: 12px 14px;
+  overflow: auto;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text);
+  background: var(--surface2);
+}
 .awrg-ai-detail { color: var(--accent); font-weight: 600; margin-bottom: 6px; font-size: 12.5px; }
 .awrg-ai-body { margin-top: 8px; }
 .awrg-ai-caret { color: var(--accent); font-weight: 700; }
@@ -47,40 +323,39 @@
 .awrg-ai th, .awrg-ai td { padding: 6px 10px; border: 1px solid var(--border); text-align: left; }
 .awrg-ai pre { overflow-x: auto; }
 
-.awrg-item { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.awrg-item .awrg-check { flex: 0 0 auto; }
-.awrg-item .awrg-item-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.awrg-item .awrg-item-del { flex: 0 0 auto; border: none; background: none; color: var(--text-muted); cursor: pointer; }
-.awrg-item .awrg-item-del:hover { color: var(--danger); }
-.awrg-item .awrg-item-meta { flex: 0 0 100%; }
 /* 报告窗口最大化 */
-.awrg-main.awrg-maximized { position: fixed; inset: 0; z-index: 2000; margin: 0; border-radius: 0; }
+.awrg-main.awrg-maximized {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  margin: 0;
+  border-radius: 0;
+  background: var(--surface);
+}
 
-.awrg-item .awrg-item-range { color: var(--text-muted); font-size: 11px; }
-
-.awrg-item { display: flex; align-items: flex-start; gap: 8px; padding: 9px 10px; cursor: pointer; }
-.awrg-item + .awrg-item { border-top: 1px solid rgba(255,255,255,.05); }
-.awrg-item .awrg-check { margin-top: 3px; flex: 0 0 auto; }
-.awrg-item-main { flex: 1 1 auto; min-width: 0; }
-.awrg-item-title { font-size: 12.5px; color: var(--text); font-weight: 600;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.awrg-item-range { font-size: 11.5px; color: var(--accent); margin-top: 2px; }
-.awrg-item-sub { font-size: 11px; color: var(--text-muted); margin-top: 2px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.awrg-item-del { flex: 0 0 auto; border: none; background: none; color: var(--text-muted);
-  cursor: pointer; font-size: 14px; line-height: 1; padding: 2px 4px; opacity: .55; }
-.awrg-item-del:hover { color: var(--danger); opacity: 1; }
-.awrg-side { gap: 12px; }
-.awrg-field { margin-bottom: 2px; }
-.awrg-field select { height: 30px; }
-.awrg-toolbar { padding: 10px 12px; }
-.awrg-title { font-size: 12.5px; font-weight: 600; }
-.awrg-list { padding-bottom: 4px; }
-.awrg-filter { display: flex; align-items: center; gap: 8px; padding: 6px 12px; }
-.awrg-filter select { height: 28px; flex: 0 0 auto; }
-.awrg-badge-warn { margin-left: 6px; padding: 1px 5px; border-radius: 4px; font-size: 10.5px;
-  font-weight: 600; background: #fff3cd; color: #856404; }
-
-.awrg-upload-btn { height: 32px; border: 1px dashed var(--border); border-radius: 8px;
-  background: transparent; color: var(--text-muted); cursor: pointer; font-size: 12px; }
+/* ── 上传按钮 ── */
+.awrg-upload-btn {
+  height: 32px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+}
 .awrg-upload-btn:hover { color: var(--accent); border-color: var(--accent); }
+
+/* ── 滚动条：与侧栏导航同款细条；高度链正确后各栏才有滚动条可见 ── */
+.awrg-side, .awrg-list, .awrg-ai { scrollbar-width: thin; }
+.awrg-side::-webkit-scrollbar,
+.awrg-list::-webkit-scrollbar,
+.awrg-ai::-webkit-scrollbar { width: 6px; height: 6px; }
+.awrg-side::-webkit-scrollbar-thumb,
+.awrg-list::-webkit-scrollbar-thumb,
+.awrg-ai::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+.awrg-side::-webkit-scrollbar-thumb:hover,
+.awrg-list::-webkit-scrollbar-thumb:hover,
+.awrg-ai::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+.awrg-side::-webkit-scrollbar-track,
+.awrg-list::-webkit-scrollbar-track,
+.awrg-ai::-webkit-scrollbar-track { background: transparent; }

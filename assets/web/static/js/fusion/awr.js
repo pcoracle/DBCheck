@@ -53,6 +53,133 @@
     if (button) button.textContent = maximized ? '还原' : '最大化';
   }
 
+  // ── 三栏宽度：拖拽分隔条调整，宽度写入 CSS 变量并存 localStorage ──
+  // 左栏/中栏定宽、主栏吃掉剩余空间，因此拖前两条分隔条即可分配三栏比例；
+  // 主栏始终保留 MIN_MAIN，避免把预览区拖没。
+  var COL_KEY = 'dbcheck.awrgen.cols.v1';
+  var COL_DEFAULT = { side: 300, recent: 260 };
+  var COL_LIMIT = { side: { min: 200, max: 460 }, recent: { min: 200, max: 480 } };
+  var COL_MIN_MAIN = 360;
+
+  function colWidths() {
+    var root = byId('page-awr-gen');
+    var out = { side: COL_DEFAULT.side, recent: COL_DEFAULT.recent };
+    if (!root) return out;
+    ['side', 'recent'].forEach(function (key) {
+      var value = parseFloat(root.style.getPropertyValue('--awrg-' + key + '-w'));
+      if (value > 0) out[key] = value;
+    });
+    return out;
+  }
+
+  function colSpace() {
+    var wrap = document.querySelector('#page-awr-gen .awrg-wrap');
+    if (!wrap) return 0;
+    return wrap.clientWidth - 16 - 20;    // 去掉 .awrg-wrap 左右 padding 与两条 10px 分隔条
+  }
+
+  function clampCols(cols) {
+    var total = colSpace();
+    var side = Math.min(Math.max(cols.side, COL_LIMIT.side.min), COL_LIMIT.side.max);
+    var recent = Math.min(Math.max(cols.recent, COL_LIMIT.recent.min), COL_LIMIT.recent.max);
+    if (total > 0) {
+      side = Math.min(side, Math.max(COL_LIMIT.side.min, total - recent - COL_MIN_MAIN));
+      recent = Math.min(recent, Math.max(COL_LIMIT.recent.min, total - side - COL_MIN_MAIN));
+    }
+    return { side: Math.round(side), recent: Math.round(recent) };
+  }
+
+  function applyCols(cols) {
+    var root = byId('page-awr-gen');
+    if (!root) return;
+    root.style.setProperty('--awrg-side-w', cols.side + 'px');
+    root.style.setProperty('--awrg-recent-w', cols.recent + 'px');
+  }
+
+  function saveCols(cols) {
+    try { localStorage.setItem(COL_KEY, JSON.stringify(cols)); } catch (e) {}
+  }
+
+  function restoreCols() {
+    var saved = null;
+    try { saved = JSON.parse(localStorage.getItem(COL_KEY) || 'null'); } catch (e) { saved = null; }
+    if (!saved || typeof saved !== 'object') return;
+    var cols = { side: COL_DEFAULT.side, recent: COL_DEFAULT.recent };
+    if (isFinite(saved.side)) cols.side = Number(saved.side);
+    if (isFinite(saved.recent)) cols.recent = Number(saved.recent);
+    applyCols(clampCols(cols));
+  }
+
+  function commitCols(cols) {
+    var applied = clampCols(cols);
+    applyCols(applied);
+    saveCols(applied);
+    return applied;
+  }
+
+  function initResizers() {
+    var wrap = document.querySelector('#page-awr-gen .awrg-wrap');
+    if (!wrap || wrap.dataset.resizers === '1') return;
+    wrap.dataset.resizers = '1';
+    restoreCols();
+
+    Array.prototype.forEach.call(wrap.querySelectorAll('[data-awrg-resize]'), function (handle) {
+      var which = handle.getAttribute('data-awrg-resize');
+
+      handle.addEventListener('pointerdown', function (event) {
+        if (event.button != null && event.button !== 0) return;
+        var startX = event.clientX;
+        var base = clampCols(colWidths());
+        var startWidth = base[which];
+        handle.classList.add('awrg-resizing');
+        document.body.classList.add('awrg-col-resizing');
+        if (handle.setPointerCapture && event.pointerId != null) {
+          try { handle.setPointerCapture(event.pointerId); } catch (e) {}
+        }
+
+        function onMove(moveEvent) {
+          var next = { side: base.side, recent: base.recent };
+          next[which] = startWidth + (moveEvent.clientX - startX);
+          applyCols(clampCols(next));      // 拖动过程只改样式，松手才落盘
+        }
+        function onUp() {
+          handle.classList.remove('awrg-resizing');
+          document.body.classList.remove('awrg-col-resizing');
+          handle.removeEventListener('pointermove', onMove);
+          handle.removeEventListener('pointerup', onUp);
+          handle.removeEventListener('pointercancel', onUp);
+          saveCols(colWidths());
+        }
+        handle.addEventListener('pointermove', onMove);
+        handle.addEventListener('pointerup', onUp);
+        handle.addEventListener('pointercancel', onUp);
+        event.preventDefault();
+      });
+
+      // 键盘可达：←/→ 微调（Shift 加速），Home 恢复默认
+      handle.addEventListener('keydown', function (event) {
+        var step = event.shiftKey ? 40 : 12;
+        var cols = clampCols(colWidths());
+        if (event.key === 'ArrowLeft') cols[which] -= step;
+        else if (event.key === 'ArrowRight') cols[which] += step;
+        else if (event.key === 'Home') cols = { side: COL_DEFAULT.side, recent: COL_DEFAULT.recent };
+        else return;
+        event.preventDefault();
+        commitCols(cols);
+      });
+
+      // 双击恢复该栏默认宽度
+      handle.addEventListener('dblclick', function () {
+        var cols = clampCols(colWidths());
+        cols[which] = COL_DEFAULT[which];
+        commitCols(cols);
+      });
+    });
+
+    // 窗口变窄时重新收敛，避免主栏被挤成 0
+    window.addEventListener('resize', function () { applyCols(clampCols(colWidths())); });
+  }
+
   function loadDatasources() {
     return request('/api/pro/datasources').then(function (body) {
       var rows = (body && (body.datasources || body.instances)) || [];
@@ -174,10 +301,14 @@
     });
   }
 
-  function loadRecent() {
+  function loadRecent(resetScroll) {
     return request('/api/awr/recent').then(function (body) {
       var host = byId('awrg-recent');
       if (!host) return;
+      // 重渲染会丢掉列表的滚动位置：点开第 N 条报告时 showPreview() 会回调本函数，
+      // 列表被打回顶部，用户只能重新往下翻。这里先记住 scrollTop，渲染后还原，
+      // 并把当前选中项滚回可视区（切数据源/来源筛选时才复位到顶部）。
+      var keepScroll = resetScroll ? 0 : host.scrollTop;
       var all = (body && body.files) || [];
       var dsSelect = byId('awrg-ds');
       var dsId = (dsSelect && dsSelect.value) || '';
@@ -218,7 +349,7 @@
         var incomplete = file.data_complete === false
           ? '<span class="awrg-badge-warn" title="兜底视图方案生成，数据集不完整">最小数据集</span>' : '';
         return '<div class="awrg-item' + (file.task_id === state.currentId ? ' active' : '') +
-               '" data-awr-id="' + file.task_id + '">' +
+               '" data-awr-id="' + file.task_id + '" title="' + escapeText(title + '  ' + range) + '">' +
                '<input type="checkbox" class="awrg-check" data-check-id="' + file.task_id + '">' +
                '<div class="awrg-item-main">' +
                '  <div class="awrg-item-title">' + title + incomplete + '</div>' +
@@ -230,6 +361,16 @@
                '<button type="button" class="awrg-item-del" data-del-id="' + file.task_id +
                '" title="删除">×</button></div>';
       }).join('');
+      host.scrollTop = keepScroll;
+      if (keepScroll && state.currentId) {
+        var active = host.querySelector('.awrg-item.active');
+        if (active) {
+          var hostRect = host.getBoundingClientRect();
+          var itemRect = active.getBoundingClientRect();
+          if (itemRect.top < hostRect.top) host.scrollTop -= (hostRect.top - itemRect.top);
+          else if (itemRect.bottom > hostRect.bottom) host.scrollTop += (itemRect.bottom - hostRect.bottom);
+        }
+      }
     }).catch(function () {});
   }
 
@@ -284,7 +425,8 @@
 
   function escapeText(value) {
     return String(value == null ? '' : value)
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
   }
 
   // AI 面板正文：正常结论按 Markdown 渲染（标题/列表/表格），失败信息按纯文本转义
@@ -400,12 +542,12 @@
     var dsSelect = byId('awrg-ds');
     if (dsSelect) dsSelect.addEventListener('change', function () {
       loadSnapshots();
-      loadRecent();          // 文件列表按数据源联动
+      loadRecent(true);      // 文件列表按数据源联动，换了数据源回到列表顶部
     });
     var daysSelect = byId('awrg-days');
     if (daysSelect) daysSelect.addEventListener('change', loadSnapshots);
     var sourceFilter = byId('awrg-source-filter');
-    if (sourceFilter) sourceFilter.addEventListener('change', loadRecent);
+    if (sourceFilter) sourceFilter.addEventListener('change', function () { loadRecent(true); });
     var previewButton = byId('awrg-preview');
     if (previewButton) previewButton.addEventListener('click', function () {
       if (state.currentId) showPreview(state.currentId);
@@ -454,6 +596,7 @@
     });
     var maximize = byId('awrg-maximize');
     if (maximize) maximize.addEventListener('click', toggleMaximize);
+    initResizers();
     document.addEventListener('keydown', function (event) {
       if (event.key !== 'Escape') return;
       if (document.querySelector('.awrg-main.awrg-maximized')) toggleMaximize();

@@ -3598,9 +3598,11 @@ async function executeFixSql(taskId, sql) {
   {% if aias_source_ui %}
   <link rel="stylesheet" href="/static/css/fusion/aias.css?v={{ version }}-source21">
   {% else %}
-  <link rel="stylesheet" href="/static/css/fusion/ai_assistant.css?v={{ version }}-fusion17">
+  <link rel="stylesheet" href="/static/css/fusion/ai_assistant.css?v={{ version }}-fusion18">
   {% endif %}
-  <link rel="stylesheet" href="/static/css/fusion/awr.css?v={{ version }}-fusion6">
+  <!-- 任务回溯 / 工具管理两个共用子页：不随助手实现切换，无条件加载 -->
+  <link rel="stylesheet" href="/static/css/fusion/ai_shared_pages.css?v={{ version }}-fusion1">
+  <link rel="stylesheet" href="/static/css/fusion/awr.css?v={{ version }}-fusion8">
   <link rel="stylesheet" href="/static/css/fusion/zabbix_monitor.css?v={{ version }}-fusion2">
   {% if server_inspect_fusion_ui %}
   <link rel="stylesheet" href="/static/css/fusion/server_inspect.css?v={{ version }}-fusion1">
@@ -13353,9 +13355,25 @@ function showPage(name) {
     else { mainEl.classList.remove('sql-editor-active'); }
     if (name === 'ai-assistant') { mainEl.classList.add('aias-active'); }
     else { mainEl.classList.remove('aias-active'); }
+    // AWR 在线生成页同样是三栏定高布局：必须把 .app-shell/.main/.content 整条
+    // flex 链锁成确定高度，否则 .awrg-list 的 overflow:auto 不触发（列表把整页
+    // 撑长，只能滚整个文档），侧栏与预览栏也会被列表高度拉伸而错位。
+    if (name === 'awr-gen') {
+      mainEl.classList.add('awr-gen-active');
+      document.documentElement.classList.add('awr-gen-fixed');
+      document.body.classList.add('awr-gen-fixed');
+    } else {
+      mainEl.classList.remove('awr-gen-active');
+      document.documentElement.classList.remove('awr-gen-fixed');
+      document.body.classList.remove('awr-gen-fixed');
+    }
     // 巡检历史页全窗口布局：筛选栏固定，仅报告列表滚动（对齐服务器巡检历史页做法）
     if (name === 'reports') { mainEl.classList.add('reports-active'); }
     else { mainEl.classList.remove('reports-active'); }
+    // 任务回溯 / 工具管理共用子页同样是定高布局：左栏列表与右栏详情各自内部滚动，
+    // 必须把 .main/.content 锁成确定高度，否则整页被详情撑长、只能滚整个文档。
+    if (name === 'ai-tasks' || name === 'tool-mgmt') { mainEl.classList.add('ai-shared-active'); }
+    else { mainEl.classList.remove('ai-shared-active'); }
     {% if server_inspect_fusion_ui %}
     // 巡检历史页全窗口布局：顶栏/筛选固定，仅卡片列表滚动
     if (name === 'server-history') { mainEl.classList.add('server-history-active'); }
@@ -26761,7 +26779,7 @@ function mkdirRemote() {
   {% endif %}
   <script src="/static/js/fusion/ai_tool_config.js?v={{ version }}-fusion2"></script>
   <script src="/static/js/fusion/ai_tasks.js?v={{ version }}-fusion4"></script>
-  <script src="/static/js/fusion/awr.js?v={{ version }}-fusion6"></script>
+  <script src="/static/js/fusion/awr.js?v={{ version }}-fusion8"></script>
   {% if server_inspect_fusion_ui %}
   <!-- 服务器巡检 / 巡检历史：配置表、执行步骤条、命令日志、历史卡片与详情模态 -->
   <script src="/static/js/fusion/server_inspect.js?v={{ version }}-fusion2"></script>
