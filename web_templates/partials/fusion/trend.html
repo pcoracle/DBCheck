@@ -3,136 +3,147 @@
   Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
   Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
 
-  历史趋势分析页面（融合自 DBCheck v2.6 page-trends）
-  只读：全部数据来自 GET /api/trend/analysis、/api/trend/metric/detail、
-        /api/trend/metric/raw，页面不做任何写操作。
+  历史趋势分析页面：结论横幅 / 异常项看板（出现条 + 复制修复 SQL）/
+  健康评分与风险项双轴图 / 指标总览表（迷你走势 + 变化幅度 + 行内展开大图）/
+  溯源抽屉（原数据 / 采集 SQL / 血缘 / 同点其他指标 + 报告跳转）。
+  只读：数据来自 GET /api/history_instances、/api/trend/analysis、
+        /api/trend/metric/detail、/api/trend/metric/raw，页面不做任何写操作。
 -->
-<div class="page" id="page-trend" data-page-node-id="zC6XcQUtPE5X7HkAVHlXvD">
-
-  <!-- 工具栏：实例 / 时间范围 / 刷新 / 查看趋势 -->
-  <div class="tr-toolbar">
-    <div class="tr-field tr-field-grow">
-      <label>选择数据库实例</label>
-      <select id="trend-instance-select" class="tr-select" onchange="trendSelectInstance()">
-        <option value="">-- 加载中 --</option>
-      </select>
-    </div>
-    <div class="tr-field tr-field-narrow">
-      <label>时间范围</label>
-      <select id="tr-days" class="tr-select" onchange="loadTrendData()">
-        <option value="0" selected>全部</option>
-        <option value="7">近 7 天</option>
-        <option value="30">近 30 天</option>
-        <option value="90">近 90 天</option>
-      </select>
-    </div>
-    <button class="tr-btn" onclick="loadTrendInstances()">↻ 刷新</button>
-    <button class="tr-btn tr-btn-primary" onclick="loadTrendData()">查看趋势</button>
-  </div>
-
-  <!-- 空态 -->
-  <div id="tr-empty" class="tr-empty">
-    <div class="tr-empty-icon">📉</div>
-    <div class="tr-empty-title">暂无可分析的历史趋势数据</div>
-    <div class="tr-empty-note">执行巡检后，同一个数据库（IP + 端口）的多次结果将在这里对比展示；数据不足时保持空态，不生成推测结论。</div>
-  </div>
-
-  <div id="tr-content" style="display:none">
-
-    <!-- ① 整体结论 -->
-    <div id="tr-verdict" class="tr-verdict"></div>
-
-    <!-- ② 概览统计 -->
-    <div class="tr-stats" id="tr-stats"></div>
-
-    <!-- ③ 异常项看板 -->
-    <section class="tr-card" id="tr-issue-card">
-      <div class="tr-panel-head">
-        <div class="tr-panel-title">🚨 异常项看板 <span id="tr-issue-count" class="tr-pill">0</span></div>
-        <div class="tr-legend">
-          <span class="tr-legend-item"><i class="tr-dot tr-dot-new"></i>新增</span>
-          <span class="tr-legend-item"><i class="tr-dot tr-dot-persistent"></i>持续</span>
-          <span class="tr-legend-item"><i class="tr-dot tr-dot-resolved"></i>已消除</span>
+<div class="page" id="page-trend">
+  <!-- 查询工具栏：单行（实例选择器 + 时间范围 + 查看趋势 + 刷新）。
+       页面名由全局顶栏 topbar-title 承担，这里不再重复卡片标题。
+       实例选择器是目录树形下拉面板：隐藏的原生 select 仍承载取值（value=实例序号），
+       loadTrendData / onTrendInstanceChange 的契约不变；面板按数据源目录分组，
+       每行显示巡检次数 / 最近健康 / 最近巡检时间。选中后下方信息条展开明细。 -->
+  <div class="card tr-query-card" style="margin-bottom:16px">
+    <div class="tr-querybar">
+      <div class="tr-inst-wrap">
+        <label class="tr-label" for="tr-inst-trigger">数据库实例</label>
+        <select id="trend-instance-select" class="ds-native-hidden" onchange="onTrendInstanceChange()" aria-hidden="true" tabindex="-1">
+          <option value="">-- 加载中 --</option>
+        </select>
+        <button type="button" class="tr-inst-trigger" id="tr-inst-trigger" onclick="trInstTogglePanel()" aria-haspopup="listbox" aria-expanded="false">
+          <span class="tr-inst-trigger-label" id="tr-inst-trigger-label">-- 加载中 --</span>
+          <span class="tr-inst-trigger-meta" id="tr-inst-trigger-meta"></span>
+          <span class="tr-inst-trigger-arrow"><svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 10l5 5 5-5z"/></svg></span>
+        </button>
+        <div class="tr-inst-panel" id="tr-inst-panel" hidden>
+          <div class="tr-inst-panel-head">
+            <div class="ds-search-wrap tr-inst-search-wrap">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+              <input id="tr-inst-search" class="ds-search" type="text" placeholder="搜索实例 / 目录 / 主机…" autocomplete="off">
+            </div>
+            <span class="tr-inst-panel-count" id="tr-inst-panel-count"></span>
+          </div>
+          <div class="tr-inst-panel-body">
+            <div class="tr-inst-tree" id="tr-inst-tree" role="tree" aria-label="数据源目录"></div>
+            <div class="tr-inst-main">
+              <div class="tr-inst-list-head">
+                <span>实例</span><span>目录</span><span>巡检次数</span><span>最近健康</span><span>最近巡检</span>
+              </div>
+              <div class="tr-inst-list" id="tr-inst-list" role="listbox" aria-label="数据库实例"></div>
+            </div>
+          </div>
         </div>
       </div>
-      <div id="tr-issue-list" class="tr-issue-list"></div>
-    </section>
-
-    <!-- ④ 健康评分与风险项数量（双轴） -->
-    <section class="tr-card" id="tr-hr-card">
-      <div class="tr-panel-head">
-        <div class="tr-panel-title">🩺 健康评分与风险项数量 <span id="tr-hr-latest" class="tr-pill"></span></div>
+      <div class="tr-range-wrap">
+        <label class="tr-label" for="trend-range-select">时间范围</label>
+        <select id="trend-range-select" class="tr-select" onchange="loadTrendData()">
+          <option value="0">全部</option>
+          <option value="7">近 7 天</option>
+          <option value="30">近 30 天</option>
+          <option value="90">近 90 天</option>
+        </select>
       </div>
-      <div class="tr-chart-box" id="tr-hr-chart"></div>
+      <button class="btn btn-primary tr-view-btn" onclick="loadTrendData()">查看趋势</button>
+      <button class="btn btn-ghost tr-refresh-btn" onclick="loadTrendInstances()" title="刷新实例列表" aria-label="刷新实例列表">↻</button>
+    </div>
+    <div class="tr-inst-info" id="tr-inst-info" hidden></div>
+  </div>
+
+  <div id="trend-result" style="display:none">
+    <!-- ① 结论横幅 -->
+    <div id="trend-verdict"></div>
+
+    <!-- ② 异常项看板 -->
+    <div class="card" id="trend-issue-card" style="display:none">
+      <div class="card-title"><span>🚨</span> <span>异常项看板</span>
+        <span class="badge" id="trend-issue-count"></span>
+      </div>
+      <div id="trend-issue-board"></div>
+    </div>
+
+    <!-- ③ 健康评分与风险项（合并双轴图） -->
+    <div class="card" id="trend-hr-card" style="display:none">
+      <div class="card-title"><span>🩺</span> <span>健康评分与风险项数量</span>
+        <span class="badge" id="trend-hr-latest"></span>
+      </div>
+      <div class="tr-chart-box tr-chart-tall"><canvas id="trend-hr-canvas"></canvas></div>
       <div class="tr-legend">
-        <span class="tr-legend-item"><i class="tr-legend-line" style="background:var(--sky)"></i>健康评分</span>
-        <span class="tr-legend-item"><i class="tr-legend-line" style="background:var(--danger)"></i>风险项数量</span>
+        <span><i style="background:#388bfd"></i><span>健康评分</span></span>
+        <span><i style="background:#f85149"></i><span>风险项数量</span></span>
       </div>
-    </section>
+    </div>
 
-    <!-- ⑤ 指标总览 -->
-    <section class="tr-card" id="tr-metric-card">
-      <div class="tr-panel-head">
-        <div class="tr-panel-title">📊 指标趋势 <span id="tr-metric-count" class="tr-pill">0</span></div>
+    <!-- ④ 指标总览（全量指标 + 变化可视化 + 多维筛选） -->
+    <div class="card" id="trend-metric-card" style="display:none">
+      <div class="card-title"><span>📊</span> <span>指标趋势</span>
+        <span class="badge" id="trend-metric-count"></span>
       </div>
-      <div class="tr-metric-toolbar">
-        <div class="tr-tabs" id="tr-filter-tabs">
-          <button class="tr-tab active" data-filter="all" onclick="trendSetFilter('all')">全部指标</button>
-          <button class="tr-tab" data-filter="anomaly" onclick="trendSetFilter('anomaly')">仅异常</button>
-          <button class="tr-tab" data-filter="changed" onclick="trendSetFilter('changed')">有变化</button>
-          <button class="tr-tab" data-filter="primary" onclick="trendSetFilter('primary')">仅主要</button>
+      <div class="tr-toolbar">
+        <div class="tr-seg" id="trend-metric-filter">
+          <button class="tr-seg-btn active" data-tr-filter="all">全部指标</button>
+          <button class="tr-seg-btn" data-tr-filter="anomaly">仅异常</button>
+          <button class="tr-seg-btn" data-tr-filter="changed">有变化</button>
+          <button class="tr-seg-btn" data-tr-filter="primary">仅主要</button>
         </div>
-        <input id="tr-metric-search" class="tr-input tr-search" placeholder="搜索指标名称…" oninput="trendRenderMetrics()">
-        <select id="tr-metric-group" class="tr-select tr-select-sm" onchange="trendSetGroup(this.value)">
+        <input id="trend-metric-search" class="tr-input tr-search" placeholder="搜索指标名称…">
+        <select id="trend-metric-group" class="tr-select tr-select-sm">
           <option value="">全部分组</option>
         </select>
-        <select id="tr-metric-coverage" class="tr-select tr-select-sm" onchange="trendSetCoverage(this.value)">
+        <select id="trend-metric-coverage" class="tr-select tr-select-sm">
           <option value="all">全部覆盖</option>
           <option value="full">仅完整采集</option>
         </select>
-        <select id="tr-metric-sort" class="tr-select tr-select-sm" onchange="trendSetSort(this.value)">
+        <select id="trend-metric-sort" class="tr-select tr-select-sm">
           <option value="smart">智能排序</option>
           <option value="change">按变化幅度</option>
           <option value="name">按名称</option>
         </select>
-        <button class="tr-btn tr-btn-mini" id="tr-metric-fold" onclick="trendToggleFold()">折叠分组</button>
+        <button class="btn btn-ghost tr-mini-btn" id="trend-metric-fold">折叠分组</button>
       </div>
-      <div id="tr-metric-list" class="tr-metric-list"></div>
-      <div id="tr-metric-note" class="tr-note" style="display:none"></div>
-    </section>
+      <div id="trend-metric-table" class="tr-table-wrap"></div>
+      <div id="trend-metric-note" class="tr-note" style="display:none"></div>
+    </div>
   </div>
 
-  <!-- 溯源抽屉：原数据 / 采集 SQL / 血缘 / 同点其他指标 -->
-  <div id="tr-drawer-mask" class="tr-drawer-mask" onclick="trendCloseDrawer(event)">
-    <aside class="tr-drawer" onclick="event.stopPropagation()">
-      <header class="tr-drawer-head">
-        <div class="tr-drawer-head-text">
-          <div id="tr-drawer-title" class="tr-drawer-title">指标溯源</div>
-          <div id="tr-drawer-sub" class="tr-drawer-sub"></div>
-        </div>
-        <button class="tr-icon-btn" onclick="trendCloseDrawer()" title="关闭">✕</button>
-      </header>
-      <div class="tr-drawer-tabs">
-        <button class="tr-tab active" data-tab="raw" onclick="trendDrawerTab('raw')">原数据</button>
-        <button class="tr-tab" data-tab="sql" onclick="trendDrawerTab('sql')">采集 SQL</button>
-        <button class="tr-tab" data-tab="lineage" onclick="trendDrawerTab('lineage')">血缘</button>
-        <button class="tr-tab" data-tab="same" onclick="trendDrawerTab('same')">同点其他指标</button>
+  <div id="trend-empty" class="card" style="text-align:center;padding:48px;color:var(--text-muted)">
+    <div style="font-size:40px;margin-bottom:12px">📉</div>
+    <div id="trend-empty-msg">执行巡检后，历史趋势数据将在这里显示</div>
+    <div style="font-size:12px;margin-top:8px">同一个数据库（相同 IP + 端口）的多次巡检结果将被对比展示</div>
+  </div>
+
+  <!-- ══ 溯源抽屉：指标 → 原数据（遮罩与抽屉为兄弟节点，document 级事件分发可达） ══ -->
+  <div class="tr-drawer-mask" id="tr-drawer-mask" onclick="trDrawerClose()"></div>
+  <div class="tr-drawer" id="tr-drawer" role="dialog" aria-modal="true" aria-labelledby="tr-drawer-title">
+    <div class="tr-drawer-head">
+      <div style="min-width:0">
+        <div class="tr-drawer-title" id="tr-drawer-title"></div>
+        <div class="tr-drawer-sub" id="tr-drawer-sub"></div>
       </div>
-      <div class="tr-drawer-body">
-        <div id="tr-raw-wrap">
-          <div id="tr-raw-meta" class="tr-raw-meta"></div>
-          <div id="tr-raw-table" class="tr-raw-table"></div>
-        </div>
-        <div id="tr-sql-wrap" style="display:none">
-          <pre id="tr-sql" class="tr-sql"></pre>
-        </div>
-        <div id="tr-lineage-wrap" style="display:none">
-          <div id="tr-lineage" class="tr-lineage"></div>
-        </div>
-        <div id="tr-same-wrap" style="display:none">
-          <div id="tr-same" class="tr-raw-table"></div>
-        </div>
-      </div>
-    </aside>
+      <button class="tr-drawer-close" id="tr-drawer-close" onclick="trDrawerClose()" aria-label="关闭" title="关闭">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="tr-drawer-tabs" id="tr-drawer-tabs">
+      <button class="tr-tab active" data-tr-tab="raw">原数据</button>
+      <button class="tr-tab" data-tr-tab="sql">采集 SQL</button>
+      <button class="tr-tab" data-tr-tab="chain">血缘</button>
+      <button class="tr-tab" data-tr-tab="same">同点其他指标</button>
+    </div>
+    <div class="tr-drawer-body" id="tr-drawer-body">
+      <div class="tr-loading">加载中…</div>
+    </div>
+    <div class="tr-drawer-foot" id="tr-drawer-foot"></div>
   </div>
 </div>
