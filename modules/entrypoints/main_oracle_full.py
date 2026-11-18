@@ -684,6 +684,89 @@ class OSCollector:
 
         return data
 
+
+def apply_zabbix_system_info(context, zabbix_info, source=''):
+    """用 Zabbix 采集结果覆盖 context 的 system_info（内存/CPU/磁盘）。
+
+    手动巡检（getData）与定时巡检（single_inspection）共用：指定了 Zabbix
+    目标主机时，系统资源直接取监控数据，不再要求目标主机另开 SSH 采集账号
+    （已被 Zabbix 纳管的 Windows 主机同样适用）。失败时如实说明原因，
+    保留已采集的 SSH/本地数据，不静默回退。
+
+    :return: (是否成功, 说明文本)
+    """
+    if context is None:
+        # 不能用 `if not context` —— 空 dict 也是 falsy，会把「已建立但还没填
+        # 数据的 context」误判成空而跳过覆盖
+        return False, 'context 为 None，跳过 Zabbix 覆盖'
+    if not zabbix_info or not (zabbix_info.get('host_ip') or zabbix_info.get('hostname')):
+        return False, ''
+    try:
+        from modules.zabbix.sysinfo import collect_zabbix_system_info
+        zb = collect_zabbix_system_info(
+            host_ip=zabbix_info.get('host_ip'), hostname=zabbix_info.get('hostname'))
+
+        context['_oracle_os_data'] = zb
+        # 两套结构都兼容地取：通用 memory.total_mb 与 Oracle 原始 mem_total_mb。
+        # SGA 占物理内存比例规则依赖 total_mb，缺了它就永远判定不了。
+        _zb_mem = zb.get('memory') if isinstance(zb.get('memory'), dict) else {}
+        _zb_cpu = zb.get('cpu') if isinstance(zb.get('cpu'), dict) else {}
+        context['system_info'] = {
+            'hostname': zb.get('hostname', ''),
+            'cpu': {
+                'usage_percent': _zb_cpu.get('usage_percent', zb.get('cpu_usage_pct')),
+                'model': _zb_cpu.get('Model name') or zb.get('cpu_model') or '',
+                'count': _zb_cpu.get('count') or zb.get('cpu_count') or '',
+            },
+            'memory': {
+                'usage_percent': _zb_mem.get('usage_percent', zb.get('mem_usage_pct')),
+                'total_mb': _zb_mem.get('total_mb', zb.get('mem_total_mb')),
+                'used_mb': _zb_mem.get('used_mb', zb.get('mem_used_mb')),
+            },
+            'disk_list': [{'mountpoint': d.get('mountpoint', '/'),
+                           'usage_percent': d.get('usage_percent')}
+                          for d in (zb.get('disk_list') or [])],
+            'disk_usage': zb.get('disk_usage', ''),
+        }
+
+        # 数值归一：Zabbix 个别模板可能返回 '95.2%' / '63.9 GB' 这类文本
+        def _num(v):
+            if v is None or v == '':
+                return None
+            if isinstance(v, (int, float)):
+                return float(v)
+            m = re.search(r'-?\d+(?:\.\d+)?', str(v))
+            return float(m.group(0)) if m else None
+
+        _si = context['system_info']
+        for _sec in ('cpu', 'memory'):
+            for _k in ('usage_percent', 'total_mb', 'used_mb', 'count'):
+                if _k in _si[_sec]:
+                    _si[_sec][_k] = _num(_si[_sec][_k])
+        for _d in _si['disk_list']:
+            _d['usage_percent'] = _num(_d.get('usage_percent'))
+        _has_metrics = (
+            _si['cpu'].get('usage_percent') is not None
+            or _si['memory'].get('usage_percent') is not None
+            or _si['memory'].get('total_mb') is not None
+            or any(d.get('usage_percent') is not None for d in _si['disk_list']))
+        if not _has_metrics:
+            print('  [WARN] Zabbix 主机 %s 未返回可用的内存/CPU/磁盘数值，相关规则将跳过判定'
+                  % (zabbix_info.get('hostname') or zabbix_info.get('host_ip')))
+            return False, 'Zabbix 返回空指标'
+
+        label = (zb.get('hostname') or zabbix_info.get('hostname')
+                 or zabbix_info.get('host_ip') or '?')
+        print('  [OK] 系统资源数据来源：Zabbix 主机 %s%s'
+              % (label, '（%s）' % source if source else ''))
+        return True, 'Zabbix:%s' % label
+    except Exception as exc:
+        msg = ('Zabbix 采集系统资源失败（%s）: %s'
+               % (zabbix_info.get('hostname') or zabbix_info.get('host_ip'), exc))
+        print('  [WARN] ' + msg)
+        return False, msg
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 #                    巡检数据采集 — Oracle 数据库层
 # ═══════════════════════════════════════════════════════════════════════════
@@ -3093,6 +3176,21 @@ def single_inspection(args):
         os_data = collector.collect()
         print(f"  ✅ {_t('oracle_log_local_ok')}")
 
+    # Zabbix 目标主机覆盖：向导当次指定 / 数据源持久化绑定的目标由调用方放进
+    # args（getData 与 run_oracle_full 两条链路口径一致）。命中则系统资源改由
+    # Zabbix 提供，覆盖上面 SSH/本地采集的结果；失败保留已采集数据并如实告警。
+    _zb_host = str(getattr(args, 'zabbix_host', '') or '').strip()
+    _zb_name = str(getattr(args, 'zabbix_hostname', '') or '').strip()
+    _zb_mode = str(getattr(args, 'syscollect_mode', '') or '').strip()
+    if _zb_mode == 'zabbix' and not (_zb_host or _zb_name):
+        print('  ⚠ 已选择 Zabbix 采集，但未指定主机 IP/主机名，跳过系统资源采集')
+    elif _zb_mode not in ('ssh', 'none') and (_zb_host or _zb_name):
+        _zb_ctx = {'_oracle_os_data': os_data}
+        apply_zabbix_system_info(
+            _zb_ctx, {'host_ip': _zb_host, 'hostname': _zb_name},
+            source=str(getattr(args, 'zabbix_source', '') or ''))
+        os_data = _zb_ctx.get('_oracle_os_data') or os_data
+
     # ── 4. 数据库层巡检（版本自适应）──────────────────────────────────────
     _ver_suffix = 'g' if ver_major in ('10', '11') else 'c'
     print(f"\n[{GREEN}4/6{RESET}] {_t('oracle_log_db_inspect')} (Oracle {ver_major}{_ver_suffix})...")
@@ -3410,6 +3508,10 @@ def single_inspection(args):
             'UNDO_BLOCKS': int(str(r[10])) if len(r) > 10 and r[10] is not None else 0,
         })
 
+    # Zabbix 采集结果带通用嵌套结构（cpu/memory/disk_list），SSH/本地采集只有
+    # Oracle 原始平铺字段；两套都兼容地取，内存 total_mb 供 SGA 占比规则判定。
+    _os_cpu = os_data.get('cpu') if isinstance(os_data.get('cpu'), dict) else {}
+    _os_mem = os_data.get('memory') if isinstance(os_data.get('memory'), dict) else {}
     context = {
         'ora_version': [{'BANNER': version_str}],
         'ora_tablespace': _ts_rows(check_results.get('表空间', {}).get('data_tablespaces', [])),
@@ -3421,9 +3523,14 @@ def single_inspection(args):
         'ora_long_trx': _ora_long_trx_fmt,
         'system_info': {
             'hostname': os_data.get('hostname', ''),
-            'cpu': {'usage_percent': os_data.get('cpu_usage_pct', 0)},
-            'memory': {'usage_percent': os_data.get('mem_usage_pct', os_data.get('mem_percent', 0))},
-            'disk_list': [{'mountpoint': d.get('mount', '/'), 'usage_percent': d.get('percent', 0)}
+            'cpu': {'usage_percent': _os_cpu.get('usage_percent', os_data.get('cpu_usage_pct', 0)),
+                    'model': _os_cpu.get('Model name') or os_data.get('cpu_model', ''),
+                    'count': _os_cpu.get('count') or os_data.get('cpu_count', '')},
+            'memory': {'usage_percent': _os_mem.get('usage_percent', os_data.get('mem_usage_pct', os_data.get('mem_percent', 0))),
+                       'total_mb': _os_mem.get('total_mb', os_data.get('mem_total_mb', '')),
+                       'used_mb': _os_mem.get('used_mb', os_data.get('mem_used_mb', ''))},
+            'disk_list': [{'mountpoint': d.get('mountpoint') or d.get('mount', '/'),
+                           'usage_percent': d.get('usage_percent', d.get('percent', 0))}
                           for d in os_data.get('disk_list', [])],
             'disk_usage': os_data.get('disk_usage', ''),
         },
@@ -4144,6 +4251,13 @@ def getData(host, port, user, password, **kwargs):
     args.ssh_user = ssh_info.get('user') if ssh_info else None
     args.ssh_pass = ssh_info.get('password') if ssh_info else None
     args.ssh_key = ssh_info.get('key_file') if ssh_info else None
+    # Zabbix 系统资源采集目标：巡检漏斗把当次指定 / 数据源绑定的目标注入
+    # ssh_info 透传袋，这里带给 single_inspection 的 OS 采集步骤（报告在
+    # single_inspection 内部渲染，必须在渲染前完成 Zabbix 覆盖）。
+    args.zabbix_host = (ssh_info.get('zabbix_host') or '') if ssh_info else ''
+    args.zabbix_hostname = (ssh_info.get('zabbix_hostname') or '') if ssh_info else ''
+    args.syscollect_mode = (ssh_info.get('syscollect_mode') or '') if ssh_info else ''
+    args.zabbix_source = (ssh_info.get('zabbix_source') or '') if ssh_info else ''
     args.output = None
     args.zip = False
     args.inspector = inspector_name

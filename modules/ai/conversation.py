@@ -396,11 +396,34 @@ def _poll_inspection_progress(task_id):
         new_entries = log[last_count:]
         last_count = len(log)
         if new_entries:
+            text = '\n'.join(new_entries[-6:])
             yield _event('tool_progress', tool='start_inspection', step=last_count, total=0,
-                         chapter='', query_key='',
-                         description='\n'.join(new_entries[-6:]), status='running')
+                         chapter='', query_key='', description=text, status='running')
+            # 阶段文案同时进消息正文（前端 inspect_progress 分支逐段追加）：
+            # 工具链里只显示当前一步，正文留下完整的阶段历史，刷新后不丢。
+            yield _event('inspect_progress', task_id=task_id, message=text)
         if task.get('status') in ('done', 'error'):
             break
+
+
+def _inspection_result_message(task):
+    """巡检收尾帧的正文：完成报评分/风险/报告，失败报原因（与源端 inspect_result 语义一致）。"""
+    context = task.get('context') or {}
+    name = task.get('datasource_name') or (task.get('db_info') or {}).get('name') or ''
+    if task.get('status') == 'error':
+        reason = task.get('error_msg') or task.get('error') or '未知错误'
+        return '⚠️ **%s** 巡检失败：%s' % (name or '目标库', reason)
+    score = task.get('health_score') or context.get('health_score')
+    risk_count = task.get('risk_count') or context.get('risk_count')
+    report = task.get('report_name') or task.get('report_file') or ''
+    parts = ['✅ **%s** 巡检完成' % (name or '目标库')]
+    if score is not None:
+        parts.append('健康评分 **%s**' % score)
+    if risk_count is not None:
+        parts.append('风险项 **%s** 个' % risk_count)
+    if report:
+        parts.append('报告已生成（%s），可在「巡检报告」页查看' % report)
+    return ' · '.join(parts)
 
 
 def run_tool_call(name, arguments, step_index, total_steps, round_count=1):
@@ -423,8 +446,24 @@ def run_tool_call(name, arguments, step_index, total_steps, round_count=1):
     if name == 'start_inspection' and status == 'success':
         task_id = (result_data or {}).get('task_id') if isinstance(result_data, dict) else ''
         if task_id:
+            # 源端契约：任务启动即发 inspect_start（前端按 message 兜底分支渲染进正文），
+            # 轮询期间发 inspect_progress，收尾发 inspect_result。缺了这三帧，
+            # 消息正文里就只有工具链，没有「已启动/阶段/完成」文案。
+            yield _event('inspect_start', task_id=task_id,
+                         message='🔍 已启动 **%s** 的巡检任务...' % (
+                             result_data.get('datasource') or result_data.get('db_type') or ''),
+                         db_name=result_data.get('datasource') or '',
+                         host=result_data.get('host') or '',
+                         port=result_data.get('port') or '',
+                         db_type=result_data.get('db_type') or '')
             for progress_event in _poll_inspection_progress(task_id):
                 yield progress_event
+            from modules.web.app import tasks as _tasks
+            final_task = _tasks.get(task_id) or {}
+            if final_task.get('status') in ('done', 'error'):
+                yield _event('inspect_result', task_id=task_id, scope='all',
+                             db_name=result_data.get('datasource') or '',
+                             message=_inspection_result_message(final_task))
     elapsed_ms = int((time.time() - started_at) * 1000)
     yield _event('tool_result', tool=name, result=result_data, status=status,
                  duration_ms=elapsed_ms, step=step_index, round=round_count)
@@ -585,8 +624,12 @@ def _stream_detection(prompt, system, idle_timeout, outcome):
 # ══════════════════════════════════════════════════════════════
 
 def stream_conversation(message, session_id='', chat_context=None, confirmed_tool_calls=None,
-                        selected_action='', understanding=''):
-    """一次提问的完整对话流；逐事件 yield dict，由路由层转成 SSE 帧。"""
+                        selected_action='', understanding='', owner=''):
+    """一次提问的完整对话流；逐事件 yield dict，由路由层转成 SSE 帧。
+
+    ``owner`` 由路由层在请求线程里解析好传入（本函数跑在后台线程，
+    拿不到 Flask session），任务历史按它落归属。
+    """
     _reset_model_silence()          # 每次提问重新开始，不沿用上一轮「模型没响应」的判断
     chat_context = dict(chat_context or {})
     message = str(message or '').strip()
@@ -605,7 +648,7 @@ def stream_conversation(message, session_id='', chat_context=None, confirmed_too
     try:
         task_id = store.create_task(message, datasource=chat_context.get('datasource_name') or '',
                                     db_type=chat_context.get('db_type') or '',
-                                    session_id=session_id)
+                                    session_id=session_id, owner=owner)
     except Exception:
         pass
     yield _event('start', task_id=task_id)

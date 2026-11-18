@@ -75,6 +75,42 @@ def _require_login():
     return None
 
 
+def _owner_identity():
+    """当前请求的归属身份：``(owner 名, 是否管理员)``。
+
+    owner 优先用 RBAC 主体的 label（username），查不到人时回退登录 session 里的
+    username / user_id（老部署、JWT 直登、脚本测试没有 RBAC 记录也能用）。
+    管理员判定与全站一致：RBAC 主体或登录时写入的 ``is_admin`` / ``user_roles``。
+    会话/任务的归属在创建时落列、之后不可变；历史无主行仅管理员可见。
+    """
+    from modules.access import principal_from_session
+    try:
+        principal = principal_from_session()
+    except Exception:
+        principal = None
+    session_admin = bool(session.get('is_admin')) or 'admin' in (session.get('user_roles') or [])
+    if principal is not None and not principal.is_anonymous:
+        return principal.label(), bool(principal.is_admin) or session_admin
+    name = str(session.get('username') or session.get('user_id') or '')
+    return name, session_admin
+
+
+def _owner_scope():
+    """列表过滤参数：管理员 None（全量，含历史无主行），其他人只自己的。"""
+    owner, is_admin = _owner_identity()
+    return None if is_admin else owner
+
+
+def _guard_record_owner(row, not_found='记录不存在'):
+    """单条记录的归属闸：不存在 404；非本人且非管理员 403（无主行同样仅管理员）。"""
+    if not row:
+        return jsonify({'ok': False, 'error': not_found}), 404
+    owner, is_admin = _owner_identity()
+    if is_admin or str(row.get('owner') or '') == owner:
+        return None
+    return jsonify({'ok': False, 'error': '无权访问该记录'}), 403
+
+
 def _body():
     return request.get_json(silent=True) or {}
 
@@ -164,10 +200,15 @@ def assistant_stream():
     if not message:
         return jsonify({'ok': False, 'error': '消息不能为空'}), 400
     session_id = _text(payload.get('session_id'), 60)
+    owner, is_admin = _owner_identity()
     if session_id:
         # 会话 id 由调用方给定，服务端按这个 id 补记录；查不到就 404 会让
         # 「自己生成 id 的客户端」一问就失败，看起来像助手坏了。
-        store.ensure_session(session_id)
+        # 但已存在的会话只有本人/管理员能续写，别人的会话直接 403。
+        existing = store.get_session(session_id)
+        if existing and not is_admin and str(existing.get('owner') or '') != owner:
+            return jsonify({'ok': False, 'error': '无权访问该会话'}), 403
+        store.ensure_session(session_id, owner=owner)
 
     chat_context = _chat_context_from(payload)
     explicit_datasource = _text(payload.get('datasource_name'), 200)
@@ -194,7 +235,7 @@ def assistant_stream():
             for event in conversation.stream_conversation(
                     message, session_id=session_id, chat_context=chat_context,
                     confirmed_tool_calls=confirmed, selected_action=selected_action,
-                    understanding=understanding):
+                    understanding=understanding, owner=owner):
                 events.put(event)
                 if event.get('type') == 'start':
                     box['task_id'] = event.get('task_id') or box['task_id']
@@ -253,6 +294,12 @@ def assistant_chat():
     if not message:
         return jsonify({'ok': False, 'error': '消息不能为空'}), 400
     session_id = _text(payload.get('session_id'), 60)
+    owner, is_admin = _owner_identity()
+    if session_id:
+        existing = store.get_session(session_id)
+        if existing and not is_admin and str(existing.get('owner') or '') != owner:
+            return jsonify({'ok': False, 'error': '无权访问该会话'}), 403
+        store.ensure_session(session_id, owner=owner)
     chat_context = _chat_context_from(payload)
     explicit_datasource = _text(payload.get('datasource_name'), 200)
     if explicit_datasource:
@@ -272,7 +319,8 @@ def assistant_chat():
                 message, session_id=session_id, chat_context=chat_context,
                 confirmed_tool_calls=payload.get('confirmed_tool_calls'),
                 selected_action=_text(payload.get('selected_action'), 40),
-                understanding=_text(payload.get('understanding'), 2000)):
+                understanding=_text(payload.get('understanding'), 2000),
+                owner=owner):
             kind = event.get('type')
             if kind == 'start':
                 task_id = event.get('task_id') or ''
@@ -302,6 +350,13 @@ def assistant_stop():
     if denied:
         return denied
     session_id = _text(_body().get('session_id'), 60) or 'default'
+    if session_id != 'default':
+        # 停止位按会话 id 索引：不校验归属的话，猜到别人的 id 就能掐断别人的流。
+        existing = store.get_session(session_id)
+        if existing:
+            owner, is_admin = _owner_identity()
+            if not is_admin and str(existing.get('owner') or '') != owner:
+                return jsonify({'ok': False, 'error': '无权访问该会话'}), 403
     _request_stop(session_id)
     return jsonify({'ok': True, 'stopped': True})
 
@@ -337,7 +392,8 @@ def list_tasks():
             limit=limit, offset=offset,
             datasource=_text(request.args.get('datasource'), 200),
             status=_text(request.args.get('status'), 20),
-            keyword=_text(request.args.get('keyword'), 200))
+            keyword=_text(request.args.get('keyword'), 200),
+            owner=_owner_scope())
         return jsonify({'ok': True, **data})
     except Exception as failure:
         return _json_error(failure)
@@ -349,7 +405,7 @@ def task_stats():
     if denied:
         return denied
     try:
-        return jsonify({'ok': True, 'stats': store.get_stats()})
+        return jsonify({'ok': True, 'stats': store.get_stats(owner=_owner_scope())})
     except Exception as failure:
         return _json_error(failure)
 
@@ -360,8 +416,9 @@ def get_task(task_id):
     if denied:
         return denied
     task = store.get_task(task_id)
-    if not task:
-        return jsonify({'ok': False, 'error': '任务不存在'}), 404
+    denied = _guard_record_owner(task, '任务不存在')
+    if denied:
+        return denied
     return jsonify({'ok': True, 'task': task})
 
 
@@ -374,6 +431,9 @@ def rename_task(task_id):
     title = _text(_body().get('title'), 200)
     if not title:
         return jsonify({'ok': False, 'error': '标题不能为空'}), 400
+    denied = _guard_record_owner(store.get_task(task_id), '任务不存在')
+    if denied:
+        return denied
     if not store.rename_task(task_id, title):
         return jsonify({'ok': False, 'error': '任务不存在'}), 404
     return jsonify({'ok': True})
@@ -382,6 +442,9 @@ def rename_task(task_id):
 @ai_task_bp.route('/<task_id>', methods=['DELETE'])
 def delete_task(task_id):
     denied = _require_login()
+    if denied:
+        return denied
+    denied = _guard_record_owner(store.get_task(task_id), '任务不存在')
     if denied:
         return denied
     if not store.delete_task(task_id):
@@ -405,7 +468,7 @@ def list_sessions():
         return denied
     try:
         limit = min(int(request.args.get('limit', 50) or 50), 200)
-        sessions = store.list_sessions(limit=limit)
+        sessions = store.list_sessions(limit=limit, owner=_owner_scope())
         if (request.args.get('full') or '').lower() in ('1', 'true', 'yes'):
             for item in sessions:
                 item['messages'] = store.list_messages(item.get('id'), limit=400)
@@ -423,7 +486,8 @@ def sync_sessions():
     append 语义会留下删不掉的旧行。这里按会话整段替换，幂等、可重放。
 
     鉴权与写范围：仍要求登录；只处理请求里出现的会话（不删服务端多出来的历史），
-    避免「一个人清缓存把别人的会话删了」。
+    避免「一个人清缓存把别人的会话删了」。归属闸：已存在的会话只有本人或管理员
+    能覆盖写，别人的会话整条跳过（计入 ``skipped``），不改归属、不碰消息。
     """
     denied = _require_login()
     if denied:
@@ -432,12 +496,18 @@ def sync_sessions():
     sessions = payload.get('sessions')
     if not isinstance(sessions, list):
         return jsonify({'ok': False, 'error': 'sessions 必须是数组'}), 400
+    owner, is_admin = _owner_identity()
     saved = 0
+    skipped = 0
     for item in sessions[:40]:
         if not isinstance(item, dict):
             continue
         session_id = _text(item.get('id'), 60)
         if not session_id:
+            continue
+        existing = store.get_session(session_id)
+        if existing and not is_admin and str(existing.get('owner') or '') != owner:
+            skipped += 1
             continue
         # 会话可以挂多个数据源（批量执行选中的那一组）：只落单个的话，
         # 重新登录后多源会话会退化成单源，批量执行的目标就丢了。
@@ -447,7 +517,8 @@ def sync_sessions():
         store.upsert_session(session_id, title=_text(item.get('title'), 100),
                              datasource=_text(item.get('datasource') or
                                               item.get('currentDatasource'), 200),
-                             datasources=[_text(name, 200) for name in listed])
+                             datasources=[_text(name, 200) for name in listed],
+                             created_at=item.get('createdAt'), owner=owner)
         messages = item.get('messages')
         if isinstance(messages, list):
             rows = []
@@ -462,8 +533,8 @@ def sync_sessions():
                                  task_id=_text(message.get('task_id'), 40)))
             store.replace_messages(session_id, rows)
         saved += 1
-    return jsonify({'ok': True, 'saved': saved,
-                    'sessions': store.list_sessions(limit=60)})
+    return jsonify({'ok': True, 'saved': saved, 'skipped': skipped,
+                    'sessions': store.list_sessions(limit=60, owner=_owner_scope())})
 
 
 @ai_session_bp.route('', methods=['POST'])
@@ -473,8 +544,10 @@ def create_session():
         return denied
     payload = _body()
     try:
+        owner, _is_admin = _owner_identity()
         session_id = store.create_session(title=_text(payload.get('title'), 100),
-                                          datasource=_text(payload.get('datasource'), 200))
+                                          datasource=_text(payload.get('datasource'), 200),
+                                          owner=owner)
         return jsonify({'ok': True, 'session': store.get_session(session_id)})
     except Exception as failure:
         return _json_error(failure)
@@ -483,6 +556,9 @@ def create_session():
 @ai_session_bp.route('/<session_id>', methods=['DELETE'])
 def delete_session(session_id):
     denied = _require_login()
+    if denied:
+        return denied
+    denied = _guard_record_owner(store.get_session(session_id), '会话不存在')
     if denied:
         return denied
     if not store.delete_session(session_id):
@@ -499,8 +575,10 @@ def rename_session(session_id):
     title = _text(_body().get('title'), 100)
     if not title:
         return jsonify({'ok': False, 'error': '标题不能为空'}), 400
-    if not store.get_session(session_id):
-        return jsonify({'ok': False, 'error': '会话不存在'}), 404
+    session_row = store.get_session(session_id)
+    denied = _guard_record_owner(session_row, '会话不存在')
+    if denied:
+        return denied
     store.touch_session(session_id, title=title)
     return jsonify({'ok': True, 'session': store.get_session(session_id)})
 
@@ -510,8 +588,9 @@ def list_messages(session_id):
     denied = _require_login()
     if denied:
         return denied
-    if not store.get_session(session_id):
-        return jsonify({'ok': False, 'error': '会话不存在'}), 404
+    denied = _guard_record_owner(store.get_session(session_id), '会话不存在')
+    if denied:
+        return denied
     # 上限与 /sync 的写入条数一致（400）：这里默认 200 的话，长会话写进去读不回来，
     # 表现同样是「历史没了」。
     return jsonify({'ok': True, 'messages': store.list_messages(session_id, limit=400)})
@@ -523,8 +602,9 @@ def append_message(session_id):
     denied = _require_login()
     if denied:
         return denied
-    if not store.get_session(session_id):
-        return jsonify({'ok': False, 'error': '会话不存在'}), 404
+    denied = _guard_record_owner(store.get_session(session_id), '会话不存在')
+    if denied:
+        return denied
     payload = _body()
     # 助手的回合允许 'ai' / 'assistant' 两种写法（助手页与任务流历史上各用一种），
     # 统一归一后落库；这里不再用白名单拒绝，否则前端补写 AI 回复会整条丢掉。
@@ -542,12 +622,14 @@ def clear_messages(session_id):
     denied = _require_login()
     if denied:
         return denied
-    if not store.get_session(session_id):
-        return jsonify({'ok': False, 'error': '会话不存在'}), 404
+    denied = _guard_record_owner(store.get_session(session_id), '会话不存在')
+    if denied:
+        return denied
     if not store.delete_session(session_id):
         return jsonify({'ok': False, 'error': '清空失败'}), 500
     sql_vars.clear(session_id)
-    new_id = store.create_session(title='新对话')
+    owner, _is_admin = _owner_identity()
+    new_id = store.create_session(title='新对话', owner=owner)
     return jsonify({'ok': True, 'session': store.get_session(new_id)})
 
 
@@ -631,7 +713,13 @@ def delete_ai_tool(name):
 # ══════════════════════════════════════════════════════════════
 
 def _resolve_datasource(payload):
-    """接口层的定位顺序：datasource_name > datasource_id/ds_id > instance_id。"""
+    """接口层的定位顺序：datasource_name > datasource_id/ds_id > instance_id。
+
+    返回值恒为二元组 ``(record, failure)``：failure 本身是 ``(响应, 状态码)``，
+    调用方 ``if failure: return failure`` 直接交回 Flask。
+    一个数据源都没指定时回退到当前用户可见的第一个启用数据源（与源系统一致），
+    可见清单为空才报错 —— 新会话第一轮直接点「执行SQL」不该吃到 500。
+    """
     name = _text(payload.get('datasource_name'), 200)
     identifier = _text(payload.get('datasource_id') or payload.get('ds_id')
                        or payload.get('instance_id'), 60)
@@ -639,14 +727,18 @@ def _resolve_datasource(payload):
         record, status = ds_access.find_datasource(name)
         if status == 'exact' and record:
             return record, None
-        return None, jsonify({'ok': False, 'error': '未找到数据源「%s」%s' % (
+        return None, (jsonify({'ok': False, 'error': '未找到数据源「%s」%s' % (
             name, '（存在多个同名/相近数据源，请指定完整名称）' if status == 'ambiguous' else ''),
-            'ambiguous': status == 'ambiguous'}, 404)
+            'ambiguous': status == 'ambiguous'}), 404)
     if identifier:
         record, status = ds_access.find_datasource(identifier)
         if status == 'exact' and record:
             return record, None
-    return None, jsonify({'ok': False, 'error': '缺少数据源'}), 400
+        return None, (jsonify({'ok': False, 'error': '未找到数据源「%s」' % identifier}), 404)
+    for row in ds_access.visible_datasources():
+        if row.get('enabled', True):
+            return row, None
+    return None, (jsonify({'ok': False, 'error': '暂无可用数据源，请先添加数据源或在会话中指定'}), 400)
 
 
 @ai_assistant_bp.route('/execute-sql', methods=['POST'])
@@ -954,23 +1046,28 @@ def assistant_dialect_status():
 
 @ai_assistant_bp.route('/datasource-versions', methods=['GET'])
 def assistant_datasource_versions():
-    """版本一览（实探，无需手工配置）。``?refresh=1&name=xxx`` 同步重探单个数据源。"""
+    """版本一览（实探，无需手工配置）。
+
+    ``?refresh=1`` 同步重探**全部**可见数据源（界面「重新探测」）；
+    ``?refresh=1&name=xxx`` 只重探指定的那一个。默认走缓存，绝不让界面等连接。
+    """
     denied = _require_login()
     if denied:
         return denied
     try:
         records = ds_access.visible_datasources()
+        refresh = bool(request.args.get('refresh'))
         name = _text(request.args.get('name'), 200)
-        if request.args.get('refresh') and name:
+        if refresh and name:
             record, status = ds_access.find_datasource(name)
             if status != 'exact' or not record:
                 return jsonify({'ok': False, 'error': '未找到数据源'}), 404
-            datasource_versions.refresh(record)
             records = [record]
-        rows = datasource_versions.dialect_status(records)
+        rows = datasource_versions.dialect_status(records, force=refresh)
         return jsonify({'ok': True, 'count': len(rows),
                         'summary': datasource_versions.summarize_status(rows),
-                        'datasources': rows, 'refreshed': bool(request.args.get('refresh'))})
+                        'summary_stats': datasource_versions.summary_stats(rows),
+                        'datasources': rows, 'refreshed': refresh})
     except Exception as failure:
         return _json_error(failure)
 
@@ -1175,42 +1272,44 @@ def assistant_inspection_task(task_id):
 
 def _restore_inspection_from_history(task_id):
     try:
-        from modules.inspection import dal
-    except Exception:
-        return None
-    getter = getattr(dal, 'get_inspection_by_task_id', None)
-    if not callable(getter):
-        return None
-    try:
-        row = getter(task_id)
+        from modules.pro import get_instance_manager
+        row = get_instance_manager().get_inspection_by_task_id(task_id)
     except Exception:
         return None
     if not row:
         return None
-    return {'ok': True, 'task_id': task_id, 'status': row.get('status') or 'done',
+    return {'ok': True, 'task_id': task_id, 'status': 'done',
             'log': [], 'offset': 0, 'source': 'database', 'restored_from_db': True,
-            'datasource': row.get('instance_name') or row.get('db_name') or '',
+            'datasource': row.get('instance_name') or '',
             'db_type': row.get('db_type') or '',
-            'started_at': row.get('created_at') or row.get('inspection_time') or '',
+            'started_at': row.get('inspect_time') or row.get('created_at') or '',
             'report_file': row.get('report_path') or '',
             'health_score': row.get('health_score'),
             'risk_count': row.get('risk_count'),
             'risk_level': row.get('risk_level') or '',
-            'error_msg': row.get('error_msg') or ''}
+            'error_msg': ''}
 
 
 @ai_assistant_bp.route('/tasks', methods=['GET'])
 def assistant_inspection_tasks():
-    """助手发起过的巡检任务：内存中的 + 历史库里 trigger_type=ai_assistant 的。"""
+    """助手发起过的巡检任务：内存中的 + 历史库里 trigger_type=ai_assistant 的。
+
+    服务重启会带走内存任务态：归档任务必须从历史库回读（带健康分/风险项），
+    否则重启后弹窗永远是「暂无 AI 巡检任务记录」。同一 task_id 内存优先
+    （运行中状态与实时日志比归档行新）。
+    """
     denied = _require_login()
     if denied:
         return denied
     from modules.web.app import tasks
     rows = []
+    seen_ids = set()
     for task_id, task in list(tasks.items()):
         if (task.get('trigger_type') or '') != 'ai_assistant':
             continue
         log = list(task.get('log') or [])
+        seen_ids.add(task_id)
+        context = task.get('context') or {}
         rows.append({'task_id': task_id, 'status': task.get('status') or 'running',
                      'source': 'memory',
                      'datasource': task.get('datasource_name')
@@ -1219,8 +1318,32 @@ def assistant_inspection_tasks():
                      'started_at': task.get('started_at') or '',
                      'report_file': task.get('report_file') or '',
                      'report_name': task.get('report_name') or '',
+                     'health_score': task.get('health_score') or context.get('health_score'),
+                     'risk_count': task.get('risk_count') or context.get('risk_count'),
                      'error_msg': task.get('error_msg') or '',
                      'recent_logs': log[-3:]})
+    try:
+        from modules.pro import get_instance_manager
+        history = get_instance_manager().get_inspection_history(
+            limit=50, trigger_type='ai_assistant')
+    except Exception:
+        history = []
+    for item in history:
+        task_id = item.get('task_id') or ''
+        if task_id and task_id in seen_ids:
+            continue
+        report_path = item.get('report_path') or ''
+        rows.append({'task_id': task_id, 'status': 'done', 'source': 'database',
+                     'datasource': item.get('instance_name') or '',
+                     'db_type': item.get('db_type') or '',
+                     'started_at': item.get('inspect_time') or '',
+                     'report_file': report_path,
+                     'report_name': report_path.replace('\\', '/').split('/')[-1],
+                     'health_score': item.get('health_score'),
+                     'risk_count': item.get('risk_count'),
+                     'risk_level': item.get('risk_level') or '',
+                     'restored_from_db': True,
+                     'error_msg': '', 'recent_logs': []})
     rows.sort(key=lambda item: item.get('started_at') or '', reverse=True)
     return jsonify({'ok': True, 'tasks': rows[:100], 'total': len(rows)})
 

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
 # Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
+
 """Zabbix 全局连接配置。
 
 存放在 ``dbc_config.json`` 的 ``zabbix_monitor.zabbix`` 节点，属于整机级配置：
@@ -114,6 +115,106 @@ def save_zabbix_config(zabbix_cfg):
     except Exception as e:
         print('保存 Zabbix 配置失败: %s' % e)
         return False
+
+
+# ─── 手工主机清单（IP + 主机名 + 备注）─────────────────────────────────
+# 监控页左栏列的是这份本地清单，不是 Zabbix 侧的全量主机：用户先登记要盯的
+# 机器，选中后再按 IP/主机名匹配到 Zabbix 主机取数。清单与连接配置同节点存放，
+# 重启不丢；folder_id 只做透传保存，MVP 不提供文件夹树。
+
+def get_server_list():
+    """获取手工主机清单（[{id, ip, hostname, remark, folder_id}]）。"""
+    config = _read_config_file() or {}
+    node = config.get(CONFIG_NODE)
+    if not isinstance(node, dict):
+        return []
+    servers = node.get('servers', [])
+    return servers if isinstance(servers, list) else []
+
+
+def _save_servers(servers):
+    """把清单写回 zabbix_monitor 节点，只动 servers 键。"""
+    config = _read_config_file()
+    if config is None:
+        # 与 save_zabbix_config 同一道护栏：读不出来就不写，避免清空其它节点
+        print('dbc_config.json 读取失败，已放弃保存 Zabbix 主机清单以避免破坏其他配置节点')
+        return False
+    node = config.get(CONFIG_NODE)
+    if not isinstance(node, dict):
+        node = {}
+    node['servers'] = servers
+    config[CONFIG_NODE] = node
+    try:
+        _atomic_write_json(CONFIG_FILE, config)
+        return True
+    except Exception as e:
+        print('保存服务器列表失败: %s' % e)
+        return False
+
+
+def add_servers(items):
+    """批量登记主机，items: [{ip, hostname, remark, folder_id}]，返回新增列表。
+
+    按 IP 去重：同一台机器重复登记会在左栏出现两条指向同一主机的记录。
+    id 取现有最大值 +1，删除后不复用旧号，避免前端缓存的选中项串到别的机器。
+    """
+    servers = get_server_list()
+    existing_ips = {s.get('ip') for s in servers}
+    added = []
+    max_id = 0
+    for s in servers:
+        try:
+            max_id = max(max_id, int(s.get('id', 0)))
+        except (TypeError, ValueError):
+            pass
+    for item in items:
+        ip = (item.get('ip') or '').strip()
+        if not ip:
+            continue
+        if ip in existing_ips:
+            continue
+        max_id += 1
+        new = {
+            'id': max_id,
+            'ip': ip,
+            'hostname': (item.get('hostname') or '').strip(),
+            'remark': (item.get('remark') or '').strip(),
+            'folder_id': item.get('folder_id') or None,
+        }
+        servers.append(new)
+        existing_ips.add(ip)
+        added.append(new)
+    if added:
+        _save_servers(servers)
+    return added
+
+
+def update_server(sid, ip=None, hostname=None, remark=None, folder_id=None):
+    """修改清单条目（IP / 主机名 / 备注 / 所属文件夹），返回更新后的记录或 None。"""
+    servers = get_server_list()
+    for s in servers:
+        if str(s.get('id')) == str(sid):
+            if ip is not None:
+                s['ip'] = (ip or '').strip()
+            if hostname is not None:
+                s['hostname'] = (hostname or '').strip()
+            if remark is not None:
+                s['remark'] = (remark or '').strip()
+            if folder_id is not None:
+                s['folder_id'] = folder_id or None
+            _save_servers(servers)
+            return s
+    return None
+
+
+def delete_server(sid):
+    """从清单移除一台主机，返回是否删除成功。"""
+    servers = get_server_list()
+    new_servers = [s for s in servers if str(s.get('id')) != str(sid)]
+    if len(new_servers) != len(servers):
+        _save_servers(new_servers)
+        return True
+    return False
 
 
 def is_configured(cfg=None):

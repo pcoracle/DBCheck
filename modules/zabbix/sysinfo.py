@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
 # Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
+
 """从 Zabbix 采集目标主机的系统资源信息，供巡检报告复用。
 
 巡检向导第 3 步「系统资源采集」的三条路径：

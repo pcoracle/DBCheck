@@ -298,12 +298,15 @@ def version_context(datasources):
                   '（语法、内置视图/函数以对应版本为准，不要假设版本）。\n\n')
 
 
-def dialect_status(datasources):
-    """结构化版本状态，供前端 SQL 块/工具栏的版本徽标使用。"""
+def dialect_status(datasources, force=False):
+    """结构化版本状态，供前端 SQL 块/工具栏的版本徽标使用。
+
+    ``force=True`` 时逐个同步实探（界面「重新探测」），否则只读缓存、后台补探。
+    """
     from modules.ai import dialect
     rows = []
     for datasource in datasources:
-        info = get_version(datasource)
+        info = get_version(datasource, force=force)
         version = info.get('version') or ''
         family, major, minor = dialect.parse_version(version, info.get('db_type') or '')
         rows.append({
@@ -315,6 +318,9 @@ def dialect_status(datasources):
             'dir_path': datasource.get('dir_path') or '未分配',
             # 版本弹窗的「📁 目录 · host:port · 库」这一行要用，前端自己拼不如后端给全
             'database': datasource.get('database') or datasource.get('service_name') or '',
+            'service_name': datasource.get('service_name') or '',
+            'labels': list(datasource.get('labels') or []),
+            'group': datasource.get('group') or '',
             'version': version,
             'family': family or '',
             'major': major,
@@ -331,19 +337,21 @@ def dialect_status(datasources):
 
 
 def summarize_status(rows):
+    """一句话摘要：按版本标签分桶（Oracle 19c ×2 · MySQL 8 ×1），一眼看出配了哪些版本。"""
+    buckets = {}
+    for row in rows:
+        key = row.get('label') or ('%s 未知版本' % (row.get('db_type') or '未知类型'))
+        buckets[key] = buckets.get(key, 0) + 1
+    text = ' · '.join('%s ×%d' % (key, count)
+                      for key, count in sorted(buckets.items(), key=lambda item: -item[1]))
+    return text or '未配置任何启用中的数据源'
+
+
+def summary_stats(rows):
+    """结构化计数，供前端「共 N 个 · 已确认 X · 未确认 Y」展示。"""
     total = len(rows)
     confirmed = sum(1 for row in rows if row.get('confirmed'))
-    failed = total - confirmed
-    return {'total': total, 'confirmed': confirmed, 'failed': failed,
-            'by_family': _count_families(rows)}
-
-
-def _count_families(rows):
-    counts = {}
-    for row in rows:
-        family = row.get('family') or 'unknown'
-        counts[family] = counts.get(family, 0) + 1
-    return counts
+    return {'total': total, 'confirmed': confirmed, 'failed': total - confirmed}
 
 
 def invalidate(datasource_id):

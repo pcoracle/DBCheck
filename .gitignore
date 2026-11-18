@@ -19,6 +19,8 @@ probe*.py
 history.json
 db_history.db
 instances.json
+# 服务器巡检 SSH 快捷配置（含加密后的密码/私钥口令）——绝不能进版本库
+ssh_profiles.json
 .env
 notifier_config.json
 scheduler_jobs.json

@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS ai_task_history (
     final_analysis TEXT,
     round_count INTEGER DEFAULT 0,
     elapsed_ms INTEGER DEFAULT 0,
+    owner TEXT DEFAULT '',
     created_at TEXT,
     finished_at TEXT
 );
@@ -51,6 +52,7 @@ CREATE TABLE IF NOT EXISTS ai_chat_sessions (
     id TEXT PRIMARY KEY,
     title TEXT,
     datasource TEXT,
+    owner TEXT DEFAULT '',
     created_at TEXT,
     updated_at TEXT
 );
@@ -78,11 +80,13 @@ _EXTRA_COLUMNS = {
     'ai_task_history': {
         'session_id': 'TEXT', 'title': 'TEXT', 'thinking_content': 'TEXT',
         'round_count': 'INTEGER DEFAULT 0',
+        # 归属：创建时落当前用户，之后不可变；历史无主行（''）仅管理员可见。
+        'owner': "TEXT DEFAULT ''",
     },
     'ai_chat_messages': {'summary': 'TEXT', 'meta': 'TEXT'},
     # 会话可以挂多个数据源（批量执行选中的那一组）。只存单个 datasource 的话，
     # 重新登录后多源会话会退化成单源，批量执行的目标就丢了。
-    'ai_chat_sessions': {'datasources': 'TEXT'},
+    'ai_chat_sessions': {'datasources': 'TEXT', 'owner': "TEXT DEFAULT ''"},
 }
 
 
@@ -193,8 +197,8 @@ def init_db():
     _init_done = True
 
 
-def create_task(user_message, datasource='', db_type='', session_id=''):
-    """新建一条任务，返回 task_id。"""
+def create_task(user_message, datasource='', db_type='', session_id='', owner=''):
+    """新建一条任务，返回 task_id。``owner`` 创建时落列，之后不可变。"""
     init_db()
     task_id = 'ait_' + uuid.uuid4().hex[:16]
     with _write_lock:
@@ -202,9 +206,9 @@ def create_task(user_message, datasource='', db_type='', session_id=''):
         try:
             conn.execute(
                 'INSERT INTO ai_task_history (id, session_id, user_message, datasource, db_type, '
-                'status, tool_steps, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                'status, tool_steps, owner, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 (task_id, session_id or '', user_message, datasource, db_type,
-                 'running', '[]', _now()))
+                 'running', '[]', str(owner or ''), _now()))
             conn.commit()
         finally:
             conn.close()
@@ -379,9 +383,17 @@ def get_task(task_id):
         conn.close()
 
 
-def list_tasks(limit=50, offset=0, datasource='', status='', keyword=''):
+def list_tasks(limit=50, offset=0, datasource='', status='', keyword='', owner=None):
+    """任务列表。``owner=None`` 不过滤（管理员/内部调用）；给字符串则只出该用户的行。
+
+    历史无主行（owner=''）不匹配任何用户名，因此只有管理员能看到 ——
+    修复前的存量会话/任务不丢，但也不会再泄给其他登录用户。
+    """
     init_db()
     clauses, params = [], []
+    if owner is not None:
+        clauses.append('owner = ?')
+        params.append(str(owner))
     if datasource:
         clauses.append('datasource = ?')
         params.append(datasource)
@@ -452,21 +464,33 @@ def rename_task(task_id, title):
             conn.close()
 
 
-def get_stats():
-    """概览：总数 / 今日 / 成功失败运行中 / 按数据源 Top10 / 按工具 Top10。"""
+def get_stats(owner=None):
+    """概览：总数 / 今日 / 成功失败运行中 / 按数据源 Top10 / 按工具 Top10。
+
+    ``owner`` 口径与 :func:`list_tasks` 一致：None 全量，字符串只统计该用户。
+    """
     init_db()
+    owner_sql = ' AND owner = ?' if owner is not None else ''
+    owner_params = [str(owner)] if owner is not None else []
     conn = _connect()
     try:
-        total = conn.execute('SELECT COUNT(*) AS n FROM ai_task_history').fetchone()['n']
+        total = conn.execute('SELECT COUNT(*) AS n FROM ai_task_history'
+                             + (' WHERE owner = ?' if owner is not None else ''),
+                             owner_params).fetchone()['n']
         today = conn.execute("SELECT COUNT(*) AS n FROM ai_task_history "
-                             "WHERE created_at LIKE ?",
-                             (datetime.now().strftime('%Y-%m-%d') + '%',)).fetchone()['n']
+                             "WHERE created_at LIKE ?" + owner_sql,
+                             [datetime.now().strftime('%Y-%m-%d') + '%'] + owner_params).fetchone()['n']
         status_rows = conn.execute(
-            'SELECT status, COUNT(*) AS n FROM ai_task_history GROUP BY status').fetchall()
+            'SELECT status, COUNT(*) AS n FROM ai_task_history'
+            + (' WHERE owner = ?' if owner is not None else '')
+            + ' GROUP BY status', owner_params).fetchall()
         datasource_rows = conn.execute(
             "SELECT datasource, COUNT(*) AS n FROM ai_task_history "
-            "WHERE datasource <> '' GROUP BY datasource ORDER BY n DESC LIMIT 10").fetchall()
-        step_rows = conn.execute('SELECT tool_steps FROM ai_task_history').fetchall()
+            "WHERE datasource <> ''" + owner_sql
+            + " GROUP BY datasource ORDER BY n DESC LIMIT 10", owner_params).fetchall()
+        step_rows = conn.execute('SELECT tool_steps FROM ai_task_history'
+                                 + (' WHERE owner = ?' if owner is not None else ''),
+                                 owner_params).fetchall()
     finally:
         conn.close()
     by_status = {(row['status'] or 'unknown'): row['n'] for row in status_rows}
@@ -521,28 +545,29 @@ def _session_view(row):
     return item
 
 
-def create_session(title='', datasource='', datasources=None):
+def create_session(title='', datasource='', datasources=None, owner=''):
     init_db()
     session_id = uuid.uuid4().hex[:12]
     now = _now()
     with _write_lock:
         conn = _connect()
         try:
-            conn.execute('INSERT INTO ai_chat_sessions (id, title, datasource, datasources, created_at, updated_at) '
-                         'VALUES (?, ?, ?, ?, ?, ?)',
+            conn.execute('INSERT INTO ai_chat_sessions (id, title, datasource, datasources, owner, created_at, updated_at) '
+                         'VALUES (?, ?, ?, ?, ?, ?, ?)',
                          (session_id, title or '新对话', datasource or '',
-                          _dump_datasources(datasource, datasources), now, now))
+                          _dump_datasources(datasource, datasources), str(owner or ''), now, now))
             conn.commit()
         finally:
             conn.close()
     return session_id
 
 
-def ensure_session(session_id, title=''):
+def ensure_session(session_id, title='', owner=''):
     """保证会话行存在（幂等）：调用方带着自己的 session_id 来问，服务端补记录。
 
     会话 id 由调用方给出，服务端只负责补记录。若查不到就报「会话不存在」，
     外部脚本、以及任何自己生成 id 的客户端会一问就失败，看起来像助手坏了。
+    已存在的行不动（INSERT OR IGNORE）：归属以创建时为准，不随后续调用改写。
     """
     if not session_id:
         return ''
@@ -552,22 +577,25 @@ def ensure_session(session_id, title=''):
         conn = _connect()
         try:
             conn.execute('INSERT OR IGNORE INTO ai_chat_sessions '
-                         '(id, title, datasource, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
-                         (session_id, title or '新对话', '', now, now))
+                         '(id, title, datasource, owner, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+                         (session_id, title or '新对话', '', str(owner or ''), now, now))
             conn.commit()
         finally:
             conn.close()
     return session_id
 
 
-def list_sessions(limit=50):
+def list_sessions(limit=50, owner=None):
+    """会话列表。``owner`` 口径与 :func:`list_tasks` 一致（None 全量 / 字符串仅本人）。"""
     init_db()
+    where = ' WHERE s.owner = ?' if owner is not None else ''
+    params = [str(owner)] if owner is not None else []
     conn = _connect()
     try:
         rows = conn.execute(
             'SELECT s.*, (SELECT COUNT(*) FROM ai_chat_messages m WHERE m.session_id = s.id) AS message_count '
-            'FROM ai_chat_sessions s ORDER BY s.updated_at DESC LIMIT ?',
-            (int(limit),)).fetchall()
+            'FROM ai_chat_sessions s' + where + ' ORDER BY s.updated_at DESC LIMIT ?',
+            params + [int(limit)]).fetchall()
         return [_session_view(row) for row in rows]
     finally:
         conn.close()
@@ -612,12 +640,32 @@ def delete_session(session_id):
             conn.close()
 
 
-def upsert_session(session_id, title='', datasource='', datasources=None):
+def _client_created_at(value):
+    """前端 createdAt（毫秒时间戳或 ISO 串）→ 落库 ISO 串；认不出返回 ''。"""
+    if isinstance(value, (int, float)) and value > 0:
+        seconds = value / 1000.0 if value > 1e12 else value
+        try:
+            return datetime.fromtimestamp(seconds).isoformat(timespec='seconds')
+        except (OverflowError, OSError, ValueError):
+            return ''
+    text = str(value or '').strip()
+    if not text:
+        return ''
+    try:
+        return datetime.fromisoformat(text).isoformat(timespec='seconds')
+    except ValueError:
+        return ''
+
+
+def upsert_session(session_id, title='', datasource='', datasources=None, created_at='', owner=''):
     """按调用方给的 id 建/改会话（标题、数据源集合），时间戳刷新。
 
     助手页把会话数组当作唯一真相，每次快照回写时
     需要「这个 id 存在就更新、不存在就建」，不能走「服务端生成 id」那条路，
     否则客户端手里的 id 和服务端对不上，刷新后历史就找不回来了。
+    ``created_at`` 保留客户端的原始创建时间（刷新后排序/展示不回退成同步时刻）。
+    ``owner`` 只在新建时落列；已存在的行不改归属（路由层先做归属闸，
+    这里不再二次改写，避免「同步一下就把别人的会话认领走」）。
     """
     if not session_id:
         return ''
@@ -631,8 +679,9 @@ def upsert_session(session_id, title='', datasource='', datasources=None):
                                (session_id,)).fetchone()
             if row is None:
                 conn.execute('INSERT INTO ai_chat_sessions (id, title, datasource, datasources, '
-                             'created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
-                             (session_id, title or '新对话', datasource or '', packed, now, now))
+                             'owner, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                             (session_id, title or '新对话', datasource or '', packed,
+                              str(owner or ''), _client_created_at(created_at) or now, now))
             else:
                 conn.execute('UPDATE ai_chat_sessions SET title = ?, datasource = ?, datasources = ?, '
                              'updated_at = ? WHERE id = ?',

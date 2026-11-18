@@ -1,0 +1,107 @@
+<!--
+  SPDX-License-Identifier: Apache-2.0
+  Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
+  Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
+
+  Fusion page: 服务器巡检历史（状态卡筛选 + 多维筛选栏 + 主机卡片 + 详情模态）。
+  卡片双击或点「详情」打开模态；模态头部按记录情况显示原始数据 / AI 报告下载。
+  交互脚本见 static/js/fusion/server_inspect.js，样式见 static/css/fusion/server_inspect.css。
+-->
+
+<!-- 顶部导航栏 -->
+<div class="sh-hero">
+  <div class="sh-hero-content">
+    <div class="sh-hero-left">
+      <div class="sh-hero-icon">🖥️</div>
+      <div class="sh-hero-title-group">
+        <div class="sh-hero-title">
+          <span class="sh-hero-title-accent">服务器</span>巡检总览
+        </div>
+        <div class="sh-hero-subtitle">查看所有服务器巡检记录，实时掌握基础设施健康状态</div>
+      </div>
+    </div>
+    <div class="sh-hero-actions">
+      <button class="sh-hero-btn" onclick="showPage('server-inspect')" title="返回服务器巡检">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+        返回服务器巡检
+      </button>
+      <button class="sh-hero-btn" onclick="loadServerHistory()" title="刷新数据">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- 状态筛选卡片（点击自动筛选） -->
+<div class="sh-stats-row" id="sh-stats-row"></div>
+
+<!-- 多维筛选栏 -->
+<div class="sh-search-bar" id="sh-search-bar">
+  <div class="sh-search-input-wrap">
+    <svg class="sh-search-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+    <input class="sh-search-input" id="sh-search-input" type="text" placeholder="搜索主机名、IP、问题关键字..." oninput="filterServerHistory()">
+  </div>
+  <select class="sh-filter-select" id="sh-os-filter" onchange="filterServerHistory()">
+    <option value="">全部操作系统</option>
+  </select>
+  <div class="sh-date-range">
+    <div class="sh-date-wrap">
+      <input type="date" class="sh-filter-date" id="sh-date-from" onchange="syncDatePlaceholder(this); filterServerHistory()" onclick="openDatePicker(this)" title="开始日期">
+      <span class="sh-date-placeholder">开始日期</span>
+    </div>
+    <span class="sh-date-sep">~</span>
+    <div class="sh-date-wrap">
+      <input type="date" class="sh-filter-date" id="sh-date-to" onchange="syncDatePlaceholder(this); filterServerHistory()" onclick="openDatePicker(this)" title="结束日期">
+      <span class="sh-date-placeholder">结束日期</span>
+    </div>
+  </div>
+  <button class="sh-filter-reset" onclick="resetServerHistoryFilters()" title="重置所有筛选条件">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+    重置
+  </button>
+  <div class="sh-filter-pills" id="sh-filter-pills"></div>
+</div>
+
+<!-- 服务器列表 -->
+<div class="sh-list" id="sh-server-list">
+  <div class="sh-loading-state">
+    <div class="sh-loading-spinner">
+      <div class="sh-spinner-ring"></div>
+    </div>
+    <div class="sh-loading-text">正在加载服务器巡检数据...</div>
+  </div>
+</div>
+
+<!-- 详情弹窗 -->
+<div class="sh-modal-overlay" id="sh-detail-modal" style="display:none" onclick="closeServerDetail(event)">
+  <div class="sh-modal" onclick="event.stopPropagation()">
+    <div class="sh-modal-header">
+      <div class="sh-modal-title">
+        <span>📊</span> <span id="sh-detail-title">巡检详情</span>
+      </div>
+      <div class="sh-modal-header-actions">
+        <button class="sh-detail-btn primary" id="sh-detail-download" style="display:none" onclick="downloadServerDetailReport()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          下载原始数据
+        </button>
+        <button class="sh-detail-btn ai" id="sh-detail-ai-download" style="display:none" onclick="downloadServerAiReport()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          🤖 下载 AI 分析报告
+        </button>
+        <button class="sh-detail-btn" id="sh-detail-share" style="display:none" onclick="shareServerDetail()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+          分享报告
+        </button>
+        <button class="sh-modal-close" onclick="closeServerDetail()">✕</button>
+      </div>
+    </div>
+    <div class="sh-modal-body" id="sh-detail-body">
+      <div class="sh-loading-state">
+        <div class="sh-loading-spinner">
+          <div class="sh-spinner-ring"></div>
+        </div>
+        <div class="sh-loading-text">加载详情中...</div>
+      </div>
+    </div>
+  </div>
+</div>

@@ -163,6 +163,24 @@
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
+  // 同一引擎按连接方式再分一档（oracle_jdbc / oracle_thin…），展示与分组一律
+  // 还原成引擎名：否则类型列/版本标签显示 ORACLE_JDBC，同类库还被拆成两组。
+  var TYPE_ALIAS = { postgresql: 'pg', mssql: 'sqlserver', dm8: 'dm', oracle_full: 'oracle',
+    oracle_jdbc: 'oracle', sqlserver_jdbc: 'sqlserver', mysql_jdbc: 'mysql',
+    postgresql_jdbc: 'pg', postgres_jdbc: 'pg', dm_jdbc: 'dm', dm8_jdbc: 'dm',
+    oracle_thin: 'oracle', uxdb_jdbc: 'uxdb' };
+
+  function normDbType(value) {
+    var lower = String(value || '').toLowerCase().trim();
+    if (!lower) return '';
+    if (TYPE_ALIAS[lower]) return TYPE_ALIAS[lower];
+    if (/_jdbc$|_thin$/.test(lower)) {
+      var base = lower.replace(/_jdbc$|_thin$/, '');
+      return TYPE_ALIAS[base] || base;
+    }
+    return lower;
+  }
+
   function requestJson(url, options) {
     var settings = Object.assign({
       credentials: 'same-origin',
@@ -1068,7 +1086,7 @@
       escapeHtml(t('webui.aias_ds_auto', '（数据源：自动识别）')) + '</option>';
     state.datasources.forEach(function (item) {
       html += '<option value="' + escapeHtml(item.name || item.id) + '">' +
-        escapeHtml(item.name || item.id) + ' · ' + escapeHtml(item.db_type || '') + '</option>';
+        escapeHtml(item.name || item.id) + ' · ' + escapeHtml(normDbType(item.db_type)) + '</option>';
     });
     select.innerHTML = html;
     select.value = state.defaultDatasource || '';
@@ -3591,7 +3609,7 @@
       var row = results[index];
       html += '<tr class="' + (row.ok ? '' : 'is-err') + '">'
         + '<td class="aias-batch-ds">' + escapeHtml(row.name) + '</td>'
-        + '<td>' + escapeHtml(row.db_type || '') + '</td>'
+        + '<td>' + escapeHtml(normDbType(row.db_type)) + '</td>'
         + '<td>' + (row.ok ? escapeHtml(t('webui.aias_batch_row_ok', '✓ 成功'))
             : '✗ ' + escapeHtml(row.error || t('webui.aias_batch_row_fail', '失败'))) + '</td>'
         + '<td>' + (row.total || 0) + '</td>'
@@ -3764,7 +3782,7 @@
   /** 数据源条目那一行 meta：「类型 · 主机:端口 · 目录 · 标签 · N 节点」。 */
   function dsItemMeta(item, withType) {
     var meta = [
-      withType ? (item.db_type || '') : '',
+      withType ? normDbType(item.db_type) : '',
       item.host ? String(item.host) + (item.port ? (':' + item.port) : '') : '',
       t('webui.aias_dir_prefix', '目录: ') + (item.dir_path || t('webui.aias_dir_unassigned', '未分配')),
       (item.labels && item.labels.length)
@@ -3925,7 +3943,7 @@
   }
 
   function dsTypeOf(item) {
-    return String(item.db_type || '').trim() || t('webui.aias_ds_other_type', '其他');
+    return normDbType(item.db_type) || t('webui.aias_ds_other_type', '其他');
   }
 
   function renderDsMulti() {
@@ -4582,7 +4600,7 @@
         return '<div class="aias-task-item" data-task-id="' + escapeHtml(task.task_id) + '">' +
           '<span class="aias-task-state is-' + escapeHtml(task.status) + '">' +
           escapeHtml(task.status) + '</span>' +
-          '<span class="aias-task-name">' + escapeHtml(task.datasource || task.db_type || '') + '</span>' +
+          '<span class="aias-task-name">' + escapeHtml(task.datasource || normDbType(task.db_type) || '') + '</span>' +
           '<span class="aias-task-time">' + escapeHtml(truncate(task.started_at, 19)) + '</span>' +
           '</div>';
       }).join('');
@@ -4732,13 +4750,13 @@
         return;
       }
       var rows = (body && body.datasources) || [];
-      var summary = (body && body.summary) || {};
+      var summary = (body && (body.summary_stats || body.summary)) || {};
       // 摘要按「版本标签」分桶（Oracle 19c ×3 · MySQL 8 ×2），
       // 后端 by_family 只到 oracle/mysql 这一层，看不出配的具体版本
       var bucketsMap = {};
       rows.forEach(function (item) {
         var bucket = item.label || (item.db_type
-          ? item.db_type + ' ' + t('webui.aias_ver_unknown_label', '未知版本') : '—');
+          ? normDbType(item.db_type) + ' ' + t('webui.aias_ver_unknown_label', '未知版本') : '—');
         bucketsMap[bucket] = (bucketsMap[bucket] || 0) + 1;
       });
       var buckets = Object.keys(bucketsMap).sort(function (a, b) {
@@ -4776,7 +4794,7 @@
             escapeHtml(item.name) + '">' + escapeHtml(item.name) + '</span>' +
             (isTarget ? '<span class="aias-ver-tag is-current">' +
               escapeHtml(t('webui.aias_ver_current_target', '当前目标')) + '</span>' : '') +
-            (item.db_type ? '<span class="aias-ver-tag">' + escapeHtml(item.db_type) + '</span>' : '') +
+            (item.db_type ? '<span class="aias-ver-tag">' + escapeHtml(normDbType(item.db_type)) + '</span>' : '') +
             '<span class="aias-ver-label">' +
             escapeHtml(item.label || t('webui.aias_ver_unknown_label', '未知版本')) + '</span></div>' +
             '<div class="aias-ver-ver">' + escapeHtml(item.version ||

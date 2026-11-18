@@ -178,8 +178,33 @@
     return request('/api/awr/recent').then(function (body) {
       var host = byId('awrg-recent');
       if (!host) return;
-      var files = (body && body.files) || [];
+      var all = (body && body.files) || [];
+      var dsSelect = byId('awrg-ds');
+      var dsId = (dsSelect && dsSelect.value) || '';
+      var src = (byId('awrg-source-filter') || {}).value || '';
+      var manualAll = all.filter(function (f) { return f.manual; });
+      var genPart = all.filter(function (f) { return !f.manual; });
+      var genScoped = dsId
+        ? genPart.filter(function (f) { return String(f.ds_id || '') === String(dsId); })
+        : genPart;
+      var files;
+      if (src === 'upload') {
+        files = manualAll;                       // 人工上传不联动数据源
+      } else if (src === 'generate') {
+        files = genScoped;
+      } else {
+        files = genScoped.concat(manualAll);     // 全部：生成的按数据源联动，上传的始终可见
+      }
       state.recentFiles = files;
+      if (state.currentId && !files.some(function (f) { return f.task_id === state.currentId; })) {
+        state.currentId = '';
+      }
+      var manCount = files.filter(function (f) { return f.manual; }).length;
+      var dsName = '';
+      state.datasources.forEach(function (row) { if (String(row.id) === String(dsId)) dsName = row.name || ''; });
+      text(byId('awrg-recent-count'),
+           (dsName ? dsName + ' · ' : '') + files.length + ' 个' +
+           (manCount ? '（人工上传 ' + manCount + '）' : ''));
       if (!files.length) {
         host.innerHTML = '<div class="awrg-hint" style="padding:10px;">暂无报告</div>';
         return;
@@ -190,11 +215,13 @@
         var range = file.begin_time
           ? (file.begin_time + ' → ' + (file.end_time || ''))
           : (file.manual ? '人工上传' : '生成于 ' + (file.modified || ''));
+        var incomplete = file.data_complete === false
+          ? '<span class="awrg-badge-warn" title="兜底视图方案生成，数据集不完整">最小数据集</span>' : '';
         return '<div class="awrg-item' + (file.task_id === state.currentId ? ' active' : '') +
                '" data-awr-id="' + file.task_id + '">' +
                '<input type="checkbox" class="awrg-check" data-check-id="' + file.task_id + '">' +
                '<div class="awrg-item-main">' +
-               '  <div class="awrg-item-title">' + title + '</div>' +
+               '  <div class="awrg-item-title">' + title + incomplete + '</div>' +
                '  <div class="awrg-item-range">' + range + '</div>' +
                '  <div class="awrg-item-sub">快照 ' + (file.snap_range || '—') + ' · ' +
                     Math.max(1, Math.round((file.size || 0) / 1024)) + 'KB · ' +
@@ -243,21 +270,43 @@
           } else if (status.status === 'error') {
             clearInterval(timer);
             text(byId('awrg-progress'), '❌ Word 生成失败：' + (status.error || ''));
+          } else {
+            var steps = status.steps || [];
+            var cur = Number(status.current_step || 0);
+            text(byId('awrg-progress'),
+                 (steps[cur] || '正在生成 Word 报告…') +
+                 (status.current_detail ? '\n' + status.current_detail : ''));
           }
         });
       }, 1500);
     });
   }
 
+  function escapeText(value) {
+    return String(value == null ? '' : value)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  // AI 面板正文：正常结论按 Markdown 渲染（标题/列表/表格），失败信息按纯文本转义
+  function renderDiagnosis(box, value, isFailure) {
+    if (!box) return;
+    var content = String(value == null ? '' : value);
+    if (isFailure || typeof window.renderMarkdown !== 'function') {
+      box.innerHTML = escapeText(content);
+      return;
+    }
+    box.innerHTML = window.renderMarkdown(content);
+  }
+
   function runAiDiagnosis() {
     if (!state.currentId) return;
     var box = byId('awrg-ai-box');
     var frame = byId('awrg-frame');
-    if (box) { box.style.display = ''; box.textContent = '正在诊断…'; }
+    if (box) { box.style.display = ''; box.innerHTML = '<span class="awrg-hint">⏳ 正在调用 AI 诊断…</span>'; }
     if (frame) frame.style.display = 'none';
     request('/api/awr/ai_diagnosis/' + encodeURIComponent(state.currentId)).then(function (body) {
-      if (!body || !body.ok) { if (box) box.textContent = (body && body.error) || '诊断失败'; return; }
-      if (body.status === 'done') { if (box) box.textContent = body.diagnosis || ''; return; }
+      if (!body || !body.ok) { renderDiagnosis(box, (body && body.error) || '诊断失败', true); return; }
+      if (body.status === 'done') { renderDiagnosis(box, body.diagnosis || ''); return; }
       pollDiagnosis(body.diag_key);
     });
   }
@@ -265,10 +314,60 @@
   function pollDiagnosis(diagKey) {
     var box = byId('awrg-ai-box');
     return request('/api/awr/ai_diag_status/' + encodeURIComponent(diagKey)).then(function (body) {
-      if (!body || !body.ok) { if (box) box.textContent = '诊断任务不存在'; return; }
-      if (box) box.textContent = (body.partial || body.detail || '正在诊断…');
-      if (body.status === 'done' || body.status === 'error') return;
+      if (!body || !body.ok) { renderDiagnosis(box, '诊断任务不存在', true); return; }
+      var partial = body.partial || '';
+      var failed = body.status === 'error';
+      if (body.status === 'running') {
+        // 流式阶段：进度详情 + 已用时 + 逐步生成的内容 + 光标，并保持在底部可见
+        var head = '<div class="awrg-ai-detail">⏳ ' + escapeText(body.detail || '') + '</div>' +
+                   '<div class="awrg-hint">已用时 ' + Number(body.elapsed || 0) + ' 秒，正在生成内容…</div>';
+        if (box) {
+          box.innerHTML = head + '<div class="awrg-ai-body">' +
+            (typeof window.renderMarkdown === 'function' ? window.renderMarkdown(partial) : escapeText(partial)) +
+            '<span class="awrg-ai-caret">▍</span></div>';
+          box.scrollTop = box.scrollHeight;
+        }
+      } else {
+        renderDiagnosis(box, partial || (failed ? 'AI 诊断失败' : ''), failed);
+        if (box) box.scrollTop = 0;
+      }
+      if (failed || body.status === 'done') return;
       setTimeout(function () { pollDiagnosis(diagKey); }, 1500);
+    });
+  }
+
+  // 问 BIC-QA：把当前 AWR 的指标摘要脱敏后交外部知识库做四段式分析
+  function askBicqa() {
+    if (!state.currentId) return;
+    var box = byId('awrg-ai-box');
+    var frame = byId('awrg-frame');
+    if (box) { box.style.display = ''; box.innerHTML = '<span class="awrg-hint">⏳ 正在解析 AWR 指标摘要并直传 BIC-QA 分析…</span>'; }
+    if (frame) frame.style.display = 'none';
+    request('/api/bicqa/awr', {
+      method: 'POST',
+      body: JSON.stringify({ task_id: state.currentId, dbtype: 'oracle' })
+    }).then(function (body) {
+      if (!box) return;
+      if (body && body.ok && body.result) {
+        var meta = body.meta || {};
+        var head = [meta.db_name, meta.instance, meta.snap_range].filter(Boolean).join(' · ');
+        var render = window.bicqaFourSegHtml;
+        box.innerHTML = '<div class="awrg-ai-detail">🤖 BIC-QA AWR 分析' +
+          (head ? ' <span class="awrg-hint">' + escapeText(head) + '</span>' : '') + '</div>' +
+          (typeof render === 'function' ? render(String(body.result))
+                                        : '<div class="awrg-ai-body">' + escapeText(body.result) + '</div>');
+        box.scrollTop = 0;
+        return;
+      }
+      if (body && body.error_code === 'BICQA_UNAVAILABLE') {
+        box.innerHTML = '<div class="awrg-hint">BIC-QA 未启用或未配置 API Key。请前往 ' +
+          '<a href="#" onclick="showPage(\'bicqa\');loadBicqaPage();return false">BIC-QA 知识库</a>' +
+          ' 页配置后再试；未配置时不向外部发送任何数据。</div>';
+        return;
+      }
+      renderDiagnosis(box, (body && (body.error || body.msg)) || '分析失败', true);
+    }).catch(function (failure) {
+      renderDiagnosis(box, '请求失败：' + (failure && failure.message), true);
     });
   }
 
@@ -299,9 +398,14 @@
     var refreshButton = byId('awrg-refresh');
     if (refreshButton) refreshButton.addEventListener('click', loadRecent);
     var dsSelect = byId('awrg-ds');
-    if (dsSelect) dsSelect.addEventListener('change', loadSnapshots);
+    if (dsSelect) dsSelect.addEventListener('change', function () {
+      loadSnapshots();
+      loadRecent();          // 文件列表按数据源联动
+    });
     var daysSelect = byId('awrg-days');
     if (daysSelect) daysSelect.addEventListener('change', loadSnapshots);
+    var sourceFilter = byId('awrg-source-filter');
+    if (sourceFilter) sourceFilter.addEventListener('change', loadRecent);
     var previewButton = byId('awrg-preview');
     if (previewButton) previewButton.addEventListener('click', function () {
       if (state.currentId) showPreview(state.currentId);
@@ -312,6 +416,8 @@
     if (wordButton) wordButton.addEventListener('click', buildWord);
     var aiButton = byId('awrg-ai');
     if (aiButton) aiButton.addEventListener('click', runAiDiagnosis);
+    var bicqaButton = byId('awrg-bicqa');
+    if (bicqaButton) bicqaButton.addEventListener('click', askBicqa);
     var uploadButton = byId('awrg-upload-btn');
     var uploadInput = byId('awrg-upload');
     if (uploadButton && uploadInput) {

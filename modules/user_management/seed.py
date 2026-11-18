@@ -70,6 +70,9 @@ menus_data = [
     ('data-management',  'menu.data-management', 0, 66),
     ('about',            'menu.about',           0, 67),
     ('disaster-recovery','menu.disaster-recovery',0, 65),
+    ('ai-tasks', 'menu.ai-tasks', 0, 630),
+    ('tool-mgmt', 'menu.tool-mgmt', 0, 631),
+    ('zabbix-monitor', 'menu.zabbix-monitor', 0, 636),
 ]
 
 def init_seed_data():

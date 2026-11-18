@@ -264,7 +264,13 @@ def _run_plugin_inspection_subprocess(db_info, inspector_name):
     }
     for _k in ('connection_mode', 'jdbc_url', 'instance_name',
                'encrypt', 'trust_server_certificate',
-               'ssh_host', 'ssh_port', 'ssh_user', 'ssh_password', 'ssh_key_file'):
+               'ssh_host', 'ssh_port', 'ssh_user', 'ssh_password', 'ssh_key_file',
+               # 系统资源采集：子进程里同样走 run_inspection_task 的透传袋，
+               # 不带这几个键，JVM 类型的定时巡检就永远采不到 Zabbix 指标
+               'syscollect_mode', 'zabbix_host', 'zabbix_hostname',
+               'zabbix_host_ip', 'zabbix_host_name',
+               # 来源标记：子进程内 run_inspection_task 据此把历史记为 scheduled
+               'trigger_type'):
         if _k in db_info and db_info[_k] is not None:
             mapped[_k] = db_info[_k]
 
@@ -386,7 +392,24 @@ def _db_info_for_run(cfg):
     return db_info
 
 
-def _run_inspection(job_id, db_info, inspector_name, notify_on_done, triggered_by='schedule'):
+def _notify_opts_from_job(job_cfg):
+    """提取任务级通知子项，供执行时判定是否发邮件、发给谁。
+
+    notify_email 缺省回退 notify_on_done（老任务只有这一个开关）；
+    抄送/主收为空表示「沿用全局 SMTP 配置」，在 _send_notifications 里回退。
+    """
+    cfg = job_cfg or {}
+    return {
+        'notify_email': bool(cfg.get('notify_email', cfg.get('notify_on_done', True))),
+        'notify_anomaly': bool(cfg.get('notify_anomaly', True)),
+        'notify_attach': bool(cfg.get('notify_attach', True)),
+        'email_to': cfg.get('email_to') or '',
+        'email_cc': cfg.get('email_cc') or '',
+    }
+
+
+def _run_inspection(job_id, db_info, inspector_name, notify_on_done, triggered_by='schedule',
+                    notify_opts=None):
     """
     并发巡检排除机制入口（在独立线程中运行）。
 
@@ -434,14 +457,14 @@ def _run_inspection(job_id, db_info, inspector_name, notify_on_done, triggered_b
     timer.start()
     try:
         _run_inspection_core(job_id, db_info, inspector_name, notify_on_done,
-                             triggered_by=triggered_by)
+                             triggered_by=triggered_by, notify_opts=notify_opts)
     finally:
         timer.cancel()
         _release()
 
 
 def _run_inspection_core(job_id, db_info, inspector_name, notify_on_done,
-                         triggered_by='schedule'):
+                         triggered_by='schedule', notify_opts=None):
     """
     执行巡检并发送通知（在独立线程中运行）
 
@@ -450,6 +473,7 @@ def _run_inspection_core(job_id, db_info, inspector_name, notify_on_done,
         db_info:     数据库连接信息字典
         inspector_name: 巡检人员
         notify_on_done: 是否在完成后发送通知
+        notify_opts: 任务级通知子项（邮件开关/仅异常/附件/主收人/抄送人）
     """
     from modules.inspection.run import (
         run_mysql, run_mariadb, run_oceanbase, run_pg,
@@ -479,6 +503,10 @@ def _run_inspection_core(job_id, db_info, inspector_name, notify_on_done,
         except Exception as e:
             raise ValueError('获取数据源失败: ' + str(e))
         db_info.update(_job_collect)
+
+    # 来源标记：定时巡检（含「立即执行」）统一记 scheduled，供巡检历史按来源筛选。
+    # 数据源整体覆盖 db_info 之后再塞，避免被 ds.copy() 冲掉。
+    db_info['trigger_type'] = 'scheduled'
 
     db_type = db_info.get('db_type', 'mysql')
     logger.info('[%s] 定时巡检开始: %s %s:%s', job_id, db_type,
@@ -516,6 +544,27 @@ def _run_inspection_core(job_id, db_info, inspector_name, notify_on_done,
         if _zbx_keys:
             ssh_info = dict(ssh_info or {})
             ssh_info.update(_zbx_keys)
+            if ssh_info.get('zabbix_host') or ssh_info.get('zabbix_hostname'):
+                ssh_info.setdefault('zabbix_source', 'explicit')
+
+        # 数据源上持久化的 Zabbix 绑定：任务没有当次指定目标时按绑定取。
+        # 这是定时巡检能拿到 CPU/内存/磁盘的关键——任务里不必每次重填主机。
+        # 显式选了 SSH / 不采集时不注入；未绑定的数据源直接跳过，不联网探测。
+        _zb_mode = ((ssh_info or {}).get('syscollect_mode') or '').strip()
+        if _zb_mode not in ('ssh', 'none') and not (
+                (ssh_info or {}).get('zabbix_host') or (ssh_info or {}).get('zabbix_hostname')):
+            try:
+                from modules.zabbix.binding import resolve_inspection_target
+                _zi, _zsrc = resolve_inspection_target(db_info)
+                if _zi and (_zi.get('host_ip') or _zi.get('hostname')):
+                    ssh_info = dict(ssh_info or {})
+                    ssh_info['zabbix_host'] = _zi.get('host_ip') or ''
+                    ssh_info['zabbix_hostname'] = _zi.get('hostname') or ''
+                    ssh_info['zabbix_source'] = _zsrc
+                    logger.info('[%s] 系统资源将通过 Zabbix 采集（来源: %s，主机: %s）',
+                                job_id, _zsrc, _zi.get('hostname') or _zi.get('host_ip'))
+            except Exception as _zerr:
+                logger.warning('[%s] Zabbix 采集目标解析失败: %s', job_id, _zerr)
 
         # Build runner map for built-in db_types (oracle_full -> oracle_full, oracle -> oracle_full)
         runner_map = {
@@ -582,7 +631,8 @@ def _run_inspection_core(job_id, db_info, inspector_name, notify_on_done,
         # 发送通知
         if notify_on_done:
             _send_notifications(job_id, db_info, report_file, error=None,
-                                context=inspection_ctx, issues=notification_issues)
+                                context=inspection_ctx, issues=notification_issues,
+                                notify_opts=notify_opts)
 
         _append_exec_log({
             'job_id': job_id,
@@ -614,7 +664,8 @@ def _run_inspection_core(job_id, db_info, inspector_name, notify_on_done,
         # 即使失败也发送通知（告警）
         if notify_on_done:
             _send_notifications(job_id, db_info, report_file, error=error_msg,
-                                context=inspection_ctx, issues=notification_issues)
+                                context=inspection_ctx, issues=notification_issues,
+                                notify_opts=notify_opts)
 
 
 def _collect_issues(db_type, context, issues=None):
@@ -736,8 +787,16 @@ def _create_report_share(job_id, db_info, report_file, issues, context=None):
 
 
 def _send_notifications(job_id, db_info, report_file, error=None, context=None,
-                        issues=None):
-    """发送邮件和 Webhook 通知"""
+                        issues=None, notify_opts=None):
+    """发送邮件和 Webhook 通知。
+
+    邮件策略（任务级子项优先，缺省回退全局 SMTP 配置）：
+    - notify_email 关闭时不发；巡检失败不发邮件（失败告警走 Webhook）；
+    - 主收人 email_to 是责任主体，为空才回退全局收件人；抄送人 email_cc 仅知会，
+      同样任务级优先，且已在主收人里的地址不重复抄送；
+    - notify_anomaly 开启时只在有问题时发；问题数取不到按「有问题」处理，避免漏通知；
+    - notify_attach 关闭时不带报告附件，正文里的在线报告链接仍然保留。
+    """
     from modules.notify import EmailNotifier, WebhookNotifier, _load_config
 
     label = db_info.get('label', db_info.get('host', '未知'))
@@ -766,14 +825,37 @@ def _send_notifications(job_id, db_info, report_file, error=None, context=None,
 
     # 发送邮件通知（只要配置了收件人就发送，不强制要求 enabled 字段）
     email_cfg = cfg.get('email', {})
-    if email_cfg.get('recipients') and not error:
+    opts = notify_opts or {}
+    notify_email = opts.get('notify_email', True)
+    notify_anomaly = opts.get('notify_anomaly', True)
+    notify_attach = opts.get('notify_attach', True)
+    recipients = EmailNotifier._split_addrs(opts.get('email_to')) \
+        or EmailNotifier._split_addrs(email_cfg.get('recipients'))
+    cc = [a for a in (EmailNotifier._split_addrs(opts.get('email_cc'))
+                      or EmailNotifier._split_addrs(email_cfg.get('cc')))
+          if a not in recipients]
+    # 问题数未知（context 与 issues 都拿不到）时按存在异常处理，宁可多发不可漏发
+    has_anomaly = issue_count is None or issue_count > 0
+    should_email = bool(notify_email and not error and recipients
+                        and (not notify_anomaly or has_anomaly))
+
+    if should_email:
         try:
-            notifier = EmailNotifier(cfg['email'])
-            notifier.send_report(label, db_type, report_file,
+            notifier = EmailNotifier(email_cfg)
+            notifier.send_report(label, db_type,
+                                 report_file if notify_attach else None,
+                                 recipients=recipients, cc=cc,
                                  issue_count=issue_count, report_url=report_url)
-            logger.info('[%s] 邮件通知已发送', job_id)
+            logger.info('[%s] 邮件通知已发送（主收人:%d, 抄送人:%d, 附件:%s）',
+                        job_id, len(recipients), len(cc), bool(notify_attach))
         except Exception as e:
             logger.error('[%s] 邮件发送失败: %s', job_id, e)
+    elif notify_email and not error:
+        if not recipients:
+            logger.warning('[%s] 邮件通知未发送：未配置主收人（任务与全局 SMTP 收件人均为空）',
+                           job_id)
+        elif not has_anomaly:
+            logger.info('[%s] 邮件通知未发送：本次巡检无问题且任务设为仅异常通知', job_id)
 
     # 发送 Webhook 告警（成功/失败均发送；只要配置了 URL 就发送，
     # 仅当显式设置 enabled=false 时才禁用，与邮件的判定语义保持一致）
@@ -846,14 +928,14 @@ class SchedulerManager:
             if job_cfg.get('enabled', True):
                 self.add_job(job_cfg, restore=True)
     
-    def _job_func(self, job_id, db_info, inspector_name, notify_on_done):
+    def _job_func(self, job_id, db_info, inspector_name, notify_on_done, notify_opts=None):
         """任务执行函数（包装器）"""
         triggered_by = 'manual' if job_id in self._manual_jobs else 'schedule'
         self._manual_jobs.discard(job_id)
         # 在独立线程中运行，避免阻塞调度器
         t = threading.Thread(
             target=_run_inspection,
-            args=(job_id, db_info, inspector_name, notify_on_done, triggered_by),
+            args=(job_id, db_info, inspector_name, notify_on_done, triggered_by, notify_opts),
             daemon=True
         )
         t.start()
@@ -872,6 +954,8 @@ class SchedulerManager:
                 - enabled: bool, 是否启用
                 - inspector_name: str, 巡检人员
                 - notify_on_done: bool, 完成后是否发送通知
+                - notify_email / notify_anomaly / notify_attach: bool, 邮件子开关
+                - email_to / email_cc: str, 任务级主收人 / 抄送人（逗号分隔）
         
         返回:
             bool: 是否添加成功
@@ -920,7 +1004,7 @@ class SchedulerManager:
                     # 停用时也移不掉真实作业。必须用 id 与配置里的任务 ID 对齐。
                     id=job_id,
                     args=[job_id, _db_info_for_run(config), config.get('inspector_name', 'DBCheck'),
-                          config.get('notify_on_done', True)],
+                          config.get('notify_on_done', True), _notify_opts_from_job(config)],
                     name=config.get('name', job_id),
                     replace_existing=True
                 )
@@ -1095,7 +1179,8 @@ class SchedulerManager:
                     job_id,
                     _db_info_for_run(job_cfg),
                     job_cfg.get('inspector_name', 'DBCheck'),
-                    job_cfg.get('notify_on_done', True)
+                    job_cfg.get('notify_on_done', True),
+                    _notify_opts_from_job(job_cfg)
                 )
                 return True
         return False

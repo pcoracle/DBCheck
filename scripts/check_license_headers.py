@@ -167,9 +167,32 @@ def file_is_compliant(path: Path) -> bool:
     return has_spdx and has_copyright and has_email
 
 
+def _is_license_line(line: str) -> bool:
+    """True if a comment line is license / attribution text rather than prose.
+
+    Used to tell the license header apart from the functional comments that may
+    follow it (module purpose, "must run before import X" guards, ...). Those
+    comments are documentation and must survive ``--fix``.
+    """
+    low = line.lower()
+    markers = (
+        "copyright", "(c)", "©", "spdx-license-identifier",
+        "license", "licensed", "all rights reserved", "proprietary",
+        "author:", "permission is hereby granted", "without warranty",
+        "warranties", "redistribution", "apache", "mit license", "bsd",
+        "gpl", "mozilla", "sdfiyon@gmail.com",
+    )
+    return any(m in low for m in markers)
+
+
 def find_license_block(lines: list[str], start: int):
-    """Find the contiguous comment/blank run starting at *start* that contains a
-    license marker. Returns (block_start, block_end) or None.
+    """Find the license header starting at *start*. Returns (block_start,
+    block_end) or None.
+
+    Only the license / attribution lines themselves are part of the block. The
+    contiguous comment run may continue with functional documentation (separated
+    by a blank line or an empty ``#``); replacing that too would silently delete
+    source documentation, so the block stops at the first non-license comment.
     """
     n = len(lines)
     if start >= n:
@@ -190,9 +213,23 @@ def find_license_block(lines: list[str], start: int):
         "all rights reserved",
         "proprietary software",
     )
-    if any(m in block_text for m in license_markers):
-        return (run_start, run_end)
-    return None
+    if not any(m in block_text for m in license_markers):
+        return None
+
+    end = run_start
+    seen_license = False
+    for j in range(run_start, run_end):
+        stripped = lines[j].strip()
+        if stripped in ("", "#", "/*", "*/", "*"):
+            continue  # separator: only counts if license text follows
+        if _is_license_line(lines[j]):
+            seen_license = True
+            end = j + 1
+        elif seen_license:
+            break
+    if end > run_start:
+        return (run_start, end)
+    return (run_start, run_end)
 
 
 def _read_raw(path: Path):
@@ -232,6 +269,11 @@ def fix_file(rel_path: Path) -> bool:
 
     # 3. Detect an existing license block to replace (if any).
     block = find_license_block(lines, idx)
+
+    # Canonical header already in place: nothing to rewrite. Returning here keeps
+    # --fix idempotent and stops it from touching the comments below the header.
+    if lines[idx:idx + len(APACHE_HEADER_LINES)] == APACHE_HEADER_LINES:
+        return False
 
     # Already exactly compliant? (correct SPDX + fiyo copyright line, no stale block)
     already_apache = (

@@ -377,6 +377,42 @@ def _awr_generate_steps(generate_awr=True, ai_analysis=False):
     return steps
 
 
+def _sqlplus_enabled():
+    """SQL*Plus 方案开关（dbc_config.json → awr.sqlplus_enabled，默认关闭）。
+
+    该方案要求本机装完整 Oracle 客户端并以 / as sysdba 本地登录，多数部署不满足；
+    默认关闭可避免每次生成都去找客户端、执行外部进程。需要时显式打开。
+    """
+    try:
+        import json
+        cfg_path = os.path.join(str(_core_paths.PROJECT_ROOT), 'dbc_config.json')
+        with open(cfg_path, 'r', encoding='utf-8') as f:
+            cfg = json.load(f) or {}
+        return bool((cfg.get('awr') or {}).get('sqlplus_enabled', False))
+    except Exception:
+        return False
+
+
+# 常见 Oracle 安装根目录：只在这些根下有限深度查找客户端，绝不从盘符根全盘扫描
+_ORACLE_ROOTS_WIN = [r'C:\oracle', r'C:\app\oracle', r'C:\app',
+                     r'C:\Program Files\Oracle', r'C:\Program Files (x86)\Oracle']
+_ORACLE_ROOTS_NIX = ['/u01/app/oracle', '/opt/oracle', '/usr/lib/oracle']
+_CLIENT_SEARCH_DEPTH = 4
+
+
+def _walk_limited(base, want_file):
+    """在 base 下最多 _CLIENT_SEARCH_DEPTH 层查找 want_file，命中即返回全路径。"""
+    base = os.path.abspath(base)
+    if not os.path.isdir(base):
+        return None
+    for root, dirs, files in os.walk(base):
+        if want_file in files:
+            return os.path.join(root, want_file)
+        if root[len(base):].count(os.sep) >= _CLIENT_SEARCH_DEPTH:
+            dirs[:] = []
+    return None
+
+
 def _find_awrrpt():
     """定位 Oracle 安装目录中的 awrrpt.sql（搜索 $ORACLE_HOME/rdbms/admin）"""
     candidates = []
@@ -385,48 +421,45 @@ def _find_awrrpt():
     # 避免误把 ORACLE_HOME 指向 Instant Client 的环境当成完整客户端。
     if oh and os.path.isdir(os.path.join(oh, 'rdbms', 'admin')):
         candidates.append(os.path.join(oh, 'rdbms', 'admin', 'awrrpt.sql'))
-    for base in [r'C:\oracle', r'C:\app\oracle', r'/u01/app/oracle', '/opt/oracle']:
+    roots = _ORACLE_ROOTS_WIN if os.name == 'nt' else _ORACLE_ROOTS_NIX
+    for base in roots:
         candidates.append(os.path.join(base, 'rdbms', 'admin', 'awrrpt.sql'))
         candidates.append(os.path.join(base, 'product', '19.0.0', 'dbhome_1', 'rdbms', 'admin', 'awrrpt.sql'))
     for c in candidates:
         if c and os.path.isfile(c):
             return c
-    # 回退：在常见根目录下递归查找一层
-    for base in [r'C:\oracle', r'C:\app\oracle', 'C:/', r'/u01']:
+    # 回退：只在已知安装根目录下有限深度递归，不扫描盘符根
+    for base in ([oh] if oh else []) + roots:
         try:
-            for root, _dirs, files in os.walk(base):
-                if 'awrrpt.sql' in files:
-                    return os.path.join(root, 'awrrpt.sql')
-                # 限制深度，避免全盘扫描
-                depth = root[len(base):].count(os.sep) + root[len(base):].count('/')
-                if depth > 5:
-                    _dirs[:] = []
+            found = _walk_limited(base, 'awrrpt.sql')
+            if found:
+                return found
         except Exception:
             continue
     return None
 
 
 def _find_sqlplus():
-    """定位 sqlplus 可执行文件"""
+    """定位 sqlplus 可执行文件（ORACLE_HOME → PATH → 已知安装根目录有限深度）"""
+    exe = 'sqlplus.exe' if os.name == 'nt' else 'sqlplus'
     oh = os.environ.get('ORACLE_HOME', '')
-    for base in [oh] if oh else []:
-        cand = os.path.join(base, 'bin', 'sqlplus.exe' if os.name == 'nt' else 'sqlplus')
+    if oh:
+        cand = os.path.join(oh, 'bin', exe)
         # Instant Client 没有 bin/sqlplus（bin 目录里只有 oci* 动态库），
         # 加 bin 目录存在性守卫，避免误判 ORACLE_HOME=InstantClient 的环境。
-        if os.path.isdir(os.path.join(base, 'bin')) and os.path.isfile(cand):
+        if os.path.isdir(os.path.join(oh, 'bin')) and os.path.isfile(cand):
             return cand
-    if os.name == 'nt':
-        for root, dirs, files in os.walk(r'C:\\'):
-            if 'sqlplus.exe' in files:
-                return os.path.join(root, 'sqlplus.exe')
-            depth = root[3:].count(os.sep)
-            if depth > 5:
-                dirs[:] = []
-    else:
-        import shutil
-        sp = shutil.which('sqlplus')
-        if sp:
-            return sp
+    import shutil
+    sp = shutil.which('sqlplus')
+    if sp:
+        return sp
+    for base in (_ORACLE_ROOTS_WIN if os.name == 'nt' else _ORACLE_ROOTS_NIX):
+        try:
+            found = _walk_limited(base, exe)
+            if found:
+                return found
+        except Exception:
+            continue
     return None
 
 
@@ -522,11 +555,19 @@ def _run_awr_generate_task(task_id, ds_id, start_snap, end_snap, instance_number
             try:
                 import json
                 window = _snapshot_window(inst, start_snap, end_snap, instance_number)
-                meta_payload = {'ds_id': ds_id, 'task_id': task_id,
-                                'ds_name': inst.get('name') or ds_id,
-                                'manual': False}
-                meta_payload.update(window or {})
                 meta_file = os.path.join(awr_dir, f'awr_{task_id}.meta.json')
+                # 合并已有内容：生成阶段可能已写入数据完整性结论，不能被这一步冲掉
+                meta_payload = {}
+                if os.path.isfile(meta_file):
+                    try:
+                        with open(meta_file, 'r', encoding='utf-8') as mf:
+                            meta_payload = json.load(mf) or {}
+                    except Exception:
+                        meta_payload = {}
+                meta_payload.update({'ds_id': ds_id, 'task_id': task_id,
+                                     'ds_name': inst.get('name') or ds_id,
+                                     'manual': False})
+                meta_payload.update(window or {})
                 with open(meta_file, 'w', encoding='utf-8') as f:
                     json.dump(meta_payload, f, ensure_ascii=False)
             except Exception:
@@ -660,18 +701,23 @@ def _generate_awr_html(gen_file, inst, start_snap, end_snap, instance_number, pr
     if plsql_ok:
         return plsql_ok, plsql_msg
 
-    _report('方案1不可用或未成功：' + plsql_msg[:80] + '，尝试方案2：SQL*Plus 执行 awrrpt.sql...')
-    awrrpt = _find_awrrpt()
-    sqlplus = _find_sqlplus()
-    if awrrpt and sqlplus:
-        _report(f'找到 sqlplus={sqlplus}，正在执行 awrrpt.sql...')
-        sp_ok, sp_msg = _gen_awr_via_sqlplus(gen_file, awrrpt, sqlplus, start_snap, end_snap, instance_number)
-        if sp_ok:
-            return sp_ok, sp_msg
-        traceback.print_exc()
+    awrrpt = sqlplus = None
+    sp_msg = ''
+    if not _sqlplus_enabled():
+        sp_msg = 'SQL*Plus 方案未启用（dbc_config.json → awr.sqlplus_enabled）'
+        _report('方案1不可用或未成功：' + plsql_msg[:80] + '，' + sp_msg + '，跳过方案2...')
     else:
-        # 记录方案 2 不可用的原因（用于返回给前端展示）
-        _ = sp_msg = ('未找到 sqlplus/awrrpt: '
+        _report('方案1不可用或未成功：' + plsql_msg[:80] + '，尝试方案2：SQL*Plus 执行 awrrpt.sql...')
+        awrrpt = _find_awrrpt()
+        sqlplus = _find_sqlplus()
+        if awrrpt and sqlplus:
+            _report(f'找到 sqlplus={sqlplus}，正在执行 awrrpt.sql...')
+            sp_ok, sp_msg = _gen_awr_via_sqlplus(gen_file, awrrpt, sqlplus, start_snap, end_snap, instance_number)
+            if sp_ok:
+                return sp_ok, sp_msg
+        else:
+            # 记录方案 2 不可用的原因（用于返回给前端展示）
+            sp_msg = ('未找到 sqlplus/awrrpt: '
                       + ('sqlplus=' + str(sqlplus) if not sqlplus else '')
                       + (' ' if not sqlplus else '')
                       + ('awrrpt=' + str(awrrpt) if not awrrpt else ''))
@@ -686,10 +732,36 @@ def _generate_awr_html(gen_file, inst, start_snap, end_snap, instance_number, pr
     else:
         diag_parts.append(f'PL/SQL 方案失败: {plsql_msg[:120]}')
     if awrrpt is None or sqlplus is None:
-        diag_parts.append('SQL*Plus 方案不可用(缺少完整 Oracle 客户端 sqlplus.exe 或 rdbms/admin/awrrpt.sql)')
-    diag_parts.append('[WARN] 当前走兜底视图方案, 数据集不完整(缺少实例效率/Time Model/ASH/Advisory 等章节), 建议用 SYSDBA 重生成')
+        diag_parts.append('SQL*Plus 方案不可用(' + (sp_msg or '缺少完整 Oracle 客户端 sqlplus.exe 或 rdbms/admin/awrrpt.sql') + ')')
+    integrity = ('当前走兜底视图方案, 数据集不完整(缺少实例效率/Time Model/ASH/Advisory 等章节), '
+                 '建议用 SYSDBA 重生成')
+    diag_parts.append('[WARN] ' + integrity)
     combined_msg = fb_msg + ' | ' + ' | '.join(diag_parts)
+    # 数据完整性落到元数据：Word 报告据此渲染黄色警告，而不是只留在生成日志里
+    if fb_ok:
+        _mark_incomplete(gen_file, integrity, diag_parts)
     return fb_ok, combined_msg
+
+
+def _mark_incomplete(gen_file, warning, details):
+    """把「最小数据集」结论写进 AWR 的 meta.json，供 Word 报告渲染完整性警告。"""
+    try:
+        import json
+        task_id = os.path.basename(gen_file)[4:].rsplit('.', 1)[0]   # awr_<id>.html → <id>
+        meta_file = os.path.join(os.path.dirname(gen_file), f'awr_{task_id}.meta.json')
+        meta = {}
+        if os.path.isfile(meta_file):
+            try:
+                with open(meta_file, 'r', encoding='utf-8') as mf:
+                    meta = json.load(mf) or {}
+            except Exception:
+                meta = {}
+        meta.update({'data_complete': False, 'integrity_warning': warning,
+                     'integrity_details': list(details or [])})
+        with open(meta_file, 'w', encoding='utf-8') as f:
+            json.dump(meta, f, ensure_ascii=False)
+    except Exception:
+        pass
 
 
 def _normalize_awr_html(html_content):
@@ -834,9 +906,10 @@ def _gen_awr_via_sqlplus(gen_file, awrrpt, sqlplus, start_snap, end_snap, instan
     """通过 sqlplus @awrrpt 生成 HTML（参数: 输出文件 实例号 开始快照 结束快照）"""
     awr_dir = os.path.dirname(gen_file)
     rel_out = os.path.basename(gen_file)
-    # 与 awrrpt 在同一工作目录执行，输出相对路径
-    os.chdir(awr_dir)
+    # 工作目录只交给子进程（_run_sqlplus 的 cwd=），不能用 os.chdir：
+    # Flask 是多线程的，改进程 cwd 会同时影响其它请求里的相对路径。
     # 先尝试相对路径 @awrrpt，再尝试绝对路径
+    last = ''
     for target in [os.path.basename(awrrpt), awrrpt]:
         cmdline = (f'"sqlplus" -s / as sysdba @{target} "{rel_out}" {int(instance_number)} '
                    f'{int(start_snap)} {int(end_snap)}')
@@ -1387,6 +1460,10 @@ def api_awr_recent():
                     file_info['end_time'] = meta.get('end_time') or ''
                     file_info['db_name'] = meta.get('db_name') or ''
                     file_info['ds_name'] = meta.get('ds_name') or ''
+                    # 兜底视图方案生成的报告在列表里标「最小数据集」
+                    if meta.get('data_complete') is False:
+                        file_info['data_complete'] = False
+                        file_info['integrity_warning'] = meta.get('integrity_warning') or ''
             except Exception:
                 pass
         # meta 里没有时段（旧报告 / 人工上传）：从报告头解析，保证列表时间准确

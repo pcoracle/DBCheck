@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
 # Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
+
 """硬闸：禁止把数据库/运行态数据提交进版本库。
 
 为什么只靠 .gitignore 不够：
@@ -54,6 +55,7 @@ FORBIDDEN_PATTERNS = (
     r'(^|/)notifier_config\.json$',
     r'(^|/)scheduler_jobs\.json$',
     r'(^|/)instances\.json$',
+    r'(^|/)ssh_profiles\.json$',
     r'(^|/)history\.json$',
     r'\.parsed\.json$',
     r'(^|/)\.web_secret$',

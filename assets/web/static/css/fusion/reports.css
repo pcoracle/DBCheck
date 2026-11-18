@@ -1,0 +1,79 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
+ * Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
+ *
+ * Fusion page styles: 数据库巡检历史（类型/来源/关键词/日期筛选 + 数据源目录左树 + 分页）。
+ * Attribution: 布局与交互设计归 MIT License,
+ * Copyright (c) 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com> 所有，
+ * 按 RaccoonX 的模块结构与主题变量实现。
+ * 左树节点复用 inspection.css 的 wi-tree-* 通用样式；本文件只补 reports 专属布局
+ * （rp- 前缀）与全窗口定高。主题 token 用目标同名变量（--surface/--surface2/--border/
+ * --text/--text-muted/--accent/--bg）。
+ */
+
+/* ── 全窗口布局：筛选栏固定，仅报告列表滚动 ──
+   .main 定高后 .content（flex:1 / min-height:0）自动得到 100vh - 顶栏高度，
+   页面 → 卡片 → rp-split → rp-list-wrap 逐级 flex:1 承接，无需写死像素高度。 */
+.main.reports-active { height: 100vh; min-height: 100vh; overflow: hidden; }
+.main.reports-active .content { overflow: hidden; padding: 0; }
+#page-reports { overflow: hidden; }
+#page-reports > .card {
+  display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0;
+  margin-bottom: 0; padding: 12px 12px 0;
+}
+
+/* ── 左树（数据源目录）+ 右列表，复用 wi-split 布局 ── */
+.rp-split { flex: 1 1 auto; min-height: 0; }
+.rp-list-wrap { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 10px 12px 4px; }
+
+/* ── 报告行：信息列可收缩、文件名可断行、动作按钮窄屏换行 ──
+   长文件名会把整行 min-content 撑宽，将「分析报告 / 分享 / 删除」等按钮挤出
+   列表可视区、再被 overflow:hidden 裁切而看不到。让信息列收缩、按钮组换行，
+   保证动作按钮始终落在可视宽度内（宽屏仍单行，窄屏自动折行）。 */
+#page-reports .report-item { flex-wrap: wrap; }
+#page-reports .ri-info { flex: 1 1 260px; min-width: 0; }
+#page-reports .ri-name { overflow-wrap: anywhere; }
+#page-reports .ri-actions {
+  display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+  flex: 0 1 auto; max-width: 100%; margin-left: auto;
+}
+
+/* 分页栏：固定在滚动区下方（display 由 JS 切换 none/flex，其余布局放这里） */
+.rp-pager {
+  flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 14px; border-top: 1px solid var(--border); background: var(--surface);
+  flex-wrap: wrap;
+}
+
+/* 左树搜索框（sticky 顶）与「显示空目录」开关（sticky 底） */
+.rp-tree-search { position: sticky; top: 0; z-index: 1; padding: 2px 4px 6px; background: var(--surface); }
+.rp-tree-search input {
+  width: 100%; box-sizing: border-box; padding: 5px 8px; font-size: 12px;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text);
+}
+.rp-tree-foot {
+  position: sticky; bottom: 0; display: flex; align-items: center; gap: 5px;
+  padding: 6px 8px; font-size: 11px; color: var(--text-muted);
+  background: var(--surface); border-top: 1px solid var(--border); cursor: pointer; user-select: none;
+}
+.rp-tree-node-ds .wi-tree-name { font-size: 12px; }
+.rp-tree-zero { opacity: .5; }
+
+/* 数据源已删除 → 报告归入「无目录」，行上给出醒目标识 */
+.rp-deleted-tag {
+  margin-left: 6px; font-size: 11px; padding: 2px 7px; border-radius: 4px;
+  background: rgba(239,68,68,.12); color: #ef4444; font-weight: 600;
+}
+
+/* ── 日期范围筛选：隐藏原生占位符，改用自定义占位符（对齐服务器巡检历史页做法） ── */
+#page-reports .sh-date-wrap { position: relative; }
+#page-reports .sh-date-wrap input[type="date"] { color: transparent !important; }
+#page-reports .sh-date-wrap input[type="date"]::-webkit-datetime-edit { color: transparent !important; }
+#page-reports .sh-date-wrap.has-value input[type="date"] { color: var(--text) !important; }
+#page-reports .sh-date-wrap.has-value input[type="date"]::-webkit-datetime-edit { color: var(--text) !important; }
+#page-reports .sh-date-placeholder {
+  position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+  font-size: 12px; color: var(--text-muted); pointer-events: none; white-space: nowrap;
+}
+#page-reports .sh-date-wrap.has-value .sh-date-placeholder { display: none; }

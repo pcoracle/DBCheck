@@ -551,11 +551,216 @@
   /** 选择器入口（opts 与三种 resolve 结果见文件头）。 */
   function dsOpenPicker(opts) { return open(opts); }
 
+  // ── 全站数据源下拉接管 ────────────────────────────────────────────
+  // 原 <select> 隐藏后仍是唯一取值载体，旁边插一枚按钮显示「名称 + 📁 目录」，
+  // 点按钮开选择器；各页原有的 onchange / 提交逻辑一行都不用改。
+  // noAddOption：候选来自监控标签或历史口径的下拉，不能往里塞数据源 id。
+  var DS_SELECT_CONFIG = {
+    'f-datasource': { titleKey: 'webui.ds_picker_title_saved', title: '选择已保存的数据源',
+      allowClear: true, clearKey: 'webui.ds_picker_manual', clearLabel: '手动输入连接信息' },
+    'sched-datasource': { titleKey: 'webui.ds_picker_default_title', title: '选择数据源',
+      allowClear: true, clearKey: 'webui.ds_picker_manual', clearLabel: '手动输入连接信息' },
+    'intel-instance': { titleKey: 'webui.ds_picker_title_diag', title: '选择诊断数据源' },
+    'dh-instance': { titleKey: 'webui.ds_picker_title_filter', title: '按数据源筛选',
+      allowClear: true, clearKey: 'webui.ds_picker_all', clearLabel: '全部数据源', noAddOption: true },
+    'backup-instance-id': { titleKey: 'webui.ds_picker_title_backup', title: '选择备份数据源' },
+    'remote-instance-select': { titleKey: 'webui.ds_picker_title_ssh', title: '选择 SSH 数据源' },
+    'mon-slow-filter-source': { titleKey: 'webui.ds_picker_title_filter', title: '按数据源筛选',
+      allowClear: true, clearKey: 'webui.ds_picker_all', clearLabel: '全部数据源', noAddOption: true },
+    'mon-conn-filter-source': { titleKey: 'webui.ds_picker_title_filter', title: '按数据源筛选',
+      allowClear: true, clearKey: 'webui.ds_picker_all', clearLabel: '全部数据源', noAddOption: true },
+    'monitor-instance-select': { titleKey: 'webui.ds_picker_title_instance', title: '选择目标实例',
+      allowClear: true, noAddOption: true },
+    'sa-instance-select': { titleKey: 'webui.ds_picker_title_instance', title: '选择目标实例',
+      allowClear: true, clearKey: 'webui.ds_picker_no_instance', clearLabel: '不指定实例' },
+    'wt-instance-select': { titleKey: 'webui.ds_picker_title_instance', title: '选择目标实例' },
+    'wf-run-instance': { titleKey: 'webui.ds_picker_title_instance', title: '选择目标实例' },
+    'wf-task-instance': { titleKey: 'webui.ds_picker_default_title', title: '选择数据源' },
+    'aut-instance': { titleKey: 'webui.ds_picker_title_instance', title: '选择目标实例' }
+  };
+
+  function cfgTitle(cfg) {
+    return t(cfg.titleKey || 'webui.ds_picker_default_title', cfg.title || '选择数据源');
+  }
+
+  function cfgClearLabel(cfg) {
+    return cfg.clearKey ? t(cfg.clearKey, cfg.clearLabel) : cfg.clearLabel;
+  }
+
+  function enhanceSelect(sel, cfg) {
+    if (!sel || sel.dataset.dsPickerEnhanced === '1') return;
+    sel.dataset.dsPickerEnhanced = '1';
+    cfg = cfg || {};
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'ds-picker-trigger';
+    btn.innerHTML = '<span class="ds-picker-trigger-label"></span><span class="ds-picker-trigger-dir"></span>' +
+      '<span class="ds-picker-trigger-arrow"><svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">' +
+      '<path d="M7 10l5 5 5-5z"/></svg></span>';
+    var labelEl = btn.querySelector('.ds-picker-trigger-label');
+    var dirEl = btn.querySelector('.ds-picker-trigger-dir');
+
+    // 保持原布局宽度
+    if (sel.style.width) btn.style.width = sel.style.width;
+    if (sel.style.minWidth) btn.style.minWidth = sel.style.minWidth;
+    sel.classList.add('ds-native-hidden');
+    sel.insertAdjacentElement('afterend', btn);
+
+    var cached = null;
+    function ensureData() {
+      if (cached) return Promise.resolve(cached);
+      return pickerData(false).then(function (data) {
+        cached = data;
+        return data;
+      }, function () {
+        cached = { dirs: [], list: [] };
+        return cached;
+      });
+    }
+
+    // 实时监控筛选的 option value 是监控标签「名称 (host:port)」，与 id / name 都不相等，
+    // 统一解析出名称部分再匹配。
+    function nameFromValue(value) {
+      var v = String(value || '');
+      var m = v.match(/^(.*)\s+\([^()]*\)$/);
+      return m ? m[1] : v;
+    }
+
+    function findMeta(value) {
+      if (!cached) return null;
+      var v = String(value);
+      var name = nameFromValue(v);
+      var list = cached.list || [];
+      for (var i = 0; i < list.length; i++) {
+        var d = list[i];
+        if (String(d.id) === v || String(d.name) === v || (name && String(d.name) === name)) return d;
+      }
+      return null;
+    }
+
+    function dirText(meta) {
+      return meta.dir_path || t('webui.ds_picker_unassigned', '未分配');
+    }
+
+    function refreshLabel() {
+      return ensureData().then(function () {
+        var opt = sel.options[sel.selectedIndex];
+        var value = sel.value;
+        btn.disabled = !!sel.disabled;
+        if (!value) {
+          labelEl.textContent = cfgClearLabel(cfg) ||
+            (opt ? String(opt.textContent || '').replace(/^-+|-+$/g, '').trim() : '') ||
+            t('webui.ds_picker_trigger_ph', '请选择数据源');
+          dirEl.textContent = '';
+          btn.title = labelEl.textContent;
+          return;
+        }
+        var meta = findMeta(value);
+        labelEl.textContent = meta ? (meta.name || value)
+                                   : (opt ? String(opt.textContent || '').trim() : value);
+        dirEl.textContent = meta ? ('📁 ' + dirText(meta)) : '';
+        btn.title = labelEl.textContent + (meta ? (' · ' + dirText(meta)) : '');
+      });
+    }
+
+    sel.addEventListener('change', refreshLabel);
+    // 各页会在打开弹窗 / 切类型时重填 option，标签与目录必须跟着刷新
+    new MutationObserver(function () { refreshLabel(); }).observe(sel, { childList: true, subtree: true });
+    new MutationObserver(function () { btn.disabled = !!sel.disabled; })
+      .observe(sel, { attributes: true, attributeFilter: ['disabled'] });
+
+    btn.addEventListener('click', function () {
+      pickerData(true).then(function (live) {
+        cached = live;
+        var allowed = new Set();
+        Array.prototype.forEach.call(sel.options, function (o) {
+          if (!o.value) return;
+          allowed.add(String(o.value));
+          allowed.add(nameFromValue(o.value));
+        });
+        var current = sel.value;
+        return open({
+          title: cfgTitle(cfg),
+          multi: false,
+          allowClear: !!cfg.allowClear,
+          clearLabel: cfgClearLabel(cfg),
+          selected: current ? [current, nameFromValue(current)] : [],
+          dataList: live.list,
+          allowedTokens: allowed
+        }).then(function (result) {
+          if (result === undefined) return;  // 取消 / ✕ / Esc：什么都不改
+          if (result === null) {             // 清除选择：显式置空并通知页面
+            sel.value = '';
+            sel.dispatchEvent(new Event('change', { bubbles: true }));
+            refreshLabel();
+            return;
+          }
+          var label = result.name
+            ? String(result.name) + ' (' + (result.host || '?') + ':' + (result.port || '?') + ')'
+            : '';
+          var targetValue = null;
+          Array.prototype.forEach.call(sel.options, function (o) {
+            if (targetValue !== null) return;
+            if (String(o.value) === String(result.id) || String(o.value) === String(result.name) ||
+                (label && String(o.value) === label)) targetValue = o.value;
+          });
+          if (targetValue === null && result.name) {
+            // 兜底：value 是「名称 (host:port)」标签但 host/port 与当前记录不一致时按名称匹配
+            Array.prototype.forEach.call(sel.options, function (o) {
+              if (targetValue !== null) return;
+              if (nameFromValue(o.value) === String(result.name)) targetValue = o.value;
+            });
+          }
+          if (targetValue === null) {
+            if (cfg.noAddOption) return;
+            var opt = document.createElement('option');
+            opt.value = result.id;
+            opt.textContent = result.name || result.id;
+            // SQL 审计 / 工单下拉靠 option 上的 data-db 传库类型，补选项时不能丢
+            if (result.db_type) opt.setAttribute('data-db', result.db_type);
+            sel.appendChild(opt);
+            targetValue = opt.value;
+          }
+          sel.value = targetValue;
+          sel.dispatchEvent(new Event('change', { bubbles: true }));
+          refreshLabel();
+        });
+      }).catch(function (err) {
+        notify(t('webui.ds_picker_load_failed', '加载数据源失败: ') + (err && err.message), 'error');
+      });
+    });
+    refreshLabel();
+  }
+
+  function enhanceAllSelects() {
+    Object.keys(DS_SELECT_CONFIG).forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) enhanceSelect(el, DS_SELECT_CONFIG[id]);
+    });
+  }
+
   window.FusionDsPicker = {
     open: dsOpenPicker,
     normType: normType,
     pickerData: pickerData,
     dirNameById: dirNameById,
-    matchesSearch: matchesSearch
+    matchesSearch: matchesSearch,
+    enhanceSelect: enhanceSelect,
+    enhanceAllSelects: enhanceAllSelects
   };
+  window.dsOpenPicker = dsOpenPicker;
+  window.dsEnhanceSelect = enhanceSelect;
+  window.dsEnhanceAllSelects = enhanceAllSelects;
+
+  enhanceAllSelects();
+  // 页面切换后新出现的下拉也要接管（弹窗内的 select 元素本身不重建，靠 MutationObserver）
+  if (typeof window.showPage === 'function' && !window._dsShowPageWrapped) {
+    window._dsShowPageWrapped = true;
+    var origShowPage = window.showPage;
+    window.showPage = function () {
+      var ret = origShowPage.apply(this, arguments);
+      setTimeout(enhanceAllSelects, 0);
+      return ret;
+    };
+  }
 })();

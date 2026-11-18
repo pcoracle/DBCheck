@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
 # Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
+
 """新功能菜单种子同步器：让 nav-item、menus_data、九语言 menu.* 键始终一致。
 
 为什么需要它（每一条都是真实踩过的坑）：

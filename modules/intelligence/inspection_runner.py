@@ -59,6 +59,9 @@ def _build_db_info(db_type: str, instance: Dict[str, Any]) -> Dict[str, Any]:
         "sysdba": bool(instance.get("sysdba", False)),
         "name": instance.get("name", ""),
         "label": label,
+        # 数据源持久化的 Zabbix 绑定：run_oracle_full 据此解析系统资源采集目标
+        "zabbix_host_ip": instance.get("zabbix_host_ip", "") or "",
+        "zabbix_host_name": instance.get("zabbix_host_name", "") or "",
     }
 
 

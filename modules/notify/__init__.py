@@ -401,24 +401,35 @@ class EmailNotifier:
             cc = [x.strip() for x in cc.split(',') if x.strip()]
         self.cc = cc
 
-    def _with_cc(self, recipients):
-        """合并收件人与抄送人，去重并保持顺序。"""
-        if isinstance(recipients, str):
-            recipients = [x.strip() for x in recipients.split(',') if x.strip()]
+    @staticmethod
+    def _split_addrs(value):
+        """把逗号分隔字符串或列表统一成去空白的地址列表。"""
+        if isinstance(value, str):
+            value = value.split(',')
+        return [str(x).strip() for x in (value or []) if str(x).strip()]
+
+    def _with_cc(self, recipients, cc=None):
+        """合并收件人与抄送人，去重并保持顺序。
+
+        cc 为 None 时用配置里的抄送人；显式传入（含空列表）时以传入值为准，
+        供定时任务用任务级抄送人覆盖全局配置。
+        """
+        cc_list = self.cc if cc is None else self._split_addrs(cc)
         out = []
-        for addr in list(recipients or []) + list(self.cc or []):
-            addr = (addr or '').strip()
-            if addr and addr not in out:
+        for addr in self._split_addrs(recipients) + cc_list:
+            if addr not in out:
                 out.append(addr)
         return out
 
     def send_report(self, label, db_type, report_file, recipients=None, custom_msg=None,
-                    issue_count=None, report_url=None):
+                    issue_count=None, report_url=None, cc=None):
         if not recipients:
             recipients = self.recipients or []
+        recipients = self._split_addrs(recipients)
         if not recipients:
             raise ValueError('没有指定收件人')
-        delivery_recipients = self._with_cc(recipients)
+        cc_list = self.cc if cc is None else self._split_addrs(cc)
+        delivery_recipients = self._with_cc(recipients, cc_list)
 
         now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
@@ -444,8 +455,8 @@ class EmailNotifier:
         msg = MIMEMultipart('mixed')
         msg['From'] = self.user
         msg['To'] = ', '.join(recipients)
-        if self.cc:
-            msg['Cc'] = ', '.join(self.cc)
+        if cc_list:
+            msg['Cc'] = ', '.join(cc_list)
         msg['Subject'] = '[DBCheck] %s - %s 巡检报告 %s' % (
             label, db_type, now[:10])
 

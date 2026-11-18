@@ -1,0 +1,80 @@
+<!--
+  SPDX-License-Identifier: Apache-2.0
+  Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
+  Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
+
+  Fusion page: Zabbix 监控（MVP）。
+  左栏是本地手工主机清单（登记 IP/主机名/备注，可增删改），选中后按
+  IP/主机名匹配 Zabbix 主机，右栏显示 6 张指标卡 + 磁盘明细 + 活动问题。
+  数据全部来自 Zabbix 最新值，不落本地指标库；历史曲线属完整版范围。
+-->
+<div class="page-header">
+  <h2>📊 <span data-i18n="webui.nav_zabbix_monitor">Zabbix 监控</span></h2>
+  <p class="page-sub" data-i18n="webui.zabbix_monitor_desc">查看 Zabbix 纳管主机的关键指标与活动问题</p>
+</div>
+
+<div class="zbxm-layout">
+  <!-- 左栏：本地手工主机清单 -->
+  <div class="card zbxm-host-panel">
+    <div class="card-title">
+      <span>🖥️</span> <span data-i18n="webui.zbxm_hosts_title">主机列表</span>
+      <span class="badge" id="zbxm-host-count"></span>
+    </div>
+    <div class="zbxm-host-toolbar">
+      <input type="text" id="zbxm-search" class="form-input"
+             data-i18n-placeholder="webui.zbxm_search_ph" placeholder="搜索主机名 / IP"
+             oninput="FusionZabbixMonitor.onSearch()" />
+      <button class="btn btn-ghost" onclick="FusionZabbixMonitor.showAdd()"
+              data-i18n-title="webui.zbxm_add_btn" title="批量添加">➕</button>
+      <button class="btn btn-ghost" id="zbxm-btn-refresh" onclick="FusionZabbixMonitor.refresh()"
+              data-i18n-title="webui.zbxm_refresh" title="刷新">🔄</button>
+    </div>
+    <div class="zbxm-host-list" id="zbxm-host-list"></div>
+  </div>
+
+  <!-- 右栏：仪表盘 -->
+  <div class="card" id="zbxm-dashboard">
+    <div class="zbxm-empty" id="zbxm-body">
+      <div class="icon">📊</div>
+      <div data-i18n="webui.zbxm_empty_hint">请点击左侧主机查看监控数据</div>
+    </div>
+  </div>
+</div>
+
+<!-- 批量添加弹窗：每行一台，IP [主机名] [备注] -->
+<div id="zbxm-add-modal" class="zbxm-modal" style="display:none">
+  <div class="zbxm-modal-box">
+    <div class="zbxm-modal-title" data-i18n="webui.zbxm_add_title">批量添加服务器</div>
+    <textarea id="zbxm-add-textarea" class="form-input" rows="7"
+              data-i18n-placeholder="webui.zbxm_add_ph"
+              placeholder="每行一台：IP 主机名 备注（空格分隔，主机名与备注可省略）"></textarea>
+    <div class="zbxm-modal-hint" data-i18n="webui.zbxm_add_hint">登记后在左侧选中，按 IP / 主机名匹配 Zabbix 主机查看指标</div>
+    <div class="zbxm-modal-foot">
+      <button class="btn btn-ghost" onclick="FusionZabbixMonitor.closeAdd()" data-i18n="webui.cancel">取消</button>
+      <button class="btn btn-primary" onclick="FusionZabbixMonitor.doAdd()" data-i18n="webui.zbxm_save">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 编辑弹窗：IP / 主机名 / 备注 -->
+<div id="zbxm-edit-modal" class="zbxm-modal" style="display:none">
+  <div class="zbxm-modal-box">
+    <div class="zbxm-modal-title" data-i18n="webui.zbxm_edit_title">编辑服务器</div>
+    <div class="zbxm-modal-field">
+      <label data-i18n="webui.zbxm_f_ip">IP 地址</label>
+      <input id="zbxm-edit-ip" class="form-input" />
+    </div>
+    <div class="zbxm-modal-field">
+      <label data-i18n="webui.zbxm_f_hostname">主机名</label>
+      <input id="zbxm-edit-hostname" class="form-input" />
+    </div>
+    <div class="zbxm-modal-field">
+      <label data-i18n="webui.zbxm_f_remark">备注</label>
+      <input id="zbxm-edit-remark" class="form-input" />
+    </div>
+    <div class="zbxm-modal-foot">
+      <button class="btn btn-ghost" onclick="FusionZabbixMonitor.closeEdit()" data-i18n="webui.cancel">取消</button>
+      <button class="btn btn-primary" onclick="FusionZabbixMonitor.doEdit()" data-i18n="webui.zbxm_save">保存</button>
+    </div>
+  </div>
+</div>

@@ -825,7 +825,7 @@ _chat_sessions = {}
 _CHAT_HISTORY_LIMIT = 20  # 每个会话最多保留 20 条消息
 
 # ── 用户认证 ───────────────────────────────────────────────
-from modules.web.auth import init_default_user, register_auth_routes
+from modules.web.auth import init_default_user, register_auth_routes, login_required
 init_default_user()
 register_auth_routes(app)
 
@@ -939,77 +939,319 @@ def format_bytes(n):
         return f"{n:.1f}PB"
     except: return str(n)
 
-def get_reports():
+def _name_matches_db_type(name, db_type):
+    """按文件名匹配数据库类型（与列表类型筛选按钮的规范值一致）。"""
+    if db_type == 'MySQL':      return 'MySQL' in name
+    if db_type == 'PostgreSQL': return 'PostgreSQL' in name or 'Postgres' in name
+    if db_type == 'Oracle':     return 'Oracle' in name
+    if db_type == 'DM8':        return 'DM8' in name or '达梦' in name
+    if db_type == 'SQLServer':  return 'SQLServer' in name
+    if db_type == 'TiDB':       return 'TiDB' in name
+    if db_type == 'IvorySQL':   return 'IvorySQL' in name
+    if db_type == 'YashanDB':   return 'YashanDB' in name
+    return True
+
+
+def _detect_db_type(filename):
+    """按报告文件名推断数据库类型（列表与单报告元数据共用）。"""
+    name = filename or ''
+    if 'DM8' in name or '达梦' in name: return 'DM8'
+    if 'Oracle' in name: return 'Oracle'
+    if 'PostgreSQL' in name or 'PG' in name: return 'PostgreSQL'
+    if 'SQLServer' in name: return 'SQLServer'
+    if 'TiDB' in name: return 'TiDB'
+    if 'IvorySQL' in name: return 'IvorySQL'
+    if 'YashanDB' in name: return 'YashanDB'
+    if 'Kingbase' in name: return 'Kingbase'
+    if 'GBase' in name: return 'GBase'
+    return 'MySQL'
+
+
+def _date_to_ts(date_str, end=False):
+    """'YYYY-MM-DD' → epoch 秒（end=True 取当天 23:59:59）；非法返回 None。"""
+    try:
+        fmt = date_str + (' 23:59:59' if end else ' 00:00:00')
+        return time.mktime(time.strptime(fmt, '%Y-%m-%d %H:%M:%S'))
+    except Exception:
+        return None
+
+
+def _make_content_disposition(filename):
+    """构建兼容中文的 Content-Disposition 头（RFC 5987）"""
+    from urllib.parse import quote
+    quoted = quote(filename, safe='')
+    return f"attachment; filename=\"{quoted}\"; filename*=UTF-8''{quoted}"
+
+
+def _get_auto_analyze_from_db(filename_or_path):
+    """从 inspection_history 表中获取 auto_analyze JSON 数据
+
+    优先按 report_path 匹配，其次按文件名中的时间戳匹配。
+    返回完整的规则引擎分析结果列表（含 fix_sql），未找到时返回 None。
+
+    参数:
+        filename_or_path: str — 报告文件名或完整路径
+
+    返回:
+        list[dict] | None — smart_analyze 输出的风险项列表
+    """
+    pro_db = str(paths.PRO_DATA_DIR / 'pro_history.db')
+    if not os.path.isfile(pro_db):
+        return None
+
+    filename = os.path.basename(filename_or_path) if os.path.sep in filename_or_path else filename_or_path
+    try:
+        conn = sqlite3.connect(pro_db)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='inspection_history'")
+        if not cursor.fetchone():
+            conn.close()
+            return None
+
+        # 优先按 report_path 匹配
+        cursor.execute(
+            "SELECT auto_analyze FROM inspection_history WHERE report_path LIKE ? ORDER BY id DESC LIMIT 1",
+            ('%' + filename,))
+        row = cursor.fetchone()
+
+        # 如果没找到，尝试用文件名中的时间戳匹配
+        if not row:
+            ts_match = re.search(r'(\d{14})', filename)
+            if ts_match:
+                ts = ts_match.group(1)
+                dt_str = f"{ts[:4]}-{ts[4:6]}-{ts[6:8]}T{ts[8:10]}:{ts[10:12]}:{ts[12:14]}"
+                cursor.execute(
+                    "SELECT auto_analyze FROM inspection_history WHERE inspect_time LIKE ? ORDER BY id DESC LIMIT 1",
+                    (dt_str[:13] + '%',))
+                row = cursor.fetchone()
+
+        conn.close()
+        if row and row['auto_analyze']:
+            items = json.loads(row['auto_analyze'])
+            if isinstance(items, list):
+                return items  # 空列表也返回，表示规则引擎已运行
+    except Exception:
+        pass
+    return None
+
+
+def get_reports(page=0, page_size=0, db_type=None, keyword=None,
+                trigger_type=None, date_from=None, date_to=None,
+                dir_id=None, instance_id=None, no_dir=False):
+    """巡检报告列表（服务端筛选 + 数据源目录左树计数 + 分页）。
+
+    筛选维度：类型 / 来源 / 关键字 / 日期区间 / 数据源 / 目录 / 无目录。
+    左树计数在「其余筛选之后、目录/数据源筛选之前」的全量集合上统计，
+    保证选中某节点后其它节点计数不塌陷。page_size=0 返回全部（兼容旧调用方）。
+    """
     reports_dir = str(paths.REPORTS_DIR)
     reports = []
-    # 读取 pro_history.db 中的风险统计，key 为报告文件名
+    # 读取 pro_history.db 中的风险统计与来源/归属，key 为报告文件名
     risk_map = {}
     try:
-        import sqlite3
         pro_db = str(paths.PRO_DATA_DIR / 'pro_history.db')
         if os.path.isfile(pro_db):
             conn = sqlite3.connect(pro_db)
+            conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='inspection_history'")
             if cursor.fetchone():
-                cursor.execute("SELECT report_path, auto_analyze, health_score, risk_count, risk_level FROM inspection_history")
+                cursor.execute("SELECT report_path, instance_id, instance_name, host, "
+                               "auto_analyze, health_score, risk_count, risk_level, trigger_type "
+                               "FROM inspection_history")
                 for row in cursor.fetchall():
-                    report_path, auto_analyze_json, health_score, risk_count, risk_level = row
-                    if report_path:
-                        fname = os.path.basename(report_path)
-                        high = mid = low = 0
-                        if auto_analyze_json:
-                            try:
-                                import json as _json
-                                items = _json.loads(auto_analyze_json)
-                                for it in items:
-                                    lvl = str(it.get('col4', '') or it.get('col2', ''))
-                                    if '高' in lvl or 'high' in lvl.lower():
-                                        high += 1
-                                    elif '中' in lvl or 'mid' in lvl.lower():
-                                        mid += 1
-                                    else:
-                                        low += 1
-                            except Exception:
-                                pass
-                        risk_map[fname] = {
-                            'high': high, 'mid': mid, 'low': low,
-                            'health_score': health_score,
-                            'risk_level': risk_level,
-                            'auto_analyze': auto_analyze_json
-                        }
+                    report_path = row['report_path']
+                    if not report_path:
+                        continue
+                    fname = os.path.basename(report_path)
+                    auto_analyze_json = row['auto_analyze']
+                    health_score = row['health_score']
+                    risk_level = row['risk_level']
+                    risk_count = row['risk_count']
+                    high = mid = low = 0
+                    if auto_analyze_json:
+                        try:
+                            items = json.loads(auto_analyze_json)
+                            for it in items:
+                                lvl = str(it.get('col4', '') or it.get('col2', ''))
+                                if '高' in lvl or 'high' in lvl.lower():
+                                    high += 1
+                                elif '中' in lvl or 'mid' in lvl.lower():
+                                    mid += 1
+                                else:
+                                    low += 1
+                        except Exception:
+                            pass
+                    # 历史/定时巡检记录可能未写 auto_analyze，用 risk_count + risk_level 兜底，
+                    # 避免风险列误判为「无问题」。
+                    if high + mid + low == 0 and risk_count:
+                        try:
+                            rc = int(risk_count)
+                        except (TypeError, ValueError):
+                            rc = 0
+                        rl = str(risk_level or '')
+                        if rc > 0 and ('高' in rl or 'high' in rl.lower()):
+                            high = rc
+                        elif rc > 0 and ('中' in rl or 'mid' in rl.lower() or 'medium' in rl.lower()):
+                            mid = rc
+                        elif rc > 0:
+                            low = rc
+                    risk_map[fname] = {
+                        'high': high, 'mid': mid, 'low': low,
+                        'health_score': health_score,
+                        'risk_level': risk_level,
+                        'auto_analyze': auto_analyze_json,
+                        'trigger_type': row['trigger_type'] or 'manual',
+                        'instance_id': row['instance_id'] or '',
+                        'instance_name': row['instance_name'] or '',
+                        'host': row['host'] or '',
+                    }
             conn.close()
     except Exception:
         pass
 
+    # 数据源目录映射（报告列表展示完整目录 + 左树按数据源/目录筛选）
+    instance_meta = {}
+    instance_meta_by_name = {}
+    instance_meta_by_host = {}
+    dir_prefix = ''        # dir_id 筛选时用的物化路径前缀
+    dir_filter_ok = False  # 传了 dir_id 但目录不存在 → 结果为空
+    try:
+        from modules.pro import get_instance_manager
+        im = get_instance_manager()
+        for inst in im.get_all_instances(mask_password=True, include_deleted=True):
+            iid = str(inst.get('id') or '')
+            deleted = bool(inst.get('deleted'))
+            meta = {
+                'iid': iid,
+                'deleted': deleted,
+                'dir_id': inst.get('dir_id') or '',
+                'dir_path': inst.get('dir_path') or '未分配',
+                'labels': list(inst.get('labels') or []),
+                'node_count': int(inst.get('node_count') or 0),
+            }
+            instance_meta[iid] = meta
+            if inst.get('name'):
+                instance_meta_by_name[str(inst.get('name')).strip().lower()] = meta
+            if inst.get('host'):
+                instance_meta_by_host[str(inst.get('host')).strip()] = meta
+        if dir_id:
+            target = next((d for d in im.get_all_dirs()
+                           if str(d.get('id') or '') == dir_id), None)
+            if target:
+                dir_prefix = target.get('full_path') or ''
+                dir_filter_ok = True
+    except Exception:
+        pass
+    if dir_id and not dir_filter_ok:
+        return {'files': [], 'total': 0, 'page': 1, 'page_size': page_size or 0,
+                'instance_counts': {}, 'no_dir_count': 0}
+
     if os.path.isdir(reports_dir):
         try:
-            files = [f for f in os.listdir(reports_dir)
+            names = [f for f in os.listdir(reports_dir)
                      if f.endswith('.docx') and not f.startswith('~$')
                      and not f.startswith('服务器巡检_')]
         except Exception:
-            files = []
-        for f in sorted(files, key=lambda x: os.path.getmtime(os.path.join(reports_dir, x)), reverse=True):
+            names = []
+        # 单次 os.stat 拿 size/mtime，避免排序与循环各 stat 一次的双倍开销
+        entries = []
+        for f in names:
             fp = os.path.join(reports_dir, f)
             try:
-                size = os.path.getsize(fp)
-                mtime = os.path.getmtime(fp)
+                st = os.stat(fp)
+                entries.append((f, st.st_size, st.st_mtime))
             except Exception:
                 continue
-            db_type = 'DM8' if 'DM8' in f or '达梦' in f else \
-                      'Oracle' if 'Oracle' in f else \
-                      'PostgreSQL' if 'PG' in f or 'PostgreSQL' in f else 'MySQL'
+        entries.sort(key=lambda x: x[2], reverse=True)
+        for f, size, mtime in entries:
+            # 不能用 db_type 作循环变量，否则会覆盖函数入参，
+            # 导致类型筛选恒按「最后一个文件的类型」执行。
+            file_db_type = _detect_db_type(f)
             stats = risk_map.get(f, {})
+            meta = (instance_meta.get(str(stats.get('instance_id') or '')) or
+                    instance_meta_by_name.get(str(stats.get('instance_name') or '').strip().lower()) or
+                    instance_meta_by_host.get(str(stats.get('host') or '').strip()) or
+                    {'iid': '', 'deleted': False, 'dir_id': '', 'dir_path': '',
+                     'labels': [], 'node_count': 0})
+            # 数据源已删除 → 报告归入「无目录」（左树口径）
+            deleted_inst = bool(meta['deleted'])
+            eff_dir_path = '' if deleted_inst else meta['dir_path']
+            trig = stats.get('trigger_type', 'manual')
             reports.append({
-                'name': f, 'size': size, 'mtime': mtime, 'db_type': db_type,
+                'name': f, 'size': size, 'mtime': mtime, 'db_type': file_db_type,
                 'high': stats.get('high', 0),
                 'mid': stats.get('mid', 0),
                 'low': stats.get('low', 0),
                 'health_score': stats.get('health_score'),
                 'risk_level': stats.get('risk_level', ''),
-                'auto_analyze': stats.get('auto_analyze', '')
+                'auto_analyze': stats.get('auto_analyze', ''),
+                'trigger_type': trig,
+                'trigger': trig,
+                'instance_id': '' if deleted_inst else meta['iid'],
+                'instance_name': stats.get('instance_name', ''),
+                'host': stats.get('host', ''),
+                'instance_deleted': deleted_inst,
+                'dir_id': '' if deleted_inst else meta['dir_id'],
+                'dir_path': eff_dir_path,
+                'labels': meta['labels'],
+                'node_count': meta['node_count'],
+                '_eff_dir_path': eff_dir_path,
             })
-    return {'files': reports}
+
+    # ── 筛选（服务端下推）──
+    if db_type:
+        reports = [r for r in reports if _name_matches_db_type(r['name'], db_type)]
+    if trigger_type:
+        reports = [r for r in reports if (r.get('trigger_type') or 'manual') == trigger_type]
+    if keyword:
+        kw = keyword.lower()
+        reports = [r for r in reports
+                   if kw in (r.get('name') or '').lower()
+                   or kw in (r.get('instance_name') or '').lower()
+                   or kw in (r.get('host') or '').lower()]
+    if date_from:
+        ts = _date_to_ts(date_from, end=False)
+        if ts is not None:
+            reports = [r for r in reports if r['mtime'] >= ts]
+    if date_to:
+        ts = _date_to_ts(date_to, end=True)
+        if ts is not None:
+            reports = [r for r in reports if r['mtime'] <= ts]
+
+    # ── 左树计数：在「其余筛选之后、目录/数据源筛选之前」的全量集合上统计 ──
+    instance_counts = {}
+    no_dir_count = 0
+    for r in reports:
+        iid = r.get('instance_id') or ''
+        if iid:
+            instance_counts[iid] = instance_counts.get(iid, 0) + 1
+        else:
+            no_dir_count += 1
+
+    # ── 左树筛选（三选一）──
+    if instance_id:
+        reports = [r for r in reports if (r.get('instance_id') or '') == instance_id]
+    elif dir_id:
+        reports = [r for r in reports
+                   if r['_eff_dir_path'] == dir_prefix
+                   or (dir_prefix and (r['_eff_dir_path'] or '').startswith(dir_prefix + '/'))]
+    elif no_dir:
+        reports = [r for r in reports if not (r.get('instance_id') or '')]
+
+    for r in reports:
+        r.pop('_eff_dir_path', None)
+
+    total = len(reports)
+    tree_stats = {'instance_counts': instance_counts, 'no_dir_count': no_dir_count}
+    # reports 已按 mtime 倒序，分页直接切片
+    if page_size and page_size > 0:
+        page = max(1, page or 1)
+        start = (page - 1) * page_size
+        return {'files': reports[start:start + page_size], 'total': total,
+                'page': page, 'page_size': page_size, **tree_stats}
+    return {'files': reports, 'total': total, 'page': 1, 'page_size': 0, **tree_stats}
 
 
 # ── 远程终端 API ──────────────────────────────────────────
@@ -1126,6 +1368,12 @@ def run_inspection_task(task_id, db_info, inspector_name, template_id=None, chap
             _task['error_msg'] = '缺少数据库类型'
         socketio.emit('error', {'msg': '缺少数据库类型'}, room=task_id)
         return
+
+    # 来源标记：任务记录可能已由调用方写好（AI 助手=ai_assistant、定时子进程=scheduled），
+    # 未写时按 db_info 透传袋回落，默认人工巡检。供巡检历史按来源筛选。
+    _trig_task = tasks.get(task_id)
+    if _trig_task is not None and not _trig_task.get('trigger_type'):
+        _trig_task['trigger_type'] = db_info.get('trigger_type') or 'manual'
 
     # KingbaseES 数据库名修正：若未设置或为 postgres（从 PG 复制而来），则改为 kingbase
     if db_type == 'kingbase':
@@ -1518,6 +1766,26 @@ def run_inspection_task(task_id, db_info, inspector_name, template_id=None, chap
         for _zk in ('syscollect_mode', 'zabbix_host', 'zabbix_hostname'):
             if db_info.get(_zk):
                 ssh_info[_zk] = db_info[_zk]
+        if ssh_info.get('zabbix_host') or ssh_info.get('zabbix_hostname'):
+            ssh_info.setdefault('zabbix_source', 'explicit')
+
+        # 数据源上持久化的 Zabbix 绑定：向导没有当次指定目标时按绑定取，
+        # 定时巡检因此也能拿到 CPU/内存/磁盘。用户显式选了 SSH / 不采集时不注入，
+        # 不覆盖当次选择；未绑定的数据源直接跳过，不联网探测。
+        _zb_mode = (ssh_info.get('syscollect_mode') or '').strip()
+        if _zb_mode not in ('ssh', 'none') and not (
+                ssh_info.get('zabbix_host') or ssh_info.get('zabbix_hostname')):
+            try:
+                from modules.zabbix.binding import resolve_inspection_target
+                _zi, _zsrc = resolve_inspection_target(db_info)
+                if _zi and (_zi.get('host_ip') or _zi.get('hostname')):
+                    ssh_info['zabbix_host'] = _zi.get('host_ip') or ''
+                    ssh_info['zabbix_hostname'] = _zi.get('hostname') or ''
+                    ssh_info['zabbix_source'] = _zsrc
+                    print('[INFO] 系统资源将通过 Zabbix 采集（来源: %s，主机: %s）'
+                          % (_zsrc, _zi.get('hostname') or _zi.get('host_ip')))
+            except Exception as _zerr:
+                print('[WARN] Zabbix 采集目标解析失败: %s' % _zerr)
 
         # MongoDB 专用参数透传到 ssh_info（供插件 getData → MongoConnectionConfig 使用）
         if db_type == 'mongodb':
@@ -1787,7 +2055,9 @@ def run_inspection_task(task_id, db_info, inspector_name, template_id=None, chap
                 report_path=ofile,
                 duration=0,
                 host=db_info.get('ip', ''),
-                auto_analyze=auto_analyze if auto_analyze else []
+                auto_analyze=auto_analyze if auto_analyze else [],
+                trigger_type=task_record.get('trigger_type') or 'manual',
+                task_id=task_id
             )
         except Exception as e:
             _emit('log', {'msg': f"[警告] Pro 巡检记录保存失败: {e}"})
@@ -3484,8 +3754,24 @@ def index():
         aias_impl = _req.args.get('aias_impl') or aias_impl
     except Exception:
         aias_impl = 'source'
+    # 服务器巡检实现选择（回退开关）：
+    #   fusion（默认）= 移植自源系统的配置表 + 执行/日志弹窗 + 历史卡片页；
+    #   legacy        = 目标原内联表单 + 结果卡 + 简版历史，出问题时改这个键即可退回。
+    # 临时切换还可以带 URL 参数 ?server_inspect_impl=legacy 便于两套并排对比。
+    server_inspect_impl = 'fusion'
+    try:
+        import json as _json_mod
+        _cfg_path = os.path.join(BASE_DIR, 'dbc_config.json')
+        if os.path.exists(_cfg_path):
+            with open(_cfg_path, 'r', encoding='utf-8') as _fh:
+                server_inspect_impl = (_json_mod.load(_fh) or {}).get('server_inspect_impl', 'fusion')
+        from flask import request as _req
+        server_inspect_impl = _req.args.get('server_inspect_impl') or server_inspect_impl
+    except Exception:
+        server_inspect_impl = 'fusion'
     resp = make_response(render_template('index.html', version=__version__, edition=EDITION, lang=lang, i18n_data=i18n_data,
                            aias_source_ui=(aias_impl != 'fusion'),
+                           server_inspect_fusion_ui=(server_inspect_impl != 'legacy'),
                            pro_available=pro_available,
                            rules_available=rules_available,
                            admin_token=get_admin_token(),
@@ -3532,7 +3818,21 @@ def api_set_lang():
 @app.route('/api/reports')
 def api_reports():
     try:
-        return jsonify(get_reports())
+        page = request.args.get('page', type=int, default=0) or 0
+        page_size = request.args.get('page_size', type=int, default=0) or 0
+        db_type = (request.args.get('db_type') or '').strip() or None
+        keyword = (request.args.get('keyword') or '').strip() or None
+        trigger_type = (request.args.get('trigger_type') or '').strip() or None
+        date_from = (request.args.get('date_from') or '').strip() or None
+        date_to = (request.args.get('date_to') or '').strip() or None
+        dir_id = (request.args.get('dir_id') or '').strip() or None
+        instance_id = (request.args.get('instance_id') or '').strip() or None
+        no_dir = (request.args.get('no_dir') or '').strip() in ('1', 'true', 'yes')
+        return jsonify(get_reports(page=page, page_size=page_size, db_type=db_type,
+                                   keyword=keyword, trigger_type=trigger_type,
+                                   date_from=date_from, date_to=date_to,
+                                   dir_id=dir_id, instance_id=instance_id,
+                                   no_dir=no_dir))
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -3663,6 +3963,33 @@ def api_download_pdf_by_task(task_id):
     pdf_name = os.path.splitext(base)[0] + '.pdf'
     return send_file(pdf_path, as_attachment=True, download_name=pdf_name)
 
+@app.route('/api/download_html/<task_id>')
+def api_download_html_by_task(task_id):
+    """按任务 ID 下载 HTML 格式报告（自动将 DOCX 转为 HTML）"""
+    task = tasks.get(task_id)
+    if not task or not task.get('report_file'):
+        return "Report not found", 404
+    docx_path = task['report_file']
+    if not os.path.isfile(docx_path):
+        return "Report file not found", 404
+    try:
+        from modules.web.docx_to_html import convert_docx_to_html
+        # 优先使用内存中的 auto_analyze，其次从数据库获取（含 fix_sql）
+        ai = task.get('auto_analyze')
+        if not ai:
+            ai = _get_auto_analyze_from_db(docx_path)
+        html_content = convert_docx_to_html(docx_path, analysis_issues=ai)
+        base_name = os.path.splitext(task.get('report_name', 'report.docx'))[0]
+        download_name = base_name + '.html'
+        return Response(
+            html_content,
+            mimetype='text/html; charset=utf-8',
+            headers={'Content-Disposition': _make_content_disposition(download_name)}
+        )
+    except Exception as e:
+        traceback.print_exc(file=sys.stdout)
+        return f"HTML conversion failed: {e}", 500
+
 @app.route('/api/download_file')
 def api_download_file():
     name = request.args.get('name', '')
@@ -3671,6 +3998,76 @@ def api_download_file():
     if not os.path.isfile(fp):
         return "File not found", 404
     return send_file(fp, as_attachment=True, download_name=name)
+
+
+@app.route('/api/download_file_html')
+def api_download_file_html():
+    """按文件名下载 HTML 格式报告（自动将 DOCX 转为 HTML）"""
+    name = request.args.get('name', '')
+    if not name:
+        return "Name parameter required", 400
+    reports_dir = str(paths.REPORTS_DIR)
+    fp = os.path.join(reports_dir, os.path.basename(name))
+    if not os.path.isfile(fp):
+        return "File not found", 404
+    try:
+        from modules.web.docx_to_html import convert_docx_to_html
+        # 从数据库获取完整的规则引擎分析结果（含 fix_sql）
+        ai = _get_auto_analyze_from_db(fp)
+        html_content = convert_docx_to_html(fp, analysis_issues=ai)
+        base_name = os.path.splitext(os.path.basename(name))[0]
+        download_name = base_name + '.html'
+        return Response(
+            html_content,
+            mimetype='text/html; charset=utf-8',
+            headers={'Content-Disposition': _make_content_disposition(download_name)}
+        )
+    except Exception as e:
+        traceback.print_exc(file=sys.stdout)
+        return f"HTML conversion failed: {e}", 500
+
+
+@app.route('/api/preview_html/<task_id>')
+def api_preview_html_by_task(task_id):
+    """预览 HTML 格式报告（在线查看，不下载）"""
+    task = tasks.get(task_id)
+    if not task or not task.get('report_file'):
+        return "Report not found", 404
+    docx_path = task['report_file']
+    if not os.path.isfile(docx_path):
+        return "Report file not found", 404
+    try:
+        from modules.web.docx_to_html import convert_docx_to_html
+        # 优先使用内存中的 auto_analyze，其次从数据库获取（含 fix_sql）
+        ai = task.get('auto_analyze')
+        if not ai:
+            ai = _get_auto_analyze_from_db(docx_path)
+        html_content = convert_docx_to_html(docx_path, analysis_issues=ai)
+        return Response(html_content, mimetype='text/html; charset=utf-8')
+    except Exception as e:
+        traceback.print_exc(file=sys.stdout)
+        return f"HTML conversion failed: {e}", 500
+
+
+@app.route('/api/preview_file_html')
+def api_preview_file_html():
+    """按文件名预览 HTML 格式报告（在线查看，不下载）"""
+    name = request.args.get('name', '')
+    if not name:
+        return "Name parameter required", 400
+    reports_dir = str(paths.REPORTS_DIR)
+    fp = os.path.join(reports_dir, os.path.basename(name))
+    if not os.path.isfile(fp):
+        return "File not found", 404
+    try:
+        from modules.web.docx_to_html import convert_docx_to_html
+        # 从数据库获取完整的规则引擎分析结果（含 fix_sql）
+        ai = _get_auto_analyze_from_db(fp)
+        html_content = convert_docx_to_html(fp, analysis_issues=ai)
+        return Response(html_content, mimetype='text/html; charset=utf-8')
+    except Exception as e:
+        traceback.print_exc(file=sys.stdout)
+        return f"HTML conversion failed: {e}", 500
 
 @app.route('/api/delete_report', methods=['POST'])
 def api_delete_report():
@@ -3953,6 +4350,11 @@ def api_ai_config():
         ai_cfg.setdefault('online_backend', 'openai')
         ai_cfg.setdefault('online_api_url', 'https://api.openai.com/v1')
         ai_cfg.setdefault('online_model', 'gpt-4o-mini')
+        # ollama 的本地模型名：配置页没填过时也要给默认值，
+        # 否则助手顶栏只显示「ollama」而不是具体模型（与配置页默认口径一致）。
+        if str(ai_cfg.get('backend') or '') == 'ollama':
+            ai_cfg.setdefault('model', 'qwen2.5:7b')
+            ai_cfg.setdefault('api_url', 'http://localhost:11434')
         # 注：本地单用户工具，配置存于本机 dbc_config.json，直接返回真实 api_key
         # 以便前端在重新打开界面时回填已保存的值（不再脱敏成 '***'）。
         return jsonify(ai_cfg)
@@ -4846,6 +5248,9 @@ def api_start_inspection():
                 'sysdba':    bool(instance.get('sysdba', False)),  # ← 新增（确保是布尔值）
                 'name':      instance.get('name', ''),
                 'desensitize': bool(data.get('desensitize', False)),
+                # Zabbix 采集绑定：随数据源长期保存，手动/定时巡检共用同一份解析
+                'zabbix_host_ip':   instance.get('zabbix_host_ip', '') or '',
+                'zabbix_host_name': instance.get('zabbix_host_name', '') or '',
             }
             # 修复：缺省库名为空串的类型（MySQL 家族 / redis 等）若库名被旧 bug 误写为
             # 'postgres'（PG 默认残留），归零为空，连系统时回退到 'mysql'
@@ -5381,27 +5786,217 @@ def api_zabbix_sysinfo_test():
 
 @app.route('/api/zabbix/hosts', methods=['GET'])
 def api_zabbix_hosts():
-    """按关键字搜 Zabbix 主机（设置页与向导用来确认主机已被纳管）。
+    """按关键字搜 Zabbix 主机（设置页/向导确认纳管、监控页左栏列表共用）。
 
     必须把关键字交给 API 做 search：主机多时 limit 会按 sortfield 截断，
     拉全量再本地过滤很可能把目标主机截掉。
+    返回附带 problem_count / max_severity（活动问题数与最高严重级别）。
     """
     search = (request.args.get('search') or '').strip()
     limit = min(int(request.args.get('limit') or 100), 500)
     try:
         from modules.zabbix.config import get_client_from_config
-        from modules.zabbix.items import host_available, host_ip, host_status
+        from modules.zabbix.monitor import build_host_list
         try:
             client = get_client_from_config(timeout=15)
         except Exception:
             # 允许用请求里的凭据试搜（配置还没保存时也能验证）
             client = _zabbix_client_from_request(request.args)
-        hosts = client.get_hosts(search=search or None, limit=limit) or []
-        data = [{'hostid': h.get('hostid'), 'host': h.get('host', ''), 'name': h.get('name', ''),
-                 'ip': host_ip(h), 'status': host_status(h), 'available': host_available(h)}
-                for h in hosts]
+        data = build_host_list(client, search=search or None, limit=limit)
         return jsonify({'ok': True, 'data': data, 'total': len(data)})
     except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)})
+
+
+@app.route('/api/zabbix/monitor', methods=['GET'])
+def api_zabbix_monitor():
+    """单主机监控摘要：6 项指标 + 磁盘明细 + 活动问题（MVP 不含历史曲线）。
+
+    优先 hostid（监控页左栏点选）；也兼容 ip/hostname（与设置页自查同参）。
+    """
+    hostid = (request.args.get('hostid') or '').strip()
+    ip = (request.args.get('ip') or '').strip()
+    hostname = (request.args.get('hostname') or '').strip()
+    if not hostid and not ip and not hostname:
+        return jsonify({'ok': False, 'error': '缺少 hostid 或 ip/hostname 参数'}), 400
+    try:
+        from modules.zabbix.config import get_client_from_config
+        from modules.zabbix.monitor import build_host_summary
+        client = get_client_from_config(timeout=15)
+        if not hostid:
+            hosts = client.find_host(ip=ip or None, hostname=hostname or None)
+            if not hosts:
+                return jsonify({'ok': False, 'error': '未找到主机（%s）' % (hostname or ip)})
+            hostid = hosts[0].get('hostid')
+        data = build_host_summary(client, hostid)
+        return jsonify({'ok': True, 'data': data})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)})
+
+
+@app.route('/api/zabbix/problems', methods=['GET'])
+def api_zabbix_problems():
+    """全局活动问题（按严重级别降序，含所属主机名）。"""
+    limit = min(int(request.args.get('limit') or 100), 500)
+    try:
+        from modules.zabbix.config import get_client_from_config
+        from modules.zabbix.monitor import list_problems
+        client = get_client_from_config(timeout=15)
+        return jsonify({'ok': True, 'data': list_problems(client, limit=limit)})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)})
+
+
+# ── Zabbix 手工主机清单 ──────────────────────────────────────────
+# 监控页左栏的数据源：用户登记要盯的机器（IP/主机名/备注），选中后再匹配
+# Zabbix 主机取数。清单存 dbc_config.json 的 zabbix_monitor.servers，重启不丢。
+# MVP 不含文件夹树，folders 恒为空列表，保留字段以兼容后续完整版。
+
+@app.route('/api/zabbix/servers', methods=['GET'])
+def api_zabbix_servers_list():
+    """获取手工主机清单。"""
+    try:
+        from modules.zabbix.config import get_server_list
+        return jsonify({'ok': True, 'data': get_server_list(), 'folders': []})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/zabbix/servers', methods=['POST'])
+def api_zabbix_servers_add():
+    """批量登记主机，body: {servers: [{ip, hostname, remark}]}。改全局配置，限管理员。"""
+    user, denied = _require_dir_admin()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    items = data.get('servers', [])
+    if not isinstance(items, list) or not items:
+        return jsonify({'ok': False, 'error': '请提供服务器列表'}), 400
+    try:
+        from modules.zabbix.config import add_servers
+        added = add_servers(items)
+        return jsonify({'ok': True, 'msg': '已添加 %d 台服务器' % len(added), 'data': added})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/zabbix/servers/<sid>', methods=['PUT'])
+def api_zabbix_servers_update(sid):
+    """修改清单条目（IP / 主机名 / 备注）。"""
+    user, denied = _require_dir_admin()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    try:
+        from modules.zabbix.config import update_server
+        s = update_server(sid, ip=data.get('ip'), hostname=data.get('hostname'),
+                          remark=data.get('remark'), folder_id=data.get('folder_id'))
+        if s:
+            return jsonify({'ok': True, 'msg': '已更新', 'data': s})
+        return jsonify({'ok': False, 'error': '服务器不存在'}), 404
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/zabbix/servers/<sid>', methods=['DELETE'])
+def api_zabbix_servers_delete(sid):
+    """从清单移除一台主机。"""
+    user, denied = _require_dir_admin()
+    if denied:
+        return denied
+    try:
+        from modules.zabbix.config import delete_server
+        if delete_server(sid):
+            return jsonify({'ok': True, 'msg': '已删除'})
+        return jsonify({'ok': False, 'error': '服务器不存在'}), 404
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+# ── 数据源的 Zabbix 采集绑定 ──────────────────────────────────────
+# 绑定落到数据源上，一次配好长期生效：手动巡检与定时巡检共用同一份解析
+# （modules.zabbix.binding.resolve_zabbix_target），不必每次重填主机。
+
+@app.route('/api/zabbix/candidates', methods=['GET'])
+@login_required
+def api_zabbix_candidates():
+    """按数据源信息列出 Zabbix 候选主机（供用户点选绑定）。
+
+    返回带分数与匹配理由的候选列表；``score=100`` 表示 IP 完全一致，
+    其余为按 service_name / 实例名模糊匹配的结果 —— **需要人工确认**，
+    同一套环境里一个关键词可能命中多台不相干的主机。
+
+    宽松模式下 assert_visible 对匿名放行，而本接口会带出数据源主机/服务名
+    并代其查询 Zabbix，故未登录先挡在归属判定之前。
+    """
+    try:
+        from modules.access import principal_from_session, assert_visible
+        from modules.pro import get_instance_manager
+        ds_id = (request.args.get('datasource_id') or '').strip()
+        if not ds_id:
+            return jsonify({'ok': False, 'error': '缺少 datasource_id'})
+        user = principal_from_session()
+        ok, err = assert_visible(user, 'instance', ds_id)
+        if not ok:
+            return jsonify({'ok': False, **err}), 403
+        from modules.zabbix.binding import find_candidates, zabbix_available
+        available, why = zabbix_available()
+        if not available:
+            return jsonify({'ok': False, 'error': why})
+        ds = get_instance_manager().get_instance(ds_id, mask_password=True) or {}
+        if not ds:
+            return jsonify({'ok': False, 'error': '数据源不存在'})
+        return jsonify({
+            'ok': True,
+            'candidates': find_candidates(ds),
+            'datasource': {
+                'id': ds_id,
+                'name': ds.get('name', ''),
+                'host': ds.get('host', ''),
+                'service_name': ds.get('service_name', ''),
+                'zabbix_host_ip': ds.get('zabbix_host_ip', ''),
+                'zabbix_host_name': ds.get('zabbix_host_name', ''),
+            },
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'ok': False, 'error': str(e)})
+
+
+@app.route('/api/zabbix/bind', methods=['POST'])
+@login_required
+def api_zabbix_bind():
+    """保存 / 清除数据源的 Zabbix 主机绑定。
+
+    两个字段都传空串即**解绑**，之后回落到「按实例 IP 自动匹配」。
+    写的是数据源记录，权限与编辑数据源一致（拥有者或租户管理员）；
+    写接口不允许匿名降级，未登录先挡在归属判定之前。
+    """
+    try:
+        from modules.access import principal_from_session, assert_visible
+        from modules.pro import get_instance_manager
+        data = request.get_json(silent=True) or {}
+        ds_id = (data.get('datasource_id') or '').strip()
+        if not ds_id:
+            return jsonify({'ok': False, 'error': '缺少 datasource_id'})
+        user = principal_from_session()
+        ok, err = assert_visible(user, 'instance', ds_id)
+        if not ok:
+            return jsonify({'ok': False, **err}), 403
+        result = get_instance_manager().update_instance(ds_id, {
+            'zabbix_host_ip': (data.get('host_ip') or '').strip(),
+            'zabbix_host_name': (data.get('host_name') or '').strip(),
+        })
+        if not result.get('ok'):
+            return jsonify({'ok': False, 'error': result.get('message') or '保存失败'})
+        _invalidateDatasourceCaches(ds_id)
+        bound = (data.get('host_name') or data.get('host_ip') or '').strip()
+        return jsonify({'ok': True,
+                        'message': ('已绑定 Zabbix 主机 %s' % bound) if bound else '已解绑 Zabbix 主机'})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({'ok': False, 'error': str(e)})
 
 
@@ -5880,6 +6475,7 @@ def api_start_config_baseline():
 
 
 @app.route('/api/test_server_ssh', methods=['POST'])
+@login_required
 def api_test_server_ssh():
     """测试服务器 SSH 连接"""
     try:
@@ -5898,12 +6494,90 @@ def api_test_server_ssh():
         return jsonify({'ok': False, 'msg': str(e)})
 
 
+# ── SSH 快捷配置（服务器巡检历史连接） ──────────────────────────
+#
+# 本组接口一律 @login_required：全站宽松模式（DBCHECK_ACCESS_STRICT=0）下
+# modules.access.can() 对匿名身份是放行的，而这里返回的是 SSH 明文口令，
+# 不能沿用该降级策略——未登录必须在进入归属判定之前就被挡掉。
+
+def _ssh_principal():
+    from modules.access import principal_from_session
+    return principal_from_session()
+
+
+@app.route('/api/server_ssh_profiles', methods=['GET'])
+@login_required
+def api_list_ssh_profiles():
+    """获取 SSH 快捷配置列表（按归属过滤，密码掩码）"""
+    try:
+        from modules.server import ssh_profiles
+        profiles = ssh_profiles.list_profiles(_ssh_principal())
+        return jsonify({'ok': True, 'profiles': profiles})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/server_ssh_profiles', methods=['POST'])
+@login_required
+def api_save_ssh_profile():
+    """保存（新增/更新）SSH 快捷配置"""
+    try:
+        from modules.server import ssh_profiles
+        data = request.json or {}
+        ok, result = ssh_profiles.upsert_profile(data, _ssh_principal())
+        if not ok:
+            return jsonify({'ok': False, 'error': result}), 400
+        return jsonify({'ok': True, 'id': result, 'msg': '配置已保存'})
+    except Exception as e:
+        import traceback
+        traceback.print_exc(file=sys.stdout)
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/server_ssh_profiles/<profile_id>', methods=['DELETE'])
+@login_required
+def api_delete_ssh_profile(profile_id):
+    """删除 SSH 快捷配置"""
+    try:
+        from modules.server import ssh_profiles
+        ok, err = ssh_profiles.delete_profile(profile_id, _ssh_principal())
+        if not ok:
+            code = 404 if err == '配置不存在' else 403
+            return jsonify({'ok': False, 'error': err}), code
+        return jsonify({'ok': True, 'msg': '配置已删除'})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/server_ssh_profiles/<profile_id>/decrypt', methods=['GET'])
+@login_required
+def api_decrypt_ssh_profile(profile_id):
+    """获取 SSH 快捷配置完整信息（含解密密码）。
+
+    要求登录态；非管理员只能解密本人配置；密文解不开时 fail-close 要求重输密码。
+    """
+    try:
+        from modules.server import ssh_profiles
+        ok, result = ssh_profiles.decrypt_profile(profile_id, _ssh_principal())
+        if not ok:
+            if result == '配置不存在':
+                return jsonify({'ok': False, 'error': result}), 404
+            if result == '无权解密该配置':
+                return jsonify({'ok': False, 'error': result}), 403
+            return jsonify({'ok': False, 'error': result}), 400
+        return jsonify({'ok': True, 'profile': result})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
 @app.route('/api/server_inspect', methods=['POST'])
+@login_required
 def api_start_server_inspect():
     """启动服务器巡检任务（支持本地/远程）"""
     try:
         data = request.json or {}
         host_type = data.get('host_type', 'remote').strip()
+        ai_analyze = 1 if data.get('ai_analyze') in (1, '1', True, 'true') else 0
 
         task_id = str(uuid.uuid4())
         tasks[task_id] = {
@@ -5915,7 +6589,7 @@ def api_start_server_inspect():
         }
 
         if host_type == 'local':
-            ssh_info = {'host_type': 'local'}
+            ssh_info = {'host_type': 'local', 'ai_analyze': ai_analyze}
             t = threading.Thread(target=_run_server_inspect_task, args=(task_id, ssh_info))
             t.daemon = True
             t.start()
@@ -5931,7 +6605,8 @@ def api_start_server_inspect():
                 'ssh_user': data.get('ssh_user', 'root'),
                 'ssh_password': data.get('ssh_password', ''),
                 'ssh_key_file': data.get('ssh_key_file', ''),
-                'ssh_key_password': data.get('ssh_key_password', '')
+                'ssh_key_password': data.get('ssh_key_password', ''),
+                'ai_analyze': ai_analyze,
             }
             t = threading.Thread(target=_run_server_inspect_task, args=(task_id, ssh_info))
             t.daemon = True
@@ -5939,6 +6614,79 @@ def api_start_server_inspect():
             return jsonify({'ok': True, 'task_id': task_id})
     except Exception as e:
         return jsonify({'ok': False, 'msg': str(e)})
+
+
+def _build_server_ai_summary(result):
+    """将服务器巡检结果整理为紧凑的文本摘要，供 AI 分析使用"""
+    lines = []
+    lines.append(f"主机名: {result.get('hostname', '-')}")
+    lines.append(f"主机地址: {result.get('host', '-')}")
+    lines.append(f"健康评分: {result.get('health_score', 0)} 分 ({result.get('health_status', '')})")
+
+    cpu = result.get('cpu', {}) or {}
+    lines.append(f"CPU: 使用率 {cpu.get('usage_percent', 0)}%, 物理核心 {cpu.get('physical_cores', '-')}, "
+                 f"逻辑核心 {cpu.get('logical_cores', '-')}, 负载 {cpu.get('load_1m', 0)}/{cpu.get('load_5m', 0)}/{cpu.get('load_15m', 0)}")
+
+    mem = result.get('memory', {}) or {}
+    lines.append(f"内存: 总量 {mem.get('total_gb', 0)}GB, 已用 {mem.get('used_gb', 0)}GB ({mem.get('usage_percent', 0)}%), "
+                 f"Swap {mem.get('swap_used_gb', 0)}/{mem.get('swap_total_gb', 0)}GB")
+
+    disks = result.get('disk', []) or []
+    if disks:
+        disk_lines = []
+        for d in disks:
+            disk_lines.append(f"{d.get('mountpoint', '')} {d.get('device', '')} 总量{d.get('total_gb', 0)}GB "
+                              f"已用{d.get('used_gb', 0)}GB 使用率{d.get('usage_percent', 0)}%")
+        lines.append("磁盘:\n  " + "\n  ".join(disk_lines))
+
+    procs = result.get('top_processes', []) or []
+    if procs:
+        proc_lines = []
+        for p in procs[:10]:
+            proc_lines.append(f"PID {p.get('pid')} {p.get('user', '')} CPU {p.get('cpu', 0)}% MEM {p.get('mem', 0)}% {p.get('command', '')}")
+        lines.append("Top 进程:\n  " + "\n  ".join(proc_lines))
+
+    net = result.get('network', {}) or {}
+    if net:
+        lines.append(f"网络检测: {json.dumps(net, ensure_ascii=False, default=str)[:600]}")
+
+    services = result.get('services', []) or []
+    if services:
+        svc_lines = []
+        for s in services:
+            svc_lines.append(f"{s.get('name', '')} 状态:{s.get('status', '')}")
+        lines.append("服务状态:\n  " + "\n  ".join(svc_lines))
+
+    issues = result.get('issues', []) or []
+    if issues:
+        lines.append("发现问题:\n  " + "\n  ".join(str(i) for i in issues))
+
+    return "\n".join(lines)
+
+
+def _ai_analyze_server(result):
+    """使用 LLM 分析服务器巡检结果，生成根因分析与优化建议报告。
+
+    返回 Markdown 文本；失败或未配置 AI 时返回 None。
+    """
+    try:
+        summary = _build_server_ai_summary(result)
+        system = ("你是一名资深 Linux 系统运维专家，擅长服务器性能诊断、根因分析与优化。"
+                  "请基于巡检数据输出专业、可执行、结构化的诊断报告。")
+        prompt = (
+            "请基于以下服务器巡检数据，输出一份结构化的 AI 分析报告，包含三部分：\n"
+            "1. 总体评估：对服务器整体健康状态的一句话总结（含健康评分）。\n"
+            "2. 根因分析：逐项列出发现的问题及其可能原因（覆盖 CPU、内存、磁盘、网络、服务、进程等维度）。\n"
+            "3. 优化建议：针对每个问题给出具体、可执行的优化措施（含命令或配置建议）。\n\n"
+            "巡检数据：\n" + summary + "\n\n"
+            "请使用中文，采用 Markdown 格式（## 分节、- 列表），条理清晰、结论明确。"
+        )
+        report = _call_llm(prompt, system=system)
+        if not report or report.startswith('['):
+            return None
+        return report.strip()
+    except Exception:
+        return None
 
 
 def _run_server_inspect_task(task_id, ssh_info):
@@ -6000,6 +6748,16 @@ def _run_server_inspect_task(task_id, ssh_info):
 
         hostname = result.get('hostname', 'unknown')
         _emit('log', {'msg': f"[{_ts()}] [OK] 连接成功，主机名: {hostname}"})
+
+        # 输出采集命令日志
+        cmd_log = result.get('command_log', [])
+        if cmd_log:
+            _emit('log', {'msg': f"[{_ts()}] 📋 采集命令清单（共 {len(cmd_log)} 条）:"})
+            for entry in cmd_log:
+                step_name = entry.get('step', '') if isinstance(entry, dict) else ''
+                cmd_text = entry.get('command', '') if isinstance(entry, dict) else str(entry)
+                _emit('log', {'msg': f"  [{step_name}] $ {cmd_text}"})
+
         _emit('log', {'msg': f"[{_ts()}] 📊 健康评分: {result.get('health_score', 0)} 分 ({result.get('health_status', '')})"})
 
         for issue in result.get('issues', []):
@@ -6030,16 +6788,29 @@ def _run_server_inspect_task(task_id, ssh_info):
             _emit('log', {'msg': f"[{_ts()}] [WARN] 报告生成失败: {report_path}"})
             report_path = None
 
+        # AI 分析（可选）：生成根因分析与优化建议报告
+        ai_report = None
+        if ssh_info.get('ai_analyze'):
+            _emit('log', {'msg': f"[{_ts()}] 🤖 正在执行 AI 分析..."})
+            ai_report = _ai_analyze_server(result)
+            if ai_report:
+                result['ai_report'] = ai_report
+                _emit('log', {'msg': f"[{_ts()}] [OK] AI 分析报告已生成"})
+            else:
+                _emit('log', {'msg': f"[{_ts()}] [WARN] AI 分析失败（请检查 AI 配置）"})
+
         # 保存巡检历史
+        record_id = None
         try:
             from modules.server.inspect import save_server_inspection
             host = result.get('host', 'localhost') if ssh_info.get('host_type') == 'local' else ssh_info.get('ssh_host', 'unknown')
             port = 0 if ssh_info.get('host_type') == 'local' else ssh_info.get('ssh_port', 22)
-            save_server_inspection(
+            record_id = save_server_inspection(
                 host=host,
                 port=port,
                 result=result,
                 report_path=report_path or '',
+                ai_report=ai_report or '',
             )
             _emit('log', {'msg': f"[{_ts()}] 💾 巡检历史已保存"})
         except Exception as e:
@@ -6050,6 +6821,8 @@ def _run_server_inspect_task(task_id, ssh_info):
             task['result'] = result
             task['report_file'] = report_path
             task['report_name'] = os.path.basename(report_path) if report_path else ''
+            if record_id:
+                task['history_id'] = record_id
 
     except Exception as e:
         import traceback
@@ -6064,15 +6837,116 @@ def _run_server_inspect_task(task_id, ssh_info):
 
 @app.route('/api/server_inspect_history', methods=['GET'])
 def api_server_inspect_history():
-    """获取服务器巡检历史列表"""
+    """获取服务器巡检历史列表（支持多维度筛选）"""
     try:
         from modules.server.inspect import get_server_inspection_history
         host = request.args.get('host', '').strip() or None
-        limit = int(request.args.get('limit', 50))
-        history = get_server_inspection_history(host=host, limit=limit)
-        return jsonify({'ok': True, 'history': history})
+        keyword = request.args.get('keyword', '').strip() or None
+        os_type = request.args.get('os_type', '').strip() or None
+        status = request.args.get('status', '').strip() or None
+        has_issues = request.args.get('has_issues', '').strip()
+        date_from = request.args.get('date_from', '').strip() or None
+        date_to = request.args.get('date_to', '').strip() or None
+        limit = int(request.args.get('limit', 100))
+        offset = int(request.args.get('offset', 0))
+        has_issues_flag = has_issues in ('1', 'true', 'True', 'yes')
+        result = get_server_inspection_history(
+            host=host, limit=limit, keyword=keyword, os_type=os_type,
+            status=status, has_issues=has_issues_flag,
+            date_from=date_from, date_to=date_to, offset=offset)
+        return jsonify({'ok': True, 'history': result['history'], 'counts': result['counts']})
     except Exception as e:
         return jsonify({'ok': False, 'msg': str(e)})
+
+
+@app.route('/api/server_inspect_os_types', methods=['GET'])
+def api_server_inspect_os_types():
+    """获取历史记录中出现的操作系统类型列表"""
+    try:
+        from modules.server.inspect import get_server_inspection_os_types
+        os_types = get_server_inspection_os_types()
+        return jsonify({'ok': True, 'os_types': os_types})
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)})
+
+
+@app.route('/api/server_inspect_ai_report/<int:record_id>')
+def api_server_inspect_ai_report(record_id):
+    """下载服务器巡检 AI 分析报告（docx）"""
+    try:
+        from modules.server.inspect import get_server_inspection_detail
+        record = get_server_inspection_detail(record_id)
+        if not record:
+            return "记录不存在", 404
+        ai_report = record.get('ai_report') or ''
+        if not ai_report:
+            try:
+                result = json.loads(record.get('result_json') or '{}')
+                ai_report = result.get('ai_report', '')
+            except Exception:
+                ai_report = ''
+        if not ai_report:
+            return "该记录没有 AI 分析报告", 404
+
+        from docx import Document
+        from docx.shared import Pt, RGBColor
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+        doc = Document()
+        title = doc.add_paragraph()
+        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = title.add_run('服务器巡检 AI 分析报告')
+        run.font.size = Pt(22)
+        run.font.bold = True
+        run.font.color.rgb = RGBColor(124, 58, 237)
+
+        sub = doc.add_paragraph()
+        sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        sr = sub.add_run(f"主机: {record.get('hostname') or record.get('host') or '-'}    巡检时间: {record.get('inspect_time') or '-'}")
+        sr.font.size = Pt(11)
+        sr.font.color.rgb = RGBColor(120, 120, 120)
+
+        doc.add_paragraph()
+
+        # 将 Markdown 简单转换为 docx 段落
+        for line in ai_report.splitlines():
+            line = line.rstrip()
+            if not line:
+                continue
+            if line.startswith('### '):
+                p = doc.add_paragraph()
+                r = p.add_run(line[4:])
+                r.font.bold = True
+                r.font.size = Pt(13)
+            elif line.startswith('## '):
+                p = doc.add_paragraph()
+                r = p.add_run(line[3:])
+                r.font.bold = True
+                r.font.size = Pt(15)
+                r.font.color.rgb = RGBColor(124, 58, 237)
+            elif line.startswith('# '):
+                p = doc.add_paragraph()
+                r = p.add_run(line[2:])
+                r.font.bold = True
+                r.font.size = Pt(17)
+            elif line.startswith('- ') or line.startswith('* '):
+                p = doc.add_paragraph(style='List Bullet')
+                p.add_run(line[2:])
+            elif line[:3] in ('1. ', '2. ', '3. ', '4. ', '5. ', '6. ', '7. ', '8. ', '9. '):
+                p = doc.add_paragraph(style='List Number')
+                p.add_run(line[3:])
+            else:
+                p = doc.add_paragraph()
+                p.add_run(line)
+
+        buf = io.BytesIO()
+        doc.save(buf)
+        buf.seek(0)
+        fname = f"AI分析报告_{record.get('hostname') or record.get('host') or 'server'}_{str(record.get('inspect_time', ''))[:10]}.docx"
+        return send_file(buf, as_attachment=True, download_name=fname,
+                         mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+    except Exception as e:
+        return f"生成失败: {e}", 500
 
 
 @app.route('/api/server_inspect_history/<int:record_id>', methods=['GET'])
@@ -6282,10 +7156,12 @@ def api_scheduler_list():
 def _build_scheduler_job_cfg(data, job_id):
     """根据请求数据构建定时任务配置（不含 enabled，由调用方决定启用状态）"""
     datasource_id = data.get('datasource_id')
-    # 通知 / 采集选项：前端向导（步骤3/4）透传，未提供时保持旧行为
+    # 通知 / 采集选项：前端向导（步骤3/4）透传，未提供时保持旧行为。
+    # notify_email 缺省跟随 notify_on_done（老任务只有总开关）；附件默认带上，
+    # 与向导里三个通知勾选框的默认勾选状态一致，避免 API 建的任务静默不发邮件。
     extra = {
-        'notify_email': bool(data.get('notify_email', False)),
-        'notify_attach': bool(data.get('notify_attach', False)),
+        'notify_email': bool(data.get('notify_email', data.get('notify_on_done', True))),
+        'notify_attach': bool(data.get('notify_attach', True)),
         'notify_anomaly': bool(data.get('notify_anomaly', True)),
         'email_to': data.get('email_to') or '',
         'email_cc': data.get('email_cc') or '',
@@ -7039,6 +7915,23 @@ def api_awr_upload():
             if has_data:
                 chapters_found.append(key)
 
+        # 写元数据：最近文件列表要区分「人工上传 / 在线生成」并显示时段，
+        # 与在线生成路径共用同一份 awr_<id>.meta.json 结构。
+        try:
+            import json
+            meta_payload = {
+                'task_id': task_id, 'manual': True, 'ds_id': None,
+                'report_name': f.filename,
+                'db_name': meta.get('db_name') or '',
+                'snap_range': meta.get('snap_range') or '',
+                'begin_time': meta.get('begin_time') or '',
+                'end_time': meta.get('end_time') or '',
+            }
+            with open(os.path.join(awr_dir, f'awr_{task_id}.meta.json'), 'w', encoding='utf-8') as mf:
+                json.dump(meta_payload, mf, ensure_ascii=False)
+        except Exception:
+            pass
+
         return jsonify({
             'ok': True,
             'task_id': task_id,
@@ -7082,7 +7975,9 @@ def _run_awr_report_task(report_task_id, awr_task_id):
     steps = task['steps']
     awr_dir = str(paths.AWR_UPLOADS_DIR)
     import glob
-    files = glob.glob(os.path.join(awr_dir, f'awr_{awr_task_id}.*'))
+    # 只取 AWR 正文：同目录下还有 awr_<id>.meta.json，用 awr_<id>.* 会把元数据当成报告解析
+    files = [p for p in glob.glob(os.path.join(awr_dir, f'awr_{awr_task_id}.*'))
+             if p.lower().endswith(('.html', '.htm'))]
     if not files:
         task['status'] = 'error'
         task['error'] = 'AWR 文件不存在或已过期'
@@ -7092,12 +7987,14 @@ def _run_awr_report_task(report_task_id, awr_task_id):
     try:
         # Step 1: 解析
         task['current_step'] = 0
+        task['current_detail'] = '正在解析 AWR HTML 数据...'
         from modules.web.awr_parser import parse_awr_report
         awr_data = parse_awr_report(awr_file)
 
         # Step 2: AI 诊断（如有）
         if len(steps) > 3:
             task['current_step'] = 1
+            task['current_detail'] = '正在调用 AI 生成诊断建议（未配置模型时会自动跳过）...'
             try:
                 meta = awr_data.get('metadata', {})
                 ai_summary = _build_awr_ai_summary(awr_data, meta)
@@ -7115,6 +8012,7 @@ def _run_awr_report_task(report_task_id, awr_task_id):
 
         # Step 3: 生成 Word
         task['current_step'] = len(steps) - 2
+        task['current_detail'] = '正在渲染 Word 章节与表格...'
         reports_dir = str(paths.REPORTS_DIR)
         os.makedirs(reports_dir, exist_ok=True)
         timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -7129,6 +8027,7 @@ def _run_awr_report_task(report_task_id, awr_task_id):
 
         # Step 4: 完成
         task['current_step'] = len(steps) - 1
+        task['current_detail'] = '全部完成'
         task['status'] = 'done'
         task['report_file'] = result_path
         task['report_name'] = report_name
@@ -7137,6 +8036,7 @@ def _run_awr_report_task(report_task_id, awr_task_id):
         traceback.print_exc()
         task['status'] = 'error'
         task['error'] = str(e)
+        task['current_detail'] = '生成失败：' + str(e)
 
 
 @app.route('/api/awr/report/<awr_task_id>', methods=['POST'])
@@ -7145,7 +8045,8 @@ def api_awr_generate_report(awr_task_id):
     try:
         awr_dir = str(paths.AWR_UPLOADS_DIR)
         import glob
-        files = glob.glob(os.path.join(awr_dir, f'awr_{awr_task_id}.*'))
+        files = [p for p in glob.glob(os.path.join(awr_dir, f'awr_{awr_task_id}.*'))
+                 if p.lower().endswith(('.html', '.htm'))]
         if not files:
             return jsonify({'ok': False, 'error': 'AWR 文件不存在或已过期'})
 
@@ -7179,6 +8080,7 @@ def api_awr_report_status(report_task_id):
         'ok': True,
         'status': task.get('status', 'running'),
         'current_step': task.get('current_step', 0),
+        'current_detail': task.get('current_detail', ''),
         'steps': task.get('steps', []),
         'report_file': task.get('report_file'),
         'report_name': task.get('report_name'),
@@ -8076,6 +8978,8 @@ def api_pro_datasource_add():
             ssh_password=data.get('ssh_password', ''),
             ssh_key_file=data.get('ssh_key_file', ''),
             ssh_enabled=bool(data.get('ssh_enabled', False)),
+            zabbix_host_ip=data.get('zabbix_host_ip', '') or '',
+            zabbix_host_name=data.get('zabbix_host_name', '') or '',
             gbase_server_name=data.get('gbase_server_name', ''),
             tenant=data.get('tenant', ''),
             seed_nodes=data.get('seed_nodes', ''),
@@ -9830,6 +10734,22 @@ def _plugin_tree_sql(dialect, database):
         return ("SELECT username FROM all_users ORDER BY username",
                 "SELECT table_name FROM all_tables WHERE owner = %s ORDER BY table_name" % quotedDatabase,
                 "SELECT view_name FROM all_views WHERE owner = %s ORDER BY view_name" % quotedDatabase)
+    if dialect == 'dm':
+        # 与原生 dm 分支同一套字典 SQL；「库」即 owner，系统用户过滤在 /databases 调用侧做
+        return ("SELECT username FROM all_users ORDER BY username",
+                "SELECT table_name FROM all_tables WHERE owner = %s ORDER BY table_name" % quotedDatabase,
+                "SELECT view_name FROM all_views WHERE owner = %s ORDER BY view_name" % quotedDatabase)
+    if dialect == 'yashandb':
+        # 崖山的字典视图在 SYS 模式下（与原生 yashandb 分支一致）
+        return ("SELECT username FROM sys.all_users ORDER BY username",
+                "SELECT table_name FROM sys.all_tables WHERE owner = %s ORDER BY table_name" % quotedDatabase,
+                "SELECT view_name FROM sys.all_views WHERE owner = %s ORDER BY view_name" % quotedDatabase)
+    if dialect == 'gbase':
+        # GBase 8s（Informix 方言）：跨库名单走 sysmaster:sysdatabases；
+        # 表/视图按连接选定的库查 systables，tabtype T=表 V=视图（与原生 gbase 分支一致）
+        return ("SELECT name FROM sysmaster:sysdatabases ORDER BY name",
+                "SELECT tabname FROM systables WHERE tabtype = 'T' ORDER BY tabname",
+                "SELECT tabname FROM systables WHERE tabtype = 'V' ORDER BY tabname")
     if dialect == 'sqlserver':
         return ("SELECT name FROM sys.databases ORDER BY name",
                 "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES "

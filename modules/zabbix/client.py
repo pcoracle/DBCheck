@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
 # Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
+
 """Zabbix JSON-RPC API 客户端。
 
 认证方式按 Zabbix 官方约定分两条：
@@ -285,3 +286,21 @@ class ZabbixClient:
             'sortfield': 'name',
             'limit': limit,
         })
+
+    # ── 触发器（活动问题）──
+
+    def get_triggers(self, hostids=None, active_only=True, limit=200):
+        """获取触发器（含所属主机）。active_only 只取当前处于问题状态的触发器。"""
+        params = {
+            'output': ['triggerid', 'description', 'priority', 'value', 'lastchange', 'status'],
+            'selectHosts': ['hostid', 'host', 'name'],
+            'selectLastEvent': ['eventid', 'clock', 'value'],
+            'sortfield': 'priority',
+            'sortorder': 'DESC',
+            'limit': limit,
+        }
+        if hostids:
+            params['hostids'] = hostids
+        if active_only:
+            params['filter'] = {'value': 1}
+        return self._call('trigger.get', params)

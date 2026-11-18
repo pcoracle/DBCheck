@@ -53,6 +53,25 @@
   });
 })();
 
+// ─── 数据库类型显示归一 ───
+// 本仓库同一引擎按连接方式再分一档（oracle_jdbc / oracle_thin…），展示与分组
+// 一律还原成引擎名：否则版本标签/类型列/批量分组显示 ORACLE_JDBC，同类库还被拆成两组。
+var _AIAS_TYPE_ALIAS = { postgresql: 'pg', mssql: 'sqlserver', dm8: 'dm', oracle_full: 'oracle',
+  oracle_jdbc: 'oracle', sqlserver_jdbc: 'sqlserver', mysql_jdbc: 'mysql',
+  postgresql_jdbc: 'pg', postgres_jdbc: 'pg', dm_jdbc: 'dm', dm8_jdbc: 'dm',
+  oracle_thin: 'oracle', uxdb_jdbc: 'uxdb' };
+
+function aiasNormDbType(value) {
+  var lower = String(value || '').toLowerCase().trim();
+  if (!lower) return '';
+  if (_AIAS_TYPE_ALIAS[lower]) return _AIAS_TYPE_ALIAS[lower];
+  if (/_jdbc$|_thin$/.test(lower)) {
+    var base = lower.replace(/_jdbc$|_thin$/, '');
+    return _AIAS_TYPE_ALIAS[base] || base;
+  }
+  return lower;
+}
+
 // ─── AI-DBA 导航追踪与返回逻辑 ───
 var _aiDbaNavHistory = null; // 存储跳转前的 {tab, scrollY}
 
@@ -1708,7 +1727,7 @@ function aiasRenderBatchSummary(resultDiv, sqlId, dsList, results) {
     var r = results[i];
     html += '<tr class="' + (r.ok ? '' : 'is-err') + '">'
       + '<td class="aias-batch-ds">' + escHtml(r.name) + '</td>'
-      + '<td>' + escHtml(r.db_type || '') + '</td>'
+      + '<td>' + escHtml(aiasNormDbType(r.db_type)) + '</td>'
       + '<td>' + (r.ok ? '✓ 成功' : '✗ ' + escHtml(r.error || '失败')) + '</td>'
       + '<td>' + (r.total || 0) + '</td>'
       + '<td>' + (r.result
@@ -1886,7 +1905,7 @@ function aiasShowDsVersions(force) {
           + '<div class="aias-ver-row-top">'
           + '<span class="aias-ver-name" title="' + escHtml(r.name) + '">' + escHtml(r.name) + '</span>'
           + (isTarget ? '<span class="aias-ver-tag">当前目标</span>' : '')
-          + (r.db_type ? '<span class="aias-ver-tag">' + escHtml(r.db_type) + '</span>' : '')
+          + (r.db_type ? '<span class="aias-ver-tag">' + escHtml(aiasNormDbType(r.db_type)) + '</span>' : '')
           + '<span class="aias-ver-label">' + escHtml(r.label || '未知版本') + '</span>'
           + '</div>'
           + '<div class="aias-ver-ver">' + escHtml(r.version || '(未取到版本)') + '</div>'
@@ -1957,7 +1976,7 @@ function aiasShowDsModal(dsList, title, onSelect) {
     for (var i = 0; i < dsList.length; i++) {
       var ds = dsList[i];
       var name = ds.name || ds.datasource_name || '';
-      var meta = [ds.db_type || '', (ds.host || '') + (ds.port ? (':' + ds.port) : ''),
+      var meta = [aiasNormDbType(ds.db_type), (ds.host || '') + (ds.port ? (':' + ds.port) : ''),
                   '目录: ' + (ds.dir_path || '未分配'),
                   (ds.labels && ds.labels.length) ? ('标签: ' + ds.labels.join('/')) : '',
                   (ds.node_count > 1) ? (ds.node_count + ' 节点') : ''].filter(Boolean).join(' · ');
@@ -2045,7 +2064,7 @@ function aiasDsMultiRender() {
     : '仅可批量执行<b>同一数据库类型</b>，勾选首个即锁定类型';
   var groups = {};   // db_type -> [obj]
   _aiasDsmList.forEach(function(ds) {
-    var t = (ds.db_type || '其他').trim() || '其他';
+    var t = aiasNormDbType(ds.db_type) || '其他';
     (groups[t] = groups[t] || []).push(ds);
   });
   var html = '';
@@ -2106,7 +2125,7 @@ function aiasDsMultiSelectAll(type) {
   }
   _aiasDsmLockType = type;
   _aiasDsmList.forEach(function(ds, idx) {
-    var t = (ds.db_type || '其他').trim() || '其他';
+    var t = aiasNormDbType(ds.db_type) || '其他';
     if (t !== type) return;
     if (_aiasDsmSelected.indexOf(idx) < 0) _aiasDsmSelected.push(idx);
   });
@@ -5306,7 +5325,7 @@ function aiasRefreshTaskStatus(taskId) {
         html += '<div style="font-size:13px;color:var(--text-muted);margin-bottom:8px">';
         if (data.datasource) html += '📊 ' + escHtml(data.datasource);
         if (data.datasource && data.db_type) html += ' · ';
-        if (data.db_type) html += escHtml(data.db_type);
+        if (data.db_type) html += escHtml(aiasNormDbType(data.db_type));
         html += '</div>';
       }
 
@@ -5455,7 +5474,7 @@ function aiasLoadTaskHistory() {
           : '<span class="aias-th-item-badge" style="background:rgba(139,92,246,0.15);color:#8b5cf6">已归档</span>';
 
         var dbTypeBadge = t.db_type
-          ? '<span class="aias-th-item-badge" style="background:var(--surface2,#f3f4f6);color:var(--text-muted,#6b7280)">' + escHtml(t.db_type) + '</span>'
+          ? '<span class="aias-th-item-badge" style="background:var(--surface2,#f3f4f6);color:var(--text-muted,#6b7280)">' + escHtml(aiasNormDbType(t.db_type)) + '</span>'
           : '';
 
         var timeStr = t.started_at || '';

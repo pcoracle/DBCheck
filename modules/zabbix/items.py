@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
 # Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
+
 """Zabbix 主机与监控项的解析工具。
 
 监控项 key 的命名在 Zabbix 版本与操作系统模板之间差异很大，这里集中处理兼容：

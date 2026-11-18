@@ -219,6 +219,10 @@ class DatabaseInstance:
     ssh_key_file: str = "" # SSH 私钥路径
     ssh_key_password: str = "" # SSH 私钥密码
     ssh_enabled: bool = False  # 是否启用 SSH
+    # Zabbix 采集绑定：留空则按实例 IP 自动匹配；任一非空即视为显式绑定，
+    # 优先于自动匹配。定时巡检靠它长期生效，不必每次重填。
+    zabbix_host_ip: str = ""
+    zabbix_host_name: str = ""
     tags: List[str] = None  # 标签列表
     group: str = "default"  # 分组
     dir_id: str = ""  # 目录 ID（树形归属；与 group 独立，group 继续供监控大屏使用）
@@ -818,6 +822,12 @@ class InstanceManager:
                 c.execute('ALTER TABLE instances ADD COLUMN "deleted_at" TEXT DEFAULT \'\'')
             except Exception:
                 pass
+            # 迁移：Zabbix 采集绑定两列（存量实例留空 = 按 IP 自动匹配，行为不变）
+            for _zcol in ('zabbix_host_ip', 'zabbix_host_name'):
+                try:
+                    c.execute('ALTER TABLE instances ADD COLUMN "%s" TEXT DEFAULT \'\'' % _zcol)
+                except Exception:
+                    pass
             # 确保表存在
             c.execute("""
                 CREATE TABLE IF NOT EXISTS instances (
@@ -831,6 +841,7 @@ class InstanceManager:
                     ssh_host TEXT DEFAULT '', ssh_port INTEGER DEFAULT 22,
                     ssh_user TEXT DEFAULT '', ssh_password TEXT DEFAULT '',
                     ssh_key_file TEXT DEFAULT '', ssh_key_password TEXT DEFAULT '', ssh_enabled INTEGER DEFAULT 0,
+                    zabbix_host_ip TEXT DEFAULT '', zabbix_host_name TEXT DEFAULT '',
                     tags TEXT DEFAULT '[]', "group" TEXT DEFAULT 'default',
                     dir_id TEXT DEFAULT '',
                     enabled INTEGER DEFAULT 1, description TEXT DEFAULT '',
@@ -851,10 +862,11 @@ class InstanceManager:
                     (id, name, db_type, host, port, "user", password, "database", service_name, gbase_server_name, tenant, sysdba,
                      connect_mode, auth_source, auth_mechanism, replica_set, tls, tls_ca_file, tls_cert_key_file, tls_allow_invalid_certs,
                      ssh_host, ssh_port, ssh_user, ssh_password, ssh_key_file, ssh_key_password, ssh_enabled,
+                     zabbix_host_ip, zabbix_host_name,
                      tags, "group", dir_id, enabled, description, deleted, deleted_at,
                      created_at, updated_at, connection_mode,
                      encrypt, trust_server_certificate, use_sid, driver_version, jdbc_url)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     d.get("id", ""), d.get("name", ""), d.get("db_type", ""),
                     d.get("host", ""), d.get("port", 0), d.get("user", ""),
@@ -872,6 +884,7 @@ class InstanceManager:
                     d.get("ssh_host", ""), d.get("ssh_port", 22),
                     d.get("ssh_user", ""), d.get("ssh_password", ""),
                     d.get("ssh_key_file", ""), d.get("ssh_key_password", ""), 1 if d.get("ssh_enabled") else 0,
+                    d.get("zabbix_host_ip", ""), d.get("zabbix_host_name", ""),
                     json.dumps(d.get("tags", []), ensure_ascii=False),
                     d.get("group", "default"), d.get("dir_id", "") or 'dir_unassigned',
                     1 if d.get("enabled", True) else 0,
@@ -988,6 +1001,8 @@ class InstanceManager:
                 report_path TEXT,
                 duration REAL,
                 auto_analyze TEXT,
+                trigger_type TEXT DEFAULT '',
+                task_id TEXT DEFAULT '',
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -1470,7 +1485,10 @@ class InstanceManager:
                 # 空值跳过，保留原值（密码字段除外：空密码不保存）
                 if value is None:
                     continue
-                if isinstance(value, str) and value == '' and key not in ('ssh_host', 'ssh_user', 'ssh_key_file', 'dir_id'):
+                if isinstance(value, str) and value == '' and key not in (
+                        'ssh_host', 'ssh_user', 'ssh_key_file', 'dir_id',
+                        # Zabbix 绑定允许清空：解绑后回到「按实例 IP 自动匹配」
+                        'zabbix_host_ip', 'zabbix_host_name'):
                     continue
                 # 密码字段自动加密
                 if key in ('password', 'ssh_password', 'ssh_key_password') and value:
@@ -1775,9 +1793,15 @@ class InstanceManager:
         report_path: str,
         duration: float,
         host: str = '',
-        auto_analyze: Optional[List[Dict]] = None
+        auto_analyze: Optional[List[Dict]] = None,
+        trigger_type: str = '',
+        task_id: str = ''
     ) -> Dict[str, Any]:
-        """记录巡检历史"""
+        """记录巡检历史。
+
+        ``trigger_type='ai_assistant'`` + ``task_id`` 标出助手发起的那次巡检：
+        服务重启后内存任务没了，助手「历史任务」弹窗仍能从库里把它认回来。
+        """
         conn = sqlite3.connect(self.db_file)
         cursor = conn.cursor()
 
@@ -1793,6 +1817,13 @@ class InstanceManager:
         except Exception:
             pass
 
+        # 确保来源标记字段存在（老库增量补列，幂等）
+        for column in ('trigger_type', 'task_id'):
+            try:
+                cursor.execute("ALTER TABLE inspection_history ADD COLUMN %s TEXT" % column)
+            except Exception:
+                pass
+
         try:
             auto_analyze_json = json.dumps(auto_analyze, ensure_ascii=False) if auto_analyze else None
 
@@ -1800,12 +1831,13 @@ class InstanceManager:
             cursor.execute("""
                 INSERT INTO inspection_history
                 (instance_id, instance_name, db_type, inspect_time, health_score,
-                 risk_count, risk_level, report_path, duration, auto_analyze, host)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 risk_count, risk_level, report_path, duration, auto_analyze, host,
+                 trigger_type, task_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 instance_id, instance_name, db_type, datetime.now().isoformat(),
                 health_score, risk_count, risk_level, report_path, duration,
-                auto_analyze_json, host
+                auto_analyze_json, host, trigger_type or '', task_id or ''
             ))
 
             # 更新趋势数据
@@ -1828,31 +1860,42 @@ class InstanceManager:
     def get_inspection_history(
         self,
         instance_id: Optional[str] = None,
-        limit: int = 100
+        limit: int = 100,
+        trigger_type: str = ''
     ) -> List[Dict[str, Any]]:
-        """获取巡检历史"""
+        """获取巡检历史；``trigger_type`` 非空时只取该来源（如 ai_assistant）。"""
         conn = sqlite3.connect(self.db_file)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
+        clauses, params = [], []
         if instance_id:
-            cursor.execute("""
-                SELECT * FROM inspection_history
-                WHERE instance_id = ?
-                ORDER BY inspect_time DESC
-                LIMIT ?
-            """, (instance_id, limit))
-        else:
-            cursor.execute("""
-                SELECT * FROM inspection_history
-                ORDER BY inspect_time DESC
-                LIMIT ?
-            """, (limit,))
+            clauses.append('instance_id = ?')
+            params.append(instance_id)
+        if trigger_type:
+            clauses.append('trigger_type = ?')
+            params.append(trigger_type)
+        where = (' WHERE ' + ' AND '.join(clauses)) if clauses else ''
+        cursor.execute('SELECT * FROM inspection_history' + where +
+                       ' ORDER BY inspect_time DESC LIMIT ?', params + [limit])
 
         rows = cursor.fetchall()
         conn.close()
 
         return [dict(row) for row in rows]
+
+    def get_inspection_by_task_id(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """按助手任务 id 找回那次巡检（重启后「查看巡检进度/历史」的回读入口）。"""
+        if not task_id:
+            return None
+        conn = sqlite3.connect(self.db_file)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM inspection_history WHERE task_id = ? '
+                       'ORDER BY inspect_time DESC LIMIT 1', (task_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row) if row else None
 
     def get_instance_trend(self, instance_id: str, days: int = 30) -> List[Dict[str, Any]]:
         """获取实例健康趋势"""

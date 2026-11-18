@@ -17,6 +17,7 @@ Copyright (c) 2025-2026 fiyo (Jack Ge) 所有。链路上的三个约定：
   对应的只读查询（连接数 / 锁等待 / 慢查询），秒级返回。
 """
 import datetime
+import json
 import threading
 import uuid
 
@@ -149,30 +150,29 @@ def tool_get_task_status(task_id=''):
 def _restore_task_from_history(task_id):
     """进程重启后按历史库回读一次巡检结果（内存任务态丢失时的兜底）。"""
     try:
-        from modules.inspection import dal
-    except Exception:
-        return None
-    getter = getattr(dal, 'get_inspection_by_task_id', None)
-    if not callable(getter):
-        return None
-    try:
-        row = getter(task_id)
+        from modules.pro import get_instance_manager
+        row = get_instance_manager().get_inspection_by_task_id(task_id)
     except Exception:
         return None
     if not row:
         return None
+    try:
+        issues = json.loads(row.get('auto_analyze') or '[]')
+    except (TypeError, ValueError):
+        issues = []
     return {
         'id': task_id,
-        'status': row.get('status') or 'done',
-        'datasource': row.get('instance_name') or row.get('db_name') or '',
+        'status': 'done',
+        'datasource': row.get('instance_name') or '',
         'db_type': row.get('db_type') or '',
         'health_score': row.get('health_score'),
         'risk_count': row.get('risk_count'),
         'risk_level': row.get('risk_level'),
         'report_file': row.get('report_path') or '',
-        'started_at': row.get('created_at') or row.get('inspection_time') or '',
+        'started_at': row.get('inspect_time') or row.get('created_at') or '',
         'trigger_type': row.get('trigger_type') or 'ai_assistant',
-        'error': row.get('error_msg') or '',
+        'error': '',
+        'auto_analyze': issues if isinstance(issues, list) else [],
         'log_tail': [],
     }
 

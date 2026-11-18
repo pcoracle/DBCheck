@@ -46,6 +46,14 @@
           <button type="button" class="awrg-mini" id="awrg-refresh">刷新</button>
         </span>
       </div>
+      <div class="awrg-filter">
+        <select id="awrg-source-filter">
+          <option value="">全部来源</option>
+          <option value="generate">在线生成</option>
+          <option value="upload">人工上传</option>
+        </select>
+        <span class="awrg-hint" id="awrg-recent-count"></span>
+      </div>
       <div class="awrg-list" id="awrg-recent"></div>
     </section>
 
@@ -58,11 +66,12 @@
           <button type="button" class="awrg-mini" id="awrg-maximize">最大化</button>
           <button type="button" class="awrg-mini" id="awrg-word">生成 Word</button>
           <button type="button" class="awrg-mini" id="awrg-ai">AI 诊断</button>
+          <button type="button" class="awrg-mini" id="awrg-bicqa">问 BIC-QA</button>
         </span>
       </div>
       <div class="awrg-body">
         <iframe class="awrg-frame" id="awrg-frame" title="AWR 预览"></iframe>
-        <pre class="awrg-ai" id="awrg-ai-box" style="display:none;"></pre>
+        <div class="awrg-ai" id="awrg-ai-box" style="display:none;"></div>
       </div>
     </section>
   </div>

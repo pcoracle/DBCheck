@@ -3594,13 +3594,18 @@ async function executeFixSql(taskId, sql) {
   <link rel="stylesheet" href="/static/css/fusion/trend.css?v={{ version }}-fusion3">
   <link rel="stylesheet" href="/static/css/fusion/inspection_config.css?v={{ version }}-fusion14">
   <link rel="stylesheet" href="/static/css/fusion/sql_editor.css?v={{ version }}-fusion20">
-  <link rel="stylesheet" href="/static/css/fusion/ds_picker.css?v={{ version }}-fusion5">
+  <link rel="stylesheet" href="/static/css/fusion/ds_picker.css?v={{ version }}-fusion6">
   {% if aias_source_ui %}
   <link rel="stylesheet" href="/static/css/fusion/aias.css?v={{ version }}-source21">
   {% else %}
   <link rel="stylesheet" href="/static/css/fusion/ai_assistant.css?v={{ version }}-fusion17">
   {% endif %}
-  <link rel="stylesheet" href="/static/css/fusion/awr.css?v={{ version }}-fusion5">
+  <link rel="stylesheet" href="/static/css/fusion/awr.css?v={{ version }}-fusion6">
+  <link rel="stylesheet" href="/static/css/fusion/zabbix_monitor.css?v={{ version }}-fusion2">
+  {% if server_inspect_fusion_ui %}
+  <link rel="stylesheet" href="/static/css/fusion/server_inspect.css?v={{ version }}-fusion1">
+  {% endif %}
+  <link rel="stylesheet" href="/static/css/fusion/reports.css?v={{ version }}-fusion2">
 
   <!-- xterm.js（远程终端） -->
   <link rel="stylesheet" href="/static/css/xterm.css" data-page-node-id="fyVy1GfG9wP7FKcTrz1fR8" />
@@ -6695,7 +6700,8 @@ function formatBytes(bytes) {
       }
 
       function showAddDatasourceModal(existingDs) {
-        if (!existingDs) { _editDsPassword = ''; _editDsPort = 0; _editSshPassword = ''; _editingDatasourceId = ''; }
+        if (!existingDs) { _editDsPassword = ''; _editDsPort = 0; _editSshPassword = ''; _editingDatasourceId = ''; _dsZabbixBind = { host_ip: '', host_name: '' }; }
+        else { _dsZabbixBind = { host_ip: existingDs.zabbix_host_ip || '', host_name: existingDs.zabbix_host_name || '' }; }
         document.getElementById('datasource-modal-backdrop')?.remove();
         const isEdit = !!existingDs;
         const modalTitle = isEdit ? i18n('webui.pro_datasource_edit_title') : i18n('webui.pro_datasource_add_title');
@@ -6766,6 +6772,20 @@ function formatBytes(bytes) {
                 '</div>' +
               '</div>' +
             '</div>' +
+            // Zabbix 系统资源采集绑定：留空按实例 IP 自动匹配；候选主机必须点选确认，
+            // 避免同名机器绑错（绑定随数据源保存，手动/定时巡检共用）
+            '<div style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px;">' +
+              '<div style="display:flex;align-items:center;margin-bottom:6px">' +
+                '<span style="font-size:13px;font-weight:500;color:var(--text)">📡 系统资源采集（Zabbix）</span>' +
+                '<span id="ds-zb-current" style="margin-left:auto;font-size:11.5px;color:var(--text-muted)">未绑定</span>' +
+              '</div>' +
+              '<div style="font-size:11.5px;color:var(--text-muted);margin-bottom:8px">内存 / CPU / 磁盘类规则需要系统资源数据。留空则按实例 IP 自动匹配 Zabbix 主机；匹配不到时用「检测候选主机」按名称找，点选确认（避免绑到别的机器）。</div>' +
+              '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">' +
+                '<button type="button" class="btn btn-ghost" style="font-size:12px;padding:4px 12px" onclick="loadZabbixCandidatesForDs()" title="按服务名/实例名在 Zabbix 中查找候选主机">🔍 检测候选主机</button>' +
+                '<button type="button" class="btn btn-ghost" style="font-size:12px;padding:4px 12px" onclick="unbindZabbixForDs()" title="清除绑定，回到按实例 IP 自动匹配">解绑</button>' +
+              '</div>' +
+              '<div id="ds-zb-candidates" style="margin-top:10px"></div>' +
+            '</div>' +
             '<div id="ds-save-msg" style="margin-top:10px;font-size:12px"></div>' +
             '<div style="display:flex;justify-content:flex-end;gap:10px;margin-top:16px">' +
               '<button class="btn btn-ghost" onclick="document.getElementById(\'datasource-modal-backdrop\').remove()">' + i18n('webui.cancel') + '</button>' +
@@ -6774,6 +6794,7 @@ function formatBytes(bytes) {
             '</div>' +
           '</div></div>';
         document.documentElement.insertAdjacentHTML('beforeend', html);
+        renderDsZabbixCurrent();
         // 动态填充数据库类型下拉框（支持插件，按生态系分组；保留 data-port/data-user 供端口/用户联动）
         const dsDbTypeSel = document.getElementById('ds-db-type');
         if (dsDbTypeSel && window.dbTypes) {
@@ -6825,6 +6846,88 @@ function formatBytes(bytes) {
       let _editDsPassword = '';
       let _editDsPort = 0;
       let _editSshPassword = '';
+      // ─── 数据源的 Zabbix 采集绑定 ─────────────────────
+      // 绑定落到数据源后，手动巡检与定时巡检都能自动用它采系统资源。
+      // 候选只列出、不自动绑定：同名机器可能有好几台，绑错会把别的机器的
+      // 内存/磁盘当成这台库的，必须点选确认。
+      let _dsZabbixBind = { host_ip: '', host_name: '' };
+
+      function renderDsZabbixCurrent() {
+        const el = document.getElementById('ds-zb-current');
+        if (!el) return;
+        const label = _dsZabbixBind.host_name || _dsZabbixBind.host_ip;
+        el.textContent = label ? ('已绑定: ' + label) : '未绑定（按实例 IP 自动匹配）';
+        el.style.color = label ? 'var(--accent)' : 'var(--text-muted)';
+      }
+
+      function _zbJsArg(s) {
+        // 把字符串安全嵌进 HTML 属性里的单引号 JS 实参：先 JS 转义再 HTML 转义
+        return escHtml("'" + String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'");
+      }
+
+      async function loadZabbixCandidatesForDs() {
+        const box = document.getElementById('ds-zb-candidates');
+        const editId = _editingDatasourceId;
+        if (!box) return;
+        if (!editId) {
+          box.innerHTML = '<div style="font-size:12px;color:var(--warn)">请先保存数据源，再检测候选主机</div>';
+          return;
+        }
+        box.innerHTML = '<div style="font-size:12px;color:var(--text-muted)">正在查询 Zabbix…</div>';
+        try {
+          const res = await fetch('/api/zabbix/candidates?datasource_id=' + encodeURIComponent(editId));
+          const d = await res.json();
+          if (!d.ok) {
+            box.innerHTML = '<div style="font-size:12px;color:var(--danger)">' + escHtml(d.error || '查询失败') + '</div>';
+            return;
+          }
+          const list = d.candidates || [];
+          if (!list.length) {
+            box.innerHTML = '<div style="font-size:12px;color:var(--warn)">没有找到名称相近的 Zabbix 主机；请确认该机器已被 Zabbix 纳管</div>';
+            return;
+          }
+          box.innerHTML = '<div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">点选一个绑定（分数越高越可能是同一台，100 = IP 完全一致）：</div>' +
+            list.map(c =>
+              '<div style="display:flex;gap:8px;align-items:center;padding:5px 8px;border:1px solid var(--border);border-radius:6px;margin-bottom:4px;background:var(--surface)">' +
+                '<span style="font-size:11px;min-width:26px;color:' + (c.score >= 90 ? 'var(--success)' : 'var(--text-muted)') + '">' + c.score + '</span>' +
+                '<span style="flex:1;font-size:12px">' + escHtml(c.label) +
+                  (c.host_ip ? ' <span style="color:var(--text-muted)">' + escHtml(c.host_ip) + '</span>' : '') + '</span>' +
+                '<span style="font-size:11px;color:var(--text-muted)">' + escHtml(c.reason) + '</span>' +
+                '<button class="btn btn-ghost" style="font-size:11px;padding:2px 8px" title="绑定这台 Zabbix 主机" aria-label="绑定" ' +
+                  'onclick="bindZabbixForDs(' + _zbJsArg(c.host_ip || '') + ',' + _zbJsArg(c.host_name || '') + ')">绑定</button>' +
+              '</div>').join('');
+        } catch (e) {
+          box.innerHTML = '<div style="font-size:12px;color:var(--danger)">' + escHtml(e.message) + '</div>';
+        }
+      }
+
+      async function bindZabbixForDs(hostIp, hostName) {
+        const box = document.getElementById('ds-zb-candidates');
+        const editId = _editingDatasourceId;
+        if (!editId) return;
+        try {
+          const res = await fetch('/api/zabbix/bind', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ datasource_id: editId, host_ip: hostIp || '', host_name: hostName || '' })
+          });
+          const d = await res.json();
+          if (!d.ok) {
+            if (box) box.innerHTML = '<div style="font-size:12px;color:var(--danger)">' + escHtml(d.error || '绑定失败') + '</div>';
+            return;
+          }
+          _dsZabbixBind = { host_ip: hostIp || '', host_name: hostName || '' };
+          renderDsZabbixCurrent();
+          if (box) box.innerHTML = '<div style="font-size:12px;color:var(--success)">' + escHtml(d.message || '已绑定') + '</div>';
+        } catch (e) {
+          if (box) box.innerHTML = '<div style="font-size:12px;color:var(--danger)">' + escHtml(e.message) + '</div>';
+        }
+      }
+
+      async function unbindZabbixForDs() {
+        await bindZabbixForDs('', '');
+      }
+
       function onDsDbTypeChange() {
         const sel = document.getElementById('ds-db-type');
         const dbType = sel.value;
@@ -7091,6 +7194,9 @@ function formatBytes(bytes) {
         payload.ssh_password = sshOn ? (document.getElementById('ds-ssh-password').value || undefined) : '';
         payload.ssh_key_file = sshOn ? document.getElementById('ds-ssh-key').value.trim() : '';
         payload.ssh_key_password = sshOn ? document.getElementById('ds-ssh-key-password').value.trim() : '';
+        // Zabbix 采集绑定（系统资源）：由「检测候选主机」区块维护，随数据源长期保存
+        payload.zabbix_host_ip = _dsZabbixBind.host_ip || '';
+        payload.zabbix_host_name = _dsZabbixBind.host_name || '';
         if (payload.db_type === 'pg' || payload.db_type === 'ivorysql' || payload.db_type === 'kingbase' || payload.db_type === 'mysql' || payload.db_type === 'mariadb' || payload.db_type === 'tidb' || payload.db_type === 'tdsqlc_mysql') payload.database = document.getElementById('ds-database').value.trim();
         if (payload.db_type === 'oracle' || payload.db_type === 'oracle_jdbc') {
           payload.service_name = document.getElementById('ds-service-name').value.trim();
@@ -7747,6 +7853,9 @@ function wfCloseRunDrawer() {
     <div class="nav-item" onclick="showPage('ai-assistant')" id="nav-ai-assistant">
       <span class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a7 7 0 0 1 7 7c0 2.4-1.2 4.5-3 5.8V19h-8v-3.2A7 7 0 0 1 12 3z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9 22h6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span> <span data-i18n="menu.ai-assistant">AI 巡检助手</span>
     </div>
+    <div class="nav-item" onclick="showPage('ai-tasks')" id="nav-ai-tasks">
+      <span class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 8v13H3V8M1 3h22v5H1zM10 12h4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/></svg></span> <span data-i18n="menu.ai-tasks">AI 任务回溯</span>
+    </div>
     <div class="nav-item" onclick="showPage('dm8-offline')" id="nav-dm8-offline" data-page-node-id="4yY5dhXyA5sxp4lehS4zTZ">
       <span class="icon" data-page-node-id="98N4zT1ljMn1b5gXyo2IC1"><svg viewBox="0 0 24 24" aria-hidden="true" data-page-node-id="8UZJKP6ONufKM5hHrHY1pz"><ellipse cx="12" cy="5" rx="8" ry="3" data-page-node-id="guOfWHH8oFXcEgtN21lGyA"/><path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5" data-page-node-id="n7rQ5sRNuOzAnU88QIwae1"/><path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3" data-page-node-id="wAQrTiSy8vPlNfecB7vpou"/></svg></span> <span data-i18n="webui.nav_dm8_offline" data-page-node-id="QkK3ud1qVQX6BTVJwxJmGf">达梦离线存储检查</span>
     </div>
@@ -7833,6 +7942,9 @@ function wfCloseRunDrawer() {
     <div class="nav-item" onclick="showPage('run-log')" id="nav-run-log" data-page-node-id="rUnL0g1nav">
       <span class="icon" data-page-node-id="rUnL0g2icon"><svg viewBox="0 0 24 24" aria-hidden="true" data-page-node-id="rUnL0g3icon"><path d="M4 4h16v12H5l-1 4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8 9h8M8 12h5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span> <span data-i18n="menu.run-log" data-page-node-id="rUnL0g4label">运行日志</span>
     </div>
+    <div class="nav-item" onclick="showPage('tool-mgmt')" id="nav-tool-mgmt">
+      <span class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.7 6.3a4.5 4.5 0 0 0-6 5.6L3 17.6V21h3.4l5.7-5.7a4.5 4.5 0 0 0 5.6-6L14.5 12l-2.5-2.5 2.7-3.2z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg></span> <span data-i18n="menu.tool-mgmt">工具管理</span>
+    </div>
     <div class="nav-item" onclick="showPage('sql-editor')" id="nav-sql-editor" data-page-node-id="N1B30jWZmpX0kKvfSud965">
       <span class="icon" data-page-node-id="WB7ROL3LKzu9sulipRzqIc"><svg viewBox="0 0 24 24" aria-hidden="true" data-page-node-id="S8uYKaDi3JnNbYhUH6Xgos"><path d="m16 18 6-6-6-6" data-page-node-id="xcl9gEKKlFmaJlU8By7ej5"/><path d="m8 6-6 6 6 6" data-page-node-id="rzyAKbzdAFplGGNCEnupxb"/></svg></span> <span data-i18n="webui.nav_sql_editor" data-page-node-id="tkBf0jEEQGjTiW7sM7OFlL">SQL 编辑器</span>
     </div>
@@ -7844,6 +7956,9 @@ function wfCloseRunDrawer() {
     </div>
     <div class="nav-item" onclick="showPage('zabbix')" id="nav-zabbix">
       <span class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 0 1 9 9"/><path d="M12 7a5 5 0 0 1 5 5"/><circle cx="12" cy="12" r="1.6"/><path d="M3.5 20.5 8 16"/></svg></span> <span data-i18n="webui.nav_zabbix">Zabbix 监控设置</span>
+    </div>
+    <div class="nav-item" onclick="showPage('zabbix-monitor')" id="nav-zabbix-monitor">
+      <span class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M7 14l3-4 3 2 4-5"/><path d="M8 21h8"/><path d="M12 18v3"/></svg></span> <span data-i18n="webui.nav_zabbix_monitor">Zabbix 监控</span>
     </div>
     <div class="nav-item" onclick="showPage('disaster-recovery')" id="nav-disaster-recovery" data-page-node-id="EjYEUQelzAAFI3dzFg7MnS">
       <span class="icon" data-page-node-id="tV0sAReKY66zoa8JBiMlg2"><svg viewBox="0 0 24 24" aria-hidden="true" data-page-node-id="L506z40Xu9GuDRbOXL0kC6"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" data-page-node-id="gPp3BzHa18uyEpV7THOrwf"/><path d="M12 8v4" data-page-node-id="e9cYArdj1SBabKUcSEfLq0"/><path d="m10 10 2-2 2 2" data-page-node-id="K3Q5cptPIpdWLSinqx9hf1"/></svg></span> <span data-i18n="webui.nav_disaster_recovery" data-page-node-id="fuhEegebRRrJ4uHrnSDSIB">容灾备份</span>
@@ -8794,26 +8909,70 @@ function wfCloseRunDrawer() {
       <!-- ══ Page: Reports ══ -->
       <div class="page" id="page-reports" data-page-node-id="cxMXqrlBD3CKOpKo6rVmQP">
         <div class="card" data-page-node-id="yrFdqjaCTddFpe2H05otQP">
-          <div class="card-title" data-page-node-id="2HX6MUjA8ueqt16Rp7CTaQ">
-            <span data-page-node-id="YZM4y2zqRE6EoikTJTALo0">📄</span> <span data-i18n="webui.reports_title" data-page-node-id="8JKnD9JSpLK0yz2LkzLXRo">历史巡检报告</span>
-            <button class="btn btn-ghost" style="margin-left:auto;padding:6px 12px;font-size:12px" onclick="loadReports()" data-i18n="webui.reports_refresh" data-page-node-id="lF0Tkz0kdrVzM8k1PrEmPn">↻ 刷新</button>
+          <!-- 数据库类型过滤栏（规范名静态按钮，与后端 _name_matches_db_type 对齐） -->
+          <div id="report-filter-bar" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;padding:0 4px;align-items:center">
+            <span style="font-size:12px;color:var(--text-muted);margin-right:4px">类型</span>
+            <button class="filter-btn filter-active" data-type="" onclick="filterReports('')" style="padding:5px 14px;font-size:12px;border-radius:20px;cursor:pointer">全部</button>
+            <button class="filter-btn" data-type="MySQL" onclick="filterReports('MySQL')" style="padding:5px 14px;font-size:12px;border-radius:20px;cursor:pointer">🐬 MySQL</button>
+            <button class="filter-btn" data-type="PostgreSQL" onclick="filterReports('PostgreSQL')" style="padding:5px 14px;font-size:12px;border-radius:20px;cursor:pointer">🐘 PostgreSQL</button>
+            <button class="filter-btn" data-type="Oracle" onclick="filterReports('Oracle')" style="padding:5px 14px;font-size:12px;border-radius:20px;cursor:pointer">🔴 Oracle</button>
+            <button class="filter-btn" data-type="DM8" onclick="filterReports('DM8')" style="padding:5px 14px;font-size:12px;border-radius:20px;cursor:pointer">🟡 达梦 DM8</button>
+            <button class="filter-btn" data-type="SQLServer" onclick="filterReports('SQLServer')" style="padding:5px 14px;font-size:12px;border-radius:20px;cursor:pointer">🟠 SQL Server</button>
+            <button class="filter-btn" data-type="TiDB" onclick="filterReports('TiDB')" style="padding:5px 14px;font-size:12px;border-radius:20px;cursor:pointer">🟢 TiDB</button>
+            <button class="filter-btn" data-type="IvorySQL" onclick="filterReports('IvorySQL')" style="padding:5px 14px;font-size:12px;border-radius:20px;cursor:pointer">🐘 IvorySQL</button>
+            <button class="filter-btn" data-type="YashanDB" onclick="filterReports('YashanDB')" style="padding:5px 14px;font-size:12px;border-radius:20px;cursor:pointer">🏔️ YashanDB</button>
           </div>
-          <!-- 数据库类型过滤栏 -->
-          <div id="report-filter-bar" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;padding:0 4px" data-page-node-id="s5iWHPszTheIhT20S2JFX3">
-            <button class="filter-btn filter-active" data-type="" onclick="filterReports('')" style="padding:5px 14px;font-size:12px;border-radius:20px;cursor:pointer" data-page-node-id="CtaIEsG10W7B0q4YXkgrFR">全部</button>
-            <!-- 动态数据库类型过滤按钮将由JS生成 -->
+          <!-- 巡检触发类型 + 通用筛选栏（来源 / 关键词 / 日期范围 / 清除 / 刷新） -->
+          <div id="report-trigger-bar" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px;padding:8px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;align-items:center">
+            <span style="font-size:12px;color:var(--text-muted)">来源</span>
+            <button class="filter-btn filter-active" data-trigger="" onclick="filterReportTrigger('')" style="padding:4px 12px;font-size:12px;border-radius:20px;cursor:pointer">全部</button>
+            <button class="filter-btn" data-trigger="manual" onclick="filterReportTrigger('manual')" style="padding:4px 12px;font-size:12px;border-radius:20px;cursor:pointer">👤 人工</button>
+            <button class="filter-btn" data-trigger="scheduled" onclick="filterReportTrigger('scheduled')" style="padding:4px 12px;font-size:12px;border-radius:20px;cursor:pointer">⏰ 定时</button>
+            <button class="filter-btn" data-trigger="ai_assistant" onclick="filterReportTrigger('ai_assistant')" style="padding:4px 12px;font-size:12px;border-radius:20px;cursor:pointer">🤖 AI助手</button>
+            <div style="width:1px;height:20px;background:var(--border);margin:0 4px"></div>
+            <input type="text" id="report-search-input" placeholder="搜索实例名称、主机地址..." oninput="filterReportByKeyword()" style="flex:1;min-width:180px;padding:5px 12px;font-size:12px;border:1px solid var(--border);border-radius:20px;background:var(--bg);color:var(--text)" />
+            <div style="display:flex;gap:6px;align-items:center">
+              <div class="sh-date-wrap">
+                <input type="date" id="report-date-from" onchange="syncDatePlaceholder(this); filterReportByDate()" onclick="openDatePicker(this)" title="开始日期" style="padding:4px 8px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)" />
+                <span class="sh-date-placeholder">开始日期</span>
+              </div>
+              <span style="font-size:12px;color:var(--text-muted)">~</span>
+              <div class="sh-date-wrap">
+                <input type="date" id="report-date-to" onchange="syncDatePlaceholder(this); filterReportByDate()" onclick="openDatePicker(this)" title="结束日期" style="padding:4px 8px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)" />
+                <span class="sh-date-placeholder">结束日期</span>
+              </div>
+            </div>
+            <button class="btn btn-ghost" style="font-size:11px;padding:4px 10px" onclick="clearReportFilters()">清除筛选</button>
+            <button class="btn btn-ghost" style="font-size:11px;padding:4px 10px" onclick="loadReports()" data-i18n="webui.reports_refresh">↻ 刷新</button>
           </div>
-          <!-- 批量操作栏（默认隐藏） -->
-          <div id="batch-bar" style="display:none;align-items:center;gap:10px;margin-bottom:10px;padding:8px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:8px" data-page-node-id="DZstWyNX019yc2GspYHF9z">
-            <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer;user-select:none" data-page-node-id="pAiTMMZuOKX7wKEzaG1nRd">
-              <input type="checkbox" id="select-all-cb" onchange="toggleSelectAll(this.checked)" data-page-node-id="jHuDCMgUqHbd2ArnTQRbnF"> 全选
-            </label>
-            <span id="selected-count" style="font-size:12px;color:var(--text-muted)" data-page-node-id="CWW1zM6GIbJHtz4RtBK8AA">已选 0 项</span>
-            <button class="btn btn-danger" style="margin-left:auto;font-size:12px;padding:6px 16px" onclick="batchDeleteReports()" data-page-node-id="zpQv8pfVqLB3RW3IG6MRI8">🗑️ 批量删除</button>
-          </div>
-          <div class="reports-list" id="reports-list" data-page-node-id="jHAtxtOQLNbjsIqX3GWOoT">
-            <div style="text-align:center;color:var(--text-muted);padding:32px" data-i18n="webui.reports_loading" data-page-node-id="QapoMel4e8BOP2YuTcGPDD">正在加载...</div>
-          </div>
+          <!-- 左树（数据源目录）+ 右列表 -->
+          <div class="wi-split rp-split" id="rp-split">
+            <aside class="wi-tree" id="rp-tree" role="tree" aria-label="数据源目录">
+              <div class="wi-tree-loading">正在加载目录…</div>
+            </aside>
+            <section class="wi-split-main">
+              <div class="wi-crumb">
+                <button type="button" class="wi-tree-toggle" id="rp-tree-toggle" onclick="toggleReportTreePanel()" title="收起目录" aria-label="收起目录">⟨</button>
+                <span id="rp-crumb-path">全部数据源</span>
+                <span id="rp-crumb-count" style="margin-left:auto;color:var(--text-muted)"></span>
+              </div>
+              <!-- 批量操作栏（默认隐藏） -->
+              <div id="batch-bar" style="display:none;align-items:center;gap:10px;padding:8px 12px;background:var(--surface2);border:0;border-bottom:1px solid var(--border);border-radius:0">
+                <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer;user-select:none">
+                  <input type="checkbox" id="select-all-cb" onchange="toggleSelectAll(this.checked)"> 全选
+                </label>
+                <span id="selected-count" style="font-size:12px;color:var(--text-muted)">已选 0 项</span>
+                <button class="btn btn-danger" style="margin-left:auto;font-size:12px;padding:6px 16px" onclick="batchDeleteReports()">🗑️ 批量删除</button>
+              </div>
+              <div class="rp-list-wrap">
+                <div class="reports-list" id="reports-list">
+                  <div style="text-align:center;color:var(--text-muted);padding:32px" data-i18n="webui.reports_loading">正在加载...</div>
+                </div>
+              </div><!-- /rp-list-wrap -->
+              <!-- 分页栏固定在滚动区下方，不随列表滚动 -->
+              <div id="reports-pager" class="rp-pager" style="display:none"></div>
+            </section><!-- /wi-split-main -->
+          </div><!-- /rp-split -->
         </div>
       </div>
 
@@ -9262,6 +9421,11 @@ function wfCloseRunDrawer() {
       <!-- ══ Page: Zabbix 监控设置 ══ -->
       <div class="page" id="page-zabbix">
         {% include 'partials/fusion/zabbix.html' %}
+      </div>
+
+      <!-- ══ Page: Zabbix 监控 ══ -->
+      <div class="page" id="page-zabbix-monitor">
+        {% include 'partials/fusion/zabbix_monitor.html' %}
       </div>
 
       <!-- ══ Page: Backup ══ -->
@@ -9936,7 +10100,14 @@ curl -H "X-API-Key: YOUR_API_KEY" http://localhost:5003/api/v1/inspect/{task_id}
           </div>
         </div>
       </div>
-      <!-- ══ Page: Server Inspection ══ -->
+      <!-- ══ Page: Server Inspection ══
+           fusion（默认）= SSH 配置表 + 执行步骤条 + 命令日志 + 结果/AI 报告；
+           legacy        = 单表单直采页（保留作对照与回退，见 dbc_config.json 的 server_inspect_impl） -->
+      {% if server_inspect_fusion_ui %}
+      <div class="page" id="page-server-inspect">
+        {% include 'partials/fusion/server_inspect.html' %}
+      </div>
+      {% else %}
       <div class="page" id="page-server-inspect" data-page-node-id="NwCsaNH94gHEUgCpKzZTtV">
         <div class="card" data-page-node-id="aCdRHmrRIKRV0xq7JgQZVZ">
           <div class="card-title" data-page-node-id="UfzXHSO7oaX5R8YFMV7sGY"><span data-page-node-id="Yk3OwbwLO7pSC8Tiy9SWR8">🖥️</span> <span data-i18n="webui.server_inspect_title" data-page-node-id="EotIKHFm9GfBvEK08hZbYs">服务器巡检</span></div>
@@ -10075,6 +10246,7 @@ curl -H "X-API-Key: YOUR_API_KEY" http://localhost:5003/api/v1/inspect/{task_id}
           </div>
         </div>
       </div>
+      {% endif %}
 
       <!-- ══ Page: Run Log (运行日志) ══ -->
       <div class="page" id="page-run-log" data-page-node-id="rUnL0gPage">
@@ -10107,7 +10279,13 @@ curl -H "X-API-Key: YOUR_API_KEY" http://localhost:5003/api/v1/inspect/{task_id}
         </div>
       </div>
 
-      <!-- ══ Page: Server Inspection History ══ -->
+      <!-- ══ Page: Server Inspection History ══
+           fusion（默认）= 状态卡筛选 + 主机卡片 + 详情模态；legacy = 表格 + 内嵌详情卡 -->
+      {% if server_inspect_fusion_ui %}
+      <div class="page" id="page-server-history">
+        {% include 'partials/fusion/server_history.html' %}
+      </div>
+      {% else %}
       <div class="page" id="page-server-history" data-page-node-id="HTNIJCOO1yxB3NdBsbrVHl">
         <div class="card" data-page-node-id="WiCibBrHHBJYUsNOqaq3Kr">
           <div class="card-title" data-page-node-id="QR9Qfh3sxHhvLIIaL6QG92"><span data-page-node-id="J1mXIEPqZh13FlIi9uttjf">📜</span> <span data-i18n="webui.server_inspect_history" data-page-node-id="8SyCgG6sBmCVa3AtHGoa1S">服务器巡检历史</span></div>
@@ -10192,6 +10370,7 @@ curl -H "X-API-Key: YOUR_API_KEY" http://localhost:5003/api/v1/inspect/{task_id}
           </div>
         </div>
       </div>
+      {% endif %}
       <div class="page" id="page-rag" data-page-node-id="BSeisfmFJRGhxK2iZxv7ff">
         <div class="card" data-page-node-id="wQCEQBuJPkrPdWfUtCK213">
           <div class="card-title" data-page-node-id="yLZXXPu1EcJMxMeg63BFw3"><span data-page-node-id="WpD1Wr8X75r8xOXFYVTVa7">📚</span> <span data-i18n="webui.rag_upload_title" data-page-node-id="iaCytxmJHDM0FaHDLsQOwG">RAG 知识库</span></div>
@@ -10771,6 +10950,7 @@ curl -H "X-API-Key: YOUR_API_KEY" http://localhost:5003/api/v1/inspect/{task_id}
            fusion        = 另一套模块化实现（保留作对照与回退，见 dbc_config.json 的 ai_assistant_impl） -->
       {% if aias_source_ui %}
       {% include 'partials/fusion/aias_page.html' %}
+      {% include 'partials/fusion/ai_shared_pages.html' %}
       {% else %}
       {% include 'partials/fusion/ai_assistant.html' %}
       {% endif %}
@@ -13033,6 +13213,7 @@ function showPage(name) {
     scheduler:[i18n('webui.nav_scheduler') || '定时巡检',                  i18n('webui.scheduler_desc') || '管理定时巡检任务'],
     notifier:[i18n('webui.nav_notifier') || '通知配置',                   i18n('webui.notifier_desc') || '配置邮件和 Webhook 通知'],
     zabbix:  [i18n('webui.nav_zabbix') || 'Zabbix 监控设置',              i18n('webui.zabbix_desc') || '配置 Zabbix 服务器地址与凭据'],
+    'zabbix-monitor': [i18n('webui.nav_zabbix_monitor') || 'Zabbix 监控', i18n('webui.zabbix_monitor_desc') || '查看 Zabbix 纳管主机的关键指标与活动问题'],
     ai:      [i18n('webui.ai_title') || 'AI 诊断',                       i18n('webui.ai_desc') || ''],
     datasources: [i18n('webui.nav_datasources') || '数据源管理',        i18n('webui.datasources_desc') || ''],
     rules:   [i18n('webui.nav_rules') || '巡检规则',                    i18n('webui.rules_desc') || ''],
@@ -13076,7 +13257,7 @@ function showPage(name) {
   const t = titles[name] || [name, ''];
   document.getElementById('topbar-title').textContent = t[0];
   document.getElementById('topbar-sub').textContent  = t[1];
-  if (name === 'reports') loadReports();
+  if (name === 'reports') loadReportsPage();
   if (name === 'wizard') loadWizardHistoryPage();
   if (name === 'trend') loadTrendInstances();
   if (name === 'scheduler') loadSchedulerJobs();
@@ -13089,6 +13270,7 @@ function showPage(name) {
     else if (typeof loadNotifierConfig === 'function') loadNotifierConfig();
   }
   if (name === 'zabbix' && window.FusionZabbix) FusionZabbix.load();
+  if (name === 'zabbix-monitor' && window.FusionZabbixMonitor) FusionZabbixMonitor.load();
   if (name === 'ai') loadAIConfig();
   if (name === 'rag') showRagPage();
   if (name === 'doc-kb') loadDocKb();
@@ -13099,7 +13281,12 @@ function showPage(name) {
   if (name === 'disaster-recovery') loadDisasterRecovery();
   if (name === 'backup') loadBackupPage();
   if (name === 'apikey') loadApiKeys();
+  {% if server_inspect_fusion_ui %}
+  if (name === 'server-inspect') loadServerSSHProfiles();
+  if (name === 'server-history') { loadServerOsTypes(); loadServerHistory(); }
+  {% else %}
   if (name === 'server-history') loadServerHistory();
+  {% endif %}
   if (name === 'account') loadAccountPage();
   if (name === 'um-admin') loadUmAdminPage();
   if (name === 'oracle-client') loadDrivers();
@@ -13166,6 +13353,14 @@ function showPage(name) {
     else { mainEl.classList.remove('sql-editor-active'); }
     if (name === 'ai-assistant') { mainEl.classList.add('aias-active'); }
     else { mainEl.classList.remove('aias-active'); }
+    // 巡检历史页全窗口布局：筛选栏固定，仅报告列表滚动（对齐服务器巡检历史页做法）
+    if (name === 'reports') { mainEl.classList.add('reports-active'); }
+    else { mainEl.classList.remove('reports-active'); }
+    {% if server_inspect_fusion_ui %}
+    // 巡检历史页全窗口布局：顶栏/筛选固定，仅卡片列表滚动
+    if (name === 'server-history') { mainEl.classList.add('server-history-active'); }
+    else { mainEl.classList.remove('server-history-active'); }
+    {% endif %}
   }
 }
 
@@ -15089,84 +15284,8 @@ async function downloadReportPdf(taskId) {
 }
 
 // ─── Reports ───
-let currentReportFilter = '';   // 当前数据库类型过滤
-let allReportFiles = [];        // 缓存原始文件列表
-
-async function loadReports() {
-  const list = document.getElementById('reports-list');
-  list.innerHTML = '<div style="text-align:center;color:var(--text-muted);padding:32px">' + i18n('webui.reports_loading') + '</div>';
-  try {
-    const res = await fetch('/api/reports');
-    const data = await res.json();
-    allReportFiles = data.files || [];
-    renderReports();
-  } catch(e) {
-    list.innerHTML = `<div class="status-banner err">${i18n('webui.reports_load_fail')}: ${escHtml(e.message)}</div>`;
-  }
-}
-
-function renderReports() {
-  const list = document.getElementById('reports-list');
-  let files = allReportFiles;
-  if (currentReportFilter) {
-    files = files.filter(f => {
-      const n = f.name;
-      if (currentReportFilter === 'MySQL')      return n.includes('MySQL');
-      if (currentReportFilter === 'PostgreSQL') return n.includes('PostgreSQL') || n.includes('Postgres');
-      if (currentReportFilter === 'Oracle')     return n.includes('Oracle');
-      if (currentReportFilter === 'DM8')        return n.includes('DM8') || n.includes('达梦');
-      if (currentReportFilter === 'SQLServer')  return n.includes('SQLServer');
-      if (currentReportFilter === 'TiDB')       return n.includes('TiDB');
-      if (currentReportFilter === 'IvorySQL')   return n.includes('IvorySQL');
-      return true;
-    });
-  }
-  if (files.length === 0) {
-    list.innerHTML = '<div style="text-align:center;color:var(--text-muted);padding:48px">' + i18n('webui.reports_empty') + '</div>';
-    updateBatchBar();
-    return;
-  }
-  list.innerHTML = files.map(f => {
-    const isMySQL = f.name.includes('MySQL');
-    const isPG    = f.name.includes('PostgreSQL') || f.name.includes('Postgres');
-    const isOracle = f.name.includes('Oracle');
-    const isDM    = f.name.includes('DM8') || f.name.includes('达梦');
-    const isSQLServer = f.name.includes('SQLServer');
-    const isTiDB = f.name.includes('TiDB');
-    const isMongoDB = f.name.includes('MongoDB');
-    const tagHtml = isMySQL ? '<span class="tag tag-mysql">' + i18n('webui.db_type_mysql') + '</span>' : isPG ? '<span class="tag tag-pg">' + i18n('webui.db_type_pg') + '</span>' : isOracle ? '<span class="tag tag-oracle">' + i18n('webui.db_type_oracle') + '</span>' : isDM ? '<span class="tag tag-dm">' + i18n('webui.db_type_dm') + '</span>' : isSQLServer ? '<span class="tag tag-sqlserver">' + i18n('webui.db_type_sqlserver') + '</span>' : isTiDB ? '<span class="tag tag-tidb">' + i18n('webui.db_type_tidb') + '</span>' : isMongoDB ? '<span class="tag tag-mongodb">MongoDB</span>' : '';
-    const size = f.size > 1024*1024 ? (f.size/1024/1024).toFixed(1)+' MB' : (f.size/1024).toFixed(1)+' KB';
-    const dt = new Date(f.mtime*1000).toLocaleString('zh-CN');
-    const high = f.high || 0;
-    const mid = f.mid || 0;
-    const low = f.low || 0;
-    const total = high + mid + low;
-    const riskBadges = total > 0
-      ? '<span class="severity-tag severity-high" style="margin-left:8px;font-size:11px;padding:2px 7px">🔴 '+i18n('webui.risk_high')+' '+high+'</span><span class="severity-tag severity-mid" style="margin-left:4px;font-size:11px;padding:2px 7px">🟡 '+i18n('webui.risk_mid')+' '+mid+'</span><span class="severity-tag severity-low" style="margin-left:4px;font-size:11px;padding:2px 7px">🟢 '+i18n('webui.risk_low')+' '+low+'</span>'
-      : '<span style="margin-left:8px;font-size:12px;color:var(--text-muted)">'+i18n('webui.risk_no_issues')+'</span>';
-    const autoAnalyzeB64 = btoa(unescape(encodeURIComponent(f.auto_analyze || '[]')));
-    const issueBtn = total > 0
-      ? '<button class="btn btn-ghost" style="font-size:12px;padding:6px 12px;margin-left:4px" onclick="showReportIssues(\'' + escHtml(f.name).replace(/'/g, "\\'") + '\', \'' + autoAnalyzeB64 + '\')">'+i18n('webui.btn_report_issues')+'</button>'
-      : '';
-    return `
-      <div class="report-item">
-        <input type="checkbox" class="ri-checkbox" data-name="${escHtml(f.name)}" onchange="updateBatchBar()">
-        <div class="ri-icon">📄</div>
-        <div class="ri-info">
-          <div class="ri-name">${escHtml(f.name)} ${tagHtml} ${riskBadges}</div>
-          <div class="ri-meta">${dt} · ${size}</div>
-        </div>
-        <div style="display:flex;gap:4px;align-items:center;flex-shrink:0">
-          ${issueBtn}
-          <a class="btn btn-ghost" style="font-size:12px;padding:7px 14px"
-             href="/api/download_file?name=${encodeURIComponent(f.name)}" download>${i18n('webui.btn_download_report')}</a>
-          <button class="btn btn-ghost" style="font-size:12px;padding:7px 12px" onclick="shareReportFile('${escHtml(f.name).replace(/'/g, "\\'")}')">📤 分享</button>
-          <button class="btn btn-danger" style="font-size:12px;padding:7px 12px" onclick="deleteReport('${escHtml(f.name).replace(/'/g, "\\'")}')">${i18n('webui.btn_delete_report')}</button>
-        </div>
-      </div>`;
-  }).join('');
-  updateBatchBar();
-}
+// 巡检历史列表 / 筛选 / 左树 / 分页逻辑见 /static/js/fusion/reports.js（FusionReports）。
+// 行内仅保留报告行动作：downloadReportHtml / shareReportFile / showReportIssues / deleteReport。
 
 // ── SQL 审核（MVP2：多库方言 + 执行计划）─────────────────
 let saTasks = [];
@@ -17535,58 +17654,15 @@ function renderExecResult(taskId, data) {
   box.innerHTML = h;
 }
 
-function filterReports(type) {
-  currentReportFilter = type;
-  document.querySelectorAll('#report-filter-bar .filter-btn').forEach(btn => {
-    btn.classList.toggle('filter-active', btn.dataset.type === type);
-  });
-  // 清空已选
-  document.getElementById('select-all-cb').checked = false;
-  renderReports();
+// filterReports / filterReportTrigger 见 fusion/reports.js（筛选下推后端 + 左树联动）
+
+// HTML 格式分析报告：后端把 DOCX 转成带目录导航的 HTML，新标签页打开
+function downloadReportHtml(fileName) {
+  if (!fileName) { toast('文件名不能为空', 'error'); return; }
+  window.open('/api/download_file_html?name=' + encodeURIComponent(fileName), '_blank');
 }
 
-function updateBatchBar() {
-  const cbs = document.querySelectorAll('#reports-list .ri-checkbox');
-  const checked = document.querySelectorAll('#reports-list .ri-checkbox:checked');
-  const bar = document.getElementById('batch-bar');
-  const countEl = document.getElementById('selected-count');
-  countEl.textContent = '已选 ' + checked.length + ' 项';
-  bar.style.display = checked.length > 0 ? 'flex' : 'none';
-  // 更新全选状态
-  const selectAll = document.getElementById('select-all-cb');
-  selectAll.checked = cbs.length > 0 && checked.length === cbs.length;
-}
-
-function toggleSelectAll(checked) {
-  document.querySelectorAll('#reports-list .ri-checkbox').forEach(cb => cb.checked = checked);
-  updateBatchBar();
-}
-
-async function batchDeleteReports() {
-  const names = Array.from(document.querySelectorAll('#reports-list .ri-checkbox:checked')).map(cb => cb.dataset.name);
-  if (names.length === 0) return;
-  const msg = '确定删除选中的 ' + names.length + ' 份报告？此操作不可恢复。';
-  if (!await toastConfirm(msg)) return;
-  let okCount = 0, failNames = [];
-  for (const name of names) {
-    try {
-      const res = await fetch('/api/delete_report', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({name: name})
-      });
-      const data = await res.json();
-      if (data.ok) okCount++; else failNames.push(name);
-    } catch(e) { failNames.push(name); }
-  }
-  if (failNames.length === 0) {
-    toastSuccess('已删除 ' + okCount + ' 份报告');
-  } else {
-    toastError('部分删除失败（' + failNames.length + ' 份）');
-  }
-  document.getElementById('select-all-cb').checked = false;
-  loadReports();
-}
+// updateBatchBar / toggleSelectAll / batchDeleteReports 见 fusion/reports.js
 
 // ─── 数据库巡检历史分享 ─────────────────────────────────────
 async function shareReportFile(filename) {
@@ -24608,6 +24684,7 @@ async function deleteBackupHistory(recordId) {
 
   <!-- Server Inspection -->
   <script>
+  {% if not server_inspect_fusion_ui %}
   // ─── Server Inspection ──────────────────────────────
   let _si_task_id = null;
   let _si_socket = null;
@@ -25162,6 +25239,8 @@ async function deleteBackupHistory(recordId) {
       toastError('请求失败: ' + e.message);
     }
   }
+
+  {% endif %}
 
   // ─── 实时监控：全局状态 ───────────────────────────────────
   let monitorSlowData = [];
@@ -26664,13 +26743,15 @@ function mkdirRemote() {
   <script src="/static/js/inspection_config.js"></script>
   <script src="/static/js/fusion/notifier.js?v={{ version }}-fusion3"></script>
   <script src="/static/js/fusion/zabbix.js?v={{ version }}-fusion1"></script>
+  <script src="/static/js/fusion/zabbix_monitor.js?v={{ version }}-fusion2"></script>
   <script src="/static/js/fusion/datasources.js?v={{ version }}-fusion17"></script>
   <script src="/static/js/fusion/inspection.js?v={{ version }}-fusion5"></script>
+  <script src="/static/js/fusion/reports.js?v={{ version }}-fusion2"></script>
   <script src="/static/js/fusion/scheduler.js?v={{ version }}-fusion3"></script>
   <script src="/static/js/fusion/trend.js?v={{ version }}-fusion5"></script>
   <script src="/static/js/fusion/inspection_config.js?v={{ version }}-fusion14"></script>
   <script src="/static/js/fusion/sql_editor.js?v={{ version }}-fusion24"></script>
-  <script src="/static/js/fusion/ds_picker.js?v={{ version }}-fusion5"></script>
+  <script src="/static/js/fusion/ds_picker.js?v={{ version }}-fusion6"></script>
   {% if aias_source_ui %}
   <!-- 助手页完整实现：消息流 / SQL 块执行与拆分 / 槽位替换 / 批量，接口走 /api/chat/* -->
   <script src="/static/js/fusion/aias.js?v={{ version }}-source33"></script>
@@ -26680,7 +26761,11 @@ function mkdirRemote() {
   {% endif %}
   <script src="/static/js/fusion/ai_tool_config.js?v={{ version }}-fusion2"></script>
   <script src="/static/js/fusion/ai_tasks.js?v={{ version }}-fusion4"></script>
-  <script src="/static/js/fusion/awr.js?v={{ version }}-fusion5"></script>
+  <script src="/static/js/fusion/awr.js?v={{ version }}-fusion6"></script>
+  {% if server_inspect_fusion_ui %}
+  <!-- 服务器巡检 / 巡检历史：配置表、执行步骤条、命令日志、历史卡片与详情模态 -->
+  <script src="/static/js/fusion/server_inspect.js?v={{ version }}-fusion2"></script>
+  {% endif %}
 <!-- 底部状态栏 -->
 <div class="status-bar" id="status-bar" data-page-node-id="E0jlA1UaqTA24TltOH3TVC">
   <div class="sb-item sb-brand" data-page-node-id="upIEHjuNpzMJN8eZoS2MXe">
@@ -27606,8 +27691,7 @@ const STATIC_DB_PH_MAP = {'pg':'postgres','ivorysql':'ivorysql','kingbase':'king
     // 提交与测试连接拿到的 db_type 都是空 —— 编辑已有任务时表现最明显。
     fillGroupedSelect(document.getElementById('sched-db-type'), dbTypes, { placeholder: '' });
 
-    // 6. 动态生成reports页面的数据库类型过滤按钮
-    generateReportFilterButtons();
+    // 6. reports 页类型过滤按钮已改为规范名静态按钮（见 fusion/reports.js），不再动态生成
   }
 
   // 动态填充首页「数据库类型图标墙」：把已启用的插件数据库类型追加到硬编码内置项之后
@@ -27670,28 +27754,7 @@ const STATIC_DB_PH_MAP = {'pg':'postgres','ivorysql':'ivorysql','kingbase':'king
     });
   }
 
-  // 动态生成reports页面的数据库类型过滤按钮
-  function generateReportFilterButtons() {
-    const dbTypes = window.dbTypes || [];
-    const filterBar = document.getElementById('report-filter-bar');
-    if (!filterBar) return;
-    
-    // 保留"全部"按钮，删除其他按钮
-    const allBtn = filterBar.querySelector('[data-type=""]');
-    filterBar.innerHTML = '';
-    if (allBtn) filterBar.appendChild(allBtn);
-    
-    // 添加动态按钮（使用 emoji 图标）
-    dbTypes.forEach(t => {
-      const btn = document.createElement('button');
-      btn.className = 'filter-btn';
-      btn.setAttribute('data-type', t.label);
-      btn.onclick = function() { filterReports(t.label); };
-      btn.style = 'padding:5px 14px;font-size:12px;border-radius:20px;cursor:pointer';
-      btn.textContent = `${t.emoji || '📊'} ${t.label}`;
-      filterBar.appendChild(btn);
-    });
-  }
+  // reports 页类型过滤按钮为规范名静态按钮（DOM 内联），筛选逻辑见 fusion/reports.js
 
   // 页面加载时初始化
   document.addEventListener('DOMContentLoaded', () => {

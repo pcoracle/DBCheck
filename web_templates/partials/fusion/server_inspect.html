@@ -1,0 +1,204 @@
+<!--
+  SPDX-License-Identifier: Apache-2.0
+  Copyright 2025-2026 fiyo (Jack Ge) <sdfiyon@gmail.com>
+  Author: fiyo (Jack Ge) - https://github.com/fiyo/DBCheck
+
+  Fusion page: 服务器巡检（SSH 配置表 + 执行步骤条 + 命令日志 + 结果/AI 报告）。
+  配置表管理 SSH 远程主机；本机巡检走工具栏独立入口，不需要 SSH 凭据。
+  交互脚本见 static/js/fusion/server_inspect.js，样式见 static/css/fusion/server_inspect.css。
+-->
+
+<!-- 统计概览栏 -->
+<div class="si-stats-bar">
+  <div class="si-stat-item">
+    <div class="si-stat-icon">🖥️</div>
+    <div>
+      <div class="si-stat-num" id="si-stat-total">0</div>
+      <div class="si-stat-label">服务器配置</div>
+    </div>
+  </div>
+  <div class="si-stat-item">
+    <div class="si-stat-icon">📡</div>
+    <div>
+      <div class="si-stat-num" id="si-stat-history">0</div>
+      <div class="si-stat-label">巡检记录</div>
+    </div>
+  </div>
+  <div class="si-stat-item">
+    <div class="si-stat-icon">🎯</div>
+    <div>
+      <div class="si-stat-num" id="si-stat-avg-score">--</div>
+      <div class="si-stat-label">平均评分</div>
+    </div>
+  </div>
+</div>
+
+<!-- 工具栏 -->
+<div class="si-toolbar">
+  <button class="btn btn-primary" onclick="showSiConfigModal()">
+    <span style="font-size:16px;">+</span> 新建服务器
+  </button>
+  <button class="btn btn-ghost" onclick="startLocalInspect()" title="巡检运行本服务的主机，无需 SSH">🖥️ 本机巡检</button>
+  <input type="text" class="si-search-input" id="si-search-input" placeholder="搜索名称、主机..." oninput="renderServerTable()" />
+  <div style="flex:1"></div>
+  <button class="btn btn-ghost" onclick="loadServerSSHProfiles()" title="刷新列表">🔄 刷新</button>
+</div>
+
+<!-- 服务器列表表格 -->
+<div class="si-server-table-wrap">
+  <table class="si-server-table">
+    <thead>
+      <tr>
+        <th>名称</th>
+        <th>主机地址</th>
+        <th>端口</th>
+        <th>用户名</th>
+        <th>认证方式</th>
+        <th>更新时间</th>
+        <th style="text-align:right;">操作</th>
+      </tr>
+    </thead>
+    <tbody id="si-server-tbody">
+      <tr><td colspan="7" style="padding:40px;text-align:center;color:var(--text-muted);">加载中...</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- 服务器配置弹窗（新建/编辑） -->
+<div class="si-config-modal-overlay" id="si-config-modal" style="display:none;">
+  <div class="si-config-modal">
+    <div class="si-config-modal-header">
+      <div class="si-config-modal-title">
+        <span id="si-config-modal-icon">➕</span> <span id="si-config-modal-title-text">新建服务器配置</span>
+      </div>
+      <button class="btn btn-ghost" style="font-size:18px;padding:4px 10px;line-height:1;" onclick="closeSiConfigModal()">✕</button>
+    </div>
+    <div class="si-config-modal-body">
+      <!-- 配置表只登记 SSH 远程主机（Linux / Windows OpenSSH）；本机巡检见工具栏 -->
+      <div class="si-type-tabs" style="margin-bottom:16px;">
+        <div class="si-type-tab active" data-type="remote">📡 SSH 远程巡检 <span style="font-size:11px;font-weight:400;color:var(--text-muted)">支持 Linux / Windows（OpenSSH）服务器</span></div>
+      </div>
+
+      <div class="form-group" style="margin-bottom:14px;">
+        <label>配置名称 <span class="req">*</span></label>
+        <input type="text" id="si-profile-name-input" class="form-input" placeholder="如：生产环境-Web服务器" />
+      </div>
+
+      <div id="si-remote-fields">
+        <div class="form-grid">
+          <div class="form-group">
+            <label>SSH 主机地址 <span class="req">*</span></label>
+            <input type="text" id="si-ssh-host" class="form-input" placeholder="192.0.2.10" />
+          </div>
+          <div class="form-group">
+            <label>SSH 端口</label>
+            <input type="number" id="si-ssh-port" class="form-input" value="22" placeholder="22" />
+          </div>
+          <div class="form-group">
+            <label>SSH 用户名</label>
+            <input type="text" id="si-ssh-user" class="form-input" value="root" placeholder="root" />
+          </div>
+          <div class="form-group">
+            <label>认证方式</label>
+            <select id="si-ssh-auth" class="form-input" onchange="toggleSiAuth()">
+              <option value="password">密码认证</option>
+              <option value="key">私钥文件</option>
+            </select>
+          </div>
+          <div class="form-group" id="si-pwd-wrap">
+            <label>SSH 密码</label>
+            <input type="password" id="si-ssh-password" class="form-input" placeholder="SSH 登录密码" autocomplete="new-password" />
+          </div>
+          <div id="si-key-wrap" style="display:none;grid-column:1 / -1;">
+            <div class="form-grid">
+              <div class="form-group">
+                <label>私钥文件路径</label>
+                <input type="text" id="si-ssh-key" class="form-input" placeholder="/root/.ssh/id_rsa" />
+              </div>
+              <div class="form-group">
+                <label>私钥口令</label>
+                <input type="password" id="si-ssh-key-password" class="form-input" placeholder="私钥文件的口令（未加密可留空）" autocomplete="new-password" />
+              </div>
+            </div>
+          </div>
+        </div>
+        <div id="si-ssh-test-status" style="font-size:12px;margin-top:8px;color:var(--text-muted)"></div>
+        <div class="btn-row" style="margin-top:12px">
+          <button class="btn btn-ghost" onclick="testServerSSH()">🔗 测试 SSH 连接</button>
+        </div>
+      </div>
+
+      <!-- AI 分析开关 -->
+      <div class="si-ai-switch">
+        <label>
+          <input type="checkbox" id="si-ai-analyze" />
+          <span style="font-size:13px;color:var(--text)">
+            <span class="si-ai-switch-title">🤖 AI 分析结果</span>
+            <span style="color:var(--text-muted);font-size:12px;margin-left:4px">巡检完成后由 AI 生成根因分析与优化建议报告</span>
+          </span>
+        </label>
+      </div>
+    </div>
+    <div class="si-config-modal-footer">
+      <button class="btn btn-primary" onclick="confirmSaveSiConfig()">💾 保存配置</button>
+      <button class="btn btn-ghost" onclick="closeSiConfigModal()">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- 巡检执行弹窗 -->
+<div class="si-run-modal-overlay" id="si-run-modal" style="display:none;" onclick="if(event.target===this)closeSiRunModal()">
+  <div class="si-run-modal">
+    <div class="si-run-modal-header">
+      <div class="si-run-modal-title">
+        <span>🚀</span> <span id="si-run-modal-title">服务器巡检</span>
+      </div>
+      <button class="btn btn-ghost" style="font-size:18px;padding:4px 10px;line-height:1;" onclick="closeSiRunModal()">✕</button>
+    </div>
+    <div class="si-run-modal-body" id="si-run-modal-body">
+      <!-- 巡检步骤（系统固定流程，不可调整/增删） -->
+      <div class="si-run-steps-head">
+        <span class="si-run-steps-title">📋 巡检步骤</span>
+        <span class="si-steps-fixed-tip">系统固定流程，不可调整</span>
+      </div>
+      <div class="si-step-list" id="si-step-list"></div>
+
+      <!-- 巡检结果（完成后显示精简摘要） -->
+      <div id="si-run-result" style="display:none;margin-top:16px;"></div>
+    </div>
+    <div class="si-run-modal-footer">
+      <button class="btn btn-ghost" onclick="downloadServerReport()" id="si-btn-download" style="display:none;">📥 原始数据</button>
+      <button class="btn btn-ghost" onclick="downloadServerReportHtml()" id="si-btn-html" style="display:none;">📊 分析报告</button>
+      <button class="btn btn-ghost" onclick="downloadServerAiReportFromTask()" id="si-btn-ai-report" style="display:none;">🤖 AI分析报告</button>
+      <button class="btn btn-ghost" onclick="shareServerReport()" id="si-btn-share" style="display:none;">📤 分享报告</button>
+      <button class="btn btn-ghost" onclick="closeSiRunModal()">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 巡检日志弹窗（左：最近记录 / 右：采集命令） -->
+<div class="si-log-modal-overlay" id="si-log-modal" style="display:none;" onclick="if(event.target===this)closeSiLogModal()">
+  <div class="si-log-modal">
+    <div class="si-log-modal-header">
+      <div class="si-log-modal-title">
+        <span>📋</span> <span id="si-log-modal-title">巡检日志</span>
+      </div>
+      <button class="btn btn-ghost" style="font-size:18px;padding:4px 10px;line-height:1;" onclick="closeSiLogModal()">✕</button>
+    </div>
+    <div class="si-log-modal-body">
+      <div class="si-log-layout">
+        <div class="si-log-left">
+          <div class="si-log-left-title">最近巡检记录</div>
+          <div class="si-log-records" id="si-log-records"></div>
+        </div>
+        <div class="si-log-right">
+          <div class="si-log-summary" id="si-log-summary"></div>
+          <div class="si-log-list" id="si-log-list"></div>
+        </div>
+      </div>
+    </div>
+    <div class="si-log-modal-footer">
+      <button class="btn btn-ghost" onclick="closeSiLogModal()">关闭</button>
+    </div>
+  </div>
+</div>

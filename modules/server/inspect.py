@@ -76,6 +76,12 @@ class RemoteSystemInfoCollector:
         self.key_file = key_file
         self.key_password = key_password
         self.ssh_client = None
+        self.command_log = []  # 记录所有执行的命令及步骤
+        self.os_type = 'linux'  # 连接后自动识别：'linux' | 'windows'
+
+    def _log_cmd(self, step, command):
+        """记录执行的命令到日志"""
+        self.command_log.append({'step': step, 'command': command})
 
     def connect(self):
         if not paramiko:
@@ -102,7 +108,9 @@ class RemoteSystemInfoCollector:
             except Exception:
                 pass
 
-    def exec_cmd(self, command, timeout=10):
+    def exec_cmd(self, command, timeout=10, step=None):
+        if step:
+            self._log_cmd(step, command)
         try:
             stdin, stdout, stderr = self.ssh_client.exec_command(command, timeout=timeout)
             out = stdout.read().decode('utf-8', errors='ignore').strip()
@@ -113,27 +121,27 @@ class RemoteSystemInfoCollector:
 
     def get_cpu_info(self):
         try:
-            out, _ = self.exec_cmd("top -bn1 | grep 'Cpu(s)' | awk '{print $2}' | cut -d'%' -f1")
+            out, _ = self.exec_cmd("top -bn1 | grep 'Cpu(s)' | awk '{print $2}' | cut -d'%' -f1", step='CPU 使用率')
             cpu_percent = float(out) if out else 0.0
 
-            out, _ = self.exec_cmd("nproc")
+            out, _ = self.exec_cmd("nproc", step='CPU 逻辑核心数')
             logical_cores = int(out) if out else 0
 
-            out, _ = self.exec_cmd("lscpu | grep 'Core(s) per socket' | awk '{print $4}'")
+            out, _ = self.exec_cmd("lscpu | grep 'Core(s) per socket' | awk '{print $4}'", step='CPU 物理核心')
             cores_per_socket = int(out) if out else 1
 
-            out, _ = self.exec_cmd("lscpu | grep 'Socket(s)' | awk '{print $2}'")
+            out, _ = self.exec_cmd("lscpu | grep 'Socket(s)' | awk '{print $2}'", step='CPU 插槽数')
             sockets = int(out) if out else 1
             physical_cores = cores_per_socket * sockets
 
-            out, _ = self.exec_cmd("lscpu | grep 'CPU MHz' | awk '{print $3}'")
+            out, _ = self.exec_cmd("lscpu | grep 'CPU MHz' | awk '{print $3}'", step='CPU 当前频率')
             current_freq = float(out) / 1000 if out else 0.0
 
-            out, _ = self.exec_cmd("lscpu | grep 'CPU max MHz' | awk '{print $4}'")
+            out, _ = self.exec_cmd("lscpu | grep 'CPU max MHz' | awk '{print $4}'", step='CPU 最大频率')
             max_freq = float(out) / 1000 if out else current_freq
 
             # 系统负载
-            out, _ = self.exec_cmd("cat /proc/loadavg")
+            out, _ = self.exec_cmd("cat /proc/loadavg", step='系统负载')
             load_1m, load_5m, load_15m = 0.0, 0.0, 0.0
             if out:
                 parts = out.split()
@@ -159,7 +167,7 @@ class RemoteSystemInfoCollector:
 
     def get_memory_info(self):
         try:
-            out, _ = self.exec_cmd("free -b | grep Mem")
+            out, _ = self.exec_cmd("free -b | grep Mem", step='内存使用')
             if not out:
                 return {}
             parts = out.split()
@@ -173,7 +181,7 @@ class RemoteSystemInfoCollector:
                 'used_gb': round(used_bytes / (1024**3), 2),
                 'usage_percent': round(usage_percent, 2),
             }
-            out, _ = self.exec_cmd("free -b | grep Swap")
+            out, _ = self.exec_cmd("free -b | grep Swap", step='Swap 分区')
             if out:
                 parts = out.split()
                 swap_total = int(parts[1])
@@ -191,13 +199,13 @@ class RemoteSystemInfoCollector:
     def get_disk_info(self):
         try:
             # 用 df -T 获取文件系统类型，用 df -i 获取 inode
-            out, _ = self.exec_cmd("df -Th | grep -vE 'tmpfs|devtmpfs|overlay|iso9660|udf' | tail -n +2")
+            out, _ = self.exec_cmd("df -Th | grep -vE 'tmpfs|devtmpfs|overlay|iso9660|udf' | tail -n +2", step='磁盘使用')
             disk_data = []
             if not out:
                 return disk_data
 
             # 同时采集 inode
-            inode_out, _ = self.exec_cmd("df -i | grep -vE 'tmpfs|devtmpfs|overlay|iso9660|udf' | tail -n +2")
+            inode_out, _ = self.exec_cmd("df -i | grep -vE 'tmpfs|devtmpfs|overlay|iso9660|udf' | tail -n +2", step='磁盘 Inode')
             inode_map = {}
             if inode_out:
                 for line in inode_out.strip().split('\n'):
@@ -260,7 +268,8 @@ class RemoteSystemInfoCollector:
         """采集 Top N 进程（按 CPU 排序）"""
         try:
             out, _ = self.exec_cmd(
-                f"ps aux --sort=-%cpu | head -{limit + 1} | tail -{limit}"
+                f"ps aux --sort=-%cpu | head -{limit + 1} | tail -{limit}",
+                step='Top 进程'
             )
             procs = []
             if out:
@@ -281,7 +290,7 @@ class RemoteSystemInfoCollector:
     def get_open_files(self):
         """采集打开文件描述符数量"""
         try:
-            out, _ = self.exec_cmd("cat /proc/sys/fs/file-nr")
+            out, _ = self.exec_cmd("cat /proc/sys/fs/file-nr", step='文件描述符')
             if out:
                 parts = out.split()
                 return {'allocated': int(parts[0]), 'max': int(parts[2])}
@@ -370,10 +379,294 @@ class RemoteSystemInfoCollector:
 
         return result
 
+    def _detect_os(self):
+        """连接后自动识别远程操作系统。
+        Windows OpenSSH 下 `ver` 可执行且输出含 "Windows"；Linux 下 `ver` 不存在。"""
+        try:
+            out, _ = self.exec_cmd("ver", step='OS 识别')
+            if out and 'windows' in out.lower():
+                self.os_type = 'windows'
+                print('  [OS] 检测到 Windows 系统，切换 PowerShell 采集模式')
+                return
+            self.os_type = 'linux'
+        except Exception:
+            self.os_type = 'linux'
+
+    def _ps(self, script, timeout=20, step=None):
+        """执行 PowerShell 单行命令（脚本内仅使用单引号字符串，避免 cmd 双引号嵌套问题）"""
+        return self.exec_cmd(
+            'powershell -NoProfile -NonInteractive -Command "%s"' % script,
+            timeout=timeout, step=step,
+        )
+
+    # ── Windows 采集方法（PowerShell over SSH）──────────────────────────
+    def _w_cpu_info(self):
+        try:
+            out, _ = self._ps(
+                "$c=(Get-Counter '\\Processor(_Total)\\% Processor Time' -SampleInterval 1 -MaxSamples 2 -ErrorAction SilentlyContinue).CounterSamples[-1].CookedValue; if($c){[math]::Round($c,2)}",
+                timeout=25, step='CPU 使用率')
+            try:
+                cpu_percent = float(out) if out else 0.0
+            except ValueError:
+                cpu_percent = 0.0
+
+            out, _ = self._ps(
+                "(Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum",
+                step='CPU 逻辑核心数')
+            logical_cores = int(float(out)) if out else 0
+
+            out, _ = self._ps(
+                "(Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfCores -Sum).Sum",
+                step='CPU 物理核心')
+            try:
+                physical_cores = int(float(out)) if out else 1
+            except ValueError:
+                physical_cores = 1
+
+            out, _ = self._ps(
+                "(Get-CimInstance Win32_Processor | Measure-Object -Property MaxClockSpeed -Average).Average",
+                step='CPU 最大频率')
+            try:
+                max_freq = float(out) / 1000 if out else 0.0  # MHz -> GHz
+            except ValueError:
+                max_freq = 0.0
+
+            return {
+                'usage_percent': cpu_percent,
+                'physical_cores': physical_cores,
+                'logical_cores': logical_cores,
+                'current_frequency': max_freq,  # Windows 无简单命令读取实时频率，用最大值近似
+                'max_frequency': round(max_freq, 2),
+                'load_1m': 0.0, 'load_5m': 0.0, 'load_15m': 0.0,  # Windows 无 load average
+            }
+        except Exception:
+            return {}
+
+    def _w_memory_info(self):
+        try:
+            out, _ = self._ps(
+                "$o=Get-CimInstance Win32_OperatingSystem; '{0}|{1}' -f $o.TotalVisibleMemorySize,$o.FreePhysicalMemory",
+                step='内存使用')
+            if not out or '|' not in out:
+                return {}
+            total_kb, free_kb = out.split('|')
+            total_bytes = int(total_kb) * 1024
+            free_bytes = int(free_kb) * 1024
+            used_bytes = max(total_bytes - free_bytes, 0)
+            usage_percent = (used_bytes / total_bytes) * 100 if total_bytes > 0 else 0
+            mem = {
+                'total_gb': round(total_bytes / (1024**3), 2),
+                'available_gb': round(free_bytes / (1024**3), 2),
+                'used_gb': round(used_bytes / (1024**3), 2),
+                'usage_percent': round(usage_percent, 2),
+            }
+            # 页面文件（Swap 等价物）
+            out, _ = self._ps(
+                "Get-CimInstance Win32_PageFileUsage | ForEach-Object { '{0}|{1}' -f $_.AllocatedBaseSize,$_.CurrentUsage }",
+                step='页面文件')
+            if out:
+                swap_total = 0
+                swap_used = 0
+                for line in out.strip().split('\n'):
+                    if '|' in line:
+                        try:
+                            t, u = line.split('|')
+                            swap_total += int(t) * 1024
+                            swap_used += int(u) * 1024
+                        except ValueError:
+                            continue
+                if swap_total > 0:
+                    mem.update({
+                        'swap_total_gb': round(swap_total / (1024**3), 2),
+                        'swap_used_gb': round(swap_used / (1024**3), 2),
+                        'swap_usage_percent': round(swap_used / swap_total * 100, 2),
+                    })
+            return mem
+        except Exception:
+            return {}
+
+    def _w_disk_info(self):
+        try:
+            out, _ = self._ps(
+                "Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | ForEach-Object { '{0}|{1}|{2}' -f $_.DeviceID,$_.Size,$_.FreeSpace }",
+                step='磁盘使用')
+            disk_data = []
+            if not out:
+                return disk_data
+            # 文件系统类型（DriveLetter -> FileSystem）
+            vol_map = {}
+            vol_out, _ = self._ps(
+                "Get-Volume | Where-Object { $_.DriveLetter } | ForEach-Object { '{0}|{1}' -f $_.DriveLetter,$_.FileSystem }",
+                step='磁盘文件系统')
+            if vol_out:
+                for line in vol_out.strip().split('\n'):
+                    if '|' in line:
+                        letter, fs = line.split('|', 1)
+                        vol_map[letter.strip()] = fs.strip()
+            for line in out.strip().split('\n'):
+                parts = line.split('|')
+                if len(parts) >= 3:
+                    device, size, free = parts[0], int(parts[1]), int(parts[2])
+                    letter = device.rstrip(':')
+                    total_gb = size / (1024**3)
+                    free_gb = free / (1024**3)
+                    usage_percent = (size - free) / size * 100 if size > 0 else 0.0
+                    disk_data.append({
+                        'device': device,
+                        'mountpoint': device,
+                        'fstype': vol_map.get(letter, 'NTFS'),
+                        'total_gb': round(total_gb, 2),
+                        'used_gb': round(total_gb - free_gb, 2),
+                        'free_gb': round(free_gb, 2),
+                        'usage_percent': round(usage_percent, 2),
+                        'inode_usage_percent': 0.0,  # Windows 无 inode 概念
+                    })
+            return disk_data
+        except Exception:
+            return []
+
+    def _w_top_processes(self, limit=5):
+        """Top N 进程（CPU% 按 CPU 时间/运行时长近似，Mem% 按工作集/总内存）"""
+        ps_script = (
+            "$os=Get-CimInstance Win32_OperatingSystem; "
+            "$up=[int]((Get-Date)-$os.LastBootUpTime).TotalSeconds; if($up -lt 1){$up=1}; "
+            "$tm=[int64]$os.TotalVisibleMemorySize*1024; if($tm -lt 1){$tm=1}; "
+            "Get-Process | Sort-Object CPU -Descending | Select-Object -First %d | ForEach-Object { "
+            "if($_.CPU){ '{0}|{1}|{2}|{3}' -f $_.Id,$_.ProcessName,"
+            "[math]::Round((($_.CPU/$up)*100),2),[math]::Round((($_.WorkingSet64/$tm)*100),1) } }"
+        ) % limit
+        try:
+            out, _ = self._ps(ps_script, step='Top 进程')
+            procs = []
+            if out:
+                for line in out.strip().split('\n'):
+                    parts = line.split('|')
+                    # 输出格式：pid|ProcessName|cpu%|mem%
+                    if len(parts) >= 4:
+                        try:
+                            procs.append({
+                                'pid': int(parts[0]),
+                                'user': self.username,  # Get-Process 无简单用户字段，用 SSH 登录用户
+                                'cpu': float(parts[2]),
+                                'mem': float(parts[3]),
+                                'command': parts[1],
+                            })
+                        except (ValueError, IndexError):
+                            continue
+            return procs
+        except Exception:
+            return []
+
+    def _w_docker_info(self):
+        result = {
+            'available': False,
+            'running_count': 0,
+            'total_count': 0,
+            'unhealthy': [],
+            'containers': [],
+        }
+        try:
+            out, _ = self._ps("Get-Command docker -ErrorAction SilentlyContinue", step='Docker 检测')
+            if not out:
+                return result
+            # Windows cmd 无 /dev/null，用 >nul；&& || 为 cmd 语法
+            out, _ = self.exec_cmd("docker info >nul 2>&1 && echo OK || echo FAIL", timeout=20)
+            if not out or 'OK' not in out:
+                return result
+            result['available'] = True
+
+            out, _ = self._ps("$x=docker ps -q; if($x){($x|Measure-Object).Count}else{0}", step='Docker 运行数')
+            if out and out.strip().isdigit():
+                result['running_count'] = int(out.strip())
+            out, _ = self._ps("$x=docker ps -a -q; if($x){($x|Measure-Object).Count}else{0}", step='Docker 总数')
+            if out and out.strip().isdigit():
+                result['total_count'] = int(out.strip())
+
+            # cmd 下用双引号包裹 format 模板（cmd 会剥离引号，docker 收到 {{.Names}}|...）
+            out, _ = self.exec_cmd(
+                'docker ps -a --filter health=unhealthy --format "{{.Names}}|{{.ID}}|{{.Status}}|{{.Image}}" 2>nul',
+                timeout=15)
+            if out:
+                for line in out.strip().split('\n'):
+                    if '|' in line:
+                        parts = line.split('|')
+                        result['unhealthy'].append({
+                            'name': parts[0],
+                            'container_id': parts[1][:12],
+                            'status': parts[2] if len(parts) > 2 else '',
+                            'image': parts[3] if len(parts) > 3 else '',
+                        })
+
+            out, _ = self.exec_cmd(
+                'docker ps -a --format "{{.Names}}|{{.ID}}|{{.Status}}|{{.Image}}|{{.Ports}}" 2>nul',
+                timeout=15)
+            if out:
+                for line in out.strip().split('\n')[:20]:
+                    if '|' in line:
+                        parts = line.split('|')
+                        result['containers'].append({
+                            'name': parts[0],
+                            'container_id': parts[1][:12] if len(parts) > 1 else '',
+                            'status': parts[2] if len(parts) > 2 else '',
+                            'image': parts[3] if len(parts) > 3 else '',
+                            'ports': parts[4] if len(parts) > 4 else '',
+                        })
+            return result
+        except Exception:
+            return result
+
+    def _w_system_info(self):
+        """Windows 系统信息采集（PowerShell over SSH）"""
+        info = {
+            'cpu': self._w_cpu_info(),
+            'memory': self._w_memory_info(),
+            'disk': self._w_disk_info(),
+            'top_processes': self._w_top_processes(),
+            'open_files': {},
+            'docker': self._w_docker_info(),
+            'zombie_count': 0,  # Windows 无僵尸进程概念
+            'hostname': '',
+            'platform': '',
+            'kernel': '',
+            'boot_time': '',
+            'uptime_days': 0,
+            'os_type': 'Windows',
+        }
+        out, _ = self.exec_cmd("hostname", step='主机名')
+        if out:
+            info['hostname'] = out.strip().splitlines()[0].strip()
+
+        out, _ = self.exec_cmd("ver", step='系统平台')
+        if out:
+            first = out.strip().splitlines()[0]
+            info['platform'] = first
+            # "Microsoft Windows [Version 10.0.17763.2565]" -> 版本号
+            if 'Version' in first:
+                try:
+                    info['kernel'] = first.split('Version', 1)[1].strip(' ]')
+                except Exception:
+                    pass
+
+        out, _ = self._ps(
+            "$o=Get-CimInstance Win32_OperatingSystem; "
+            "'{0}|{1}' -f $o.LastBootUpTime.ToString('yyyy-MM-dd HH:mm'),[math]::Round(((Get-Date)-$o.LastBootUpTime).TotalDays,1)",
+            step='启动时间/运行时长')
+        if out and '|' in out:
+            try:
+                boot, up = out.split('|', 1)
+                info['boot_time'] = boot.strip()
+                info['uptime_days'] = float(up.strip())
+            except (ValueError, IndexError):
+                pass
+        return info
+
     def get_system_info(self):
         if not self.connect():
             return {}
         try:
+            self._detect_os()
+            if self.os_type == 'windows':
+                return self._w_system_info()
             info = {
                 'cpu': self.get_cpu_info(),
                 'memory': self.get_memory_info(),
@@ -388,24 +681,24 @@ class RemoteSystemInfoCollector:
                 'boot_time': '',
                 'uptime_days': 0,
             }
-            out, _ = self.exec_cmd("hostname")
+            out, _ = self.exec_cmd("hostname", step='主机名')
             if out:
                 info['hostname'] = out
 
-            out, _ = self.exec_cmd("uname -a")
+            out, _ = self.exec_cmd("uname -a", step='系统平台')
             if out:
                 info['platform'] = out
 
-            out, _ = self.exec_cmd("uname -r")
+            out, _ = self.exec_cmd("uname -r", step='内核版本')
             if out:
                 info['kernel'] = out
 
-            out, _ = self.exec_cmd("who -b | awk '{print $3 \" \" $4}'")
+            out, _ = self.exec_cmd("who -b | awk '{print $3 \" \" $4}'", step='启动时间')
             if out:
                 info['boot_time'] = out
 
             # 计算 uptime 天数
-            out, _ = self.exec_cmd("cat /proc/uptime")
+            out, _ = self.exec_cmd("cat /proc/uptime", step='运行时长')
             if out:
                 try:
                     uptime_sec = float(out.split()[0])
@@ -414,7 +707,7 @@ class RemoteSystemInfoCollector:
                     pass
 
             # 僵尸进程检测
-            out, _ = self.exec_cmd("ps -eo stat 2>/dev/null | grep -c '^Z' || echo 0")
+            out, _ = self.exec_cmd("ps -eo stat 2>/dev/null | grep -c '^Z' || echo 0", step='僵尸进程检测')
             try:
                 info['zombie_count'] = int(out.strip())
             except Exception:
@@ -848,9 +1141,13 @@ def run_server_inspection(ssh_host, ssh_port=22, ssh_user='root',
     if not info:
         return {'error': 'SSH 连接失败或采集超时'}
 
+    # 收集命令日志
+    command_log = list(collector.command_log)
+
     # 网络连通性检测
     try:
         info['network'] = check_network_connectivity(collector)
+        command_log.extend(collector.command_log[len(command_log):])
     except Exception:
         info['network'] = {}
 
@@ -864,7 +1161,9 @@ def run_server_inspection(ssh_host, ssh_port=22, ssh_user='root',
             key_password=ssh_key_password if ssh_key_password else None,
         )
         if collector2.connect():
+            collector2._detect_os()  # 复用 OS 识别，避免 Windows 上误用 Linux 服务命令
             info['services'] = check_service_status(collector2)
+            command_log.extend(collector2.command_log)
             collector2.disconnect()
         else:
             info['services'] = []
@@ -876,6 +1175,9 @@ def run_server_inspection(ssh_host, ssh_port=22, ssh_user='root',
     info['health_status'] = status
     info['issues'] = issues
     info['host'] = ssh_host
+    if not info.get('os_type'):
+        info['os_type'] = _extract_os_type(info)
+    info['command_log'] = command_log
     return info
 
 
@@ -1370,6 +1672,9 @@ def check_network_connectivity(ssh_collector):
     通过 SSH 检测远程主机的网络连通性。
     返回 {'ping': {...}, 'dns': {...}, 'ports': [...]}
     """
+    if getattr(ssh_collector, 'os_type', 'linux') == 'windows':
+        return check_network_connectivity_windows(ssh_collector)
+
     result = {'ping': {}, 'dns': {}, 'ports': []}
 
     # ping 检测（外网 + 内网网关）
@@ -1415,6 +1720,57 @@ def check_network_connectivity(ssh_collector):
     return result
 
 
+def check_network_connectivity_windows(ssh_collector):
+    """Windows 远程主机网络连通性检测（ping / nslookup / netstat，Windows 原生命令）"""
+    import re
+    result = {'ping': {}, 'dns': {}, 'ports': []}
+
+    # ping 检测（-n 次数，-w 超时毫秒）
+    for target in ['8.8.8.8', '114.114.114.114']:
+        out, _ = ssh_collector.exec_cmd(f'ping -n 2 -w 3000 {target}', timeout=15)
+        m = re.search(r'Min(?:imum)?[= ]\s*(\d+)\s*ms', out, re.IGNORECASE)
+        if m:
+            result['ping'][target] = {'ok': True, 'latency_ms': float(m.group(1))}
+        else:
+            # 本地化系统无 "Minimum=" 字样时，以 TTL 行判断可达
+            result['ping'][target] = {'ok': bool(out and 'TTL=' in out), 'latency_ms': 0}
+
+    # DNS 解析检测（nslookup 为 Windows 原生命令）
+    for domain in ['baidu.com', 'google.com']:
+        out, err = ssh_collector.exec_cmd(f'nslookup {domain}', timeout=15)
+        ok = bool(out and 'Address' in out
+                  and 'can\'t find' not in out.lower()
+                  and 'NXDOMAIN' not in out
+                  and '找不到服务器' not in out)
+        result['dns'][domain] = {'ok': ok}
+
+    # 常用端口监听状态（netstat + LISTENING）
+    ports_to_check = [
+        (22, 'SSH'), (80, 'HTTP'), (443, 'HTTPS'),
+        (3306, 'MySQL'), (5432, 'PostgreSQL'), (1521, 'Oracle'),
+        (6379, 'Redis'), (27017, 'MongoDB'), (8080, 'HTTP-Alt'),
+    ]
+    listening_ports = set()
+    out, _ = ssh_collector.exec_cmd("netstat -ano | findstr LISTENING", timeout=15)
+    if out:
+        for line in out.strip().split('\n'):
+            m = re.search(r':(\d+)\s+[0-9A-Fa-f:.]+\s+LISTENING', line)
+            if m:
+                try:
+                    listening_ports.add(int(m.group(1)))
+                except ValueError:
+                    pass
+
+    for port, name in ports_to_check:
+        result['ports'].append({
+            'port': port,
+            'name': name,
+            'listening': port in listening_ports,
+        })
+
+    return result
+
+
 # ─── 服务状态检测 ────────────────────────────────────────────────────
 
 def check_service_status(ssh_collector):
@@ -1422,6 +1778,9 @@ def check_service_status(ssh_collector):
     通过 SSH 检测常见服务的运行状态。
     返回 [{'name': ..., 'status': 'running'|'stopped'|'not_installed'}]
     """
+    if getattr(ssh_collector, 'os_type', 'linux') == 'windows':
+        return check_service_status_windows(ssh_collector)
+
     services = [
         'nginx', 'httpd', 'apache2',
         'mysqld', 'mariadb', 'postgresql', 'observer',  # observer = OceanBase 进程名
@@ -1462,7 +1821,59 @@ def check_service_status(ssh_collector):
     return results
 
 
+def check_service_status_windows(ssh_collector):
+    """Windows 服务状态检测（Get-Service，PowerShell over SSH）"""
+    # 常见 Windows 服务名（含版本化命名的 PostgreSQL/Redis 等）
+    ps_script = (
+        "Get-Service | Where-Object { "
+        "$_.Name -match '^(nginx|mysql|redis|dockerd|Docker|sshd|wslservice|ntpd)' -or "
+        "$_.Name -like 'postgresql*' -or $_.Name -like 'redis*' -or "
+        "$_.Name -like 'mysql*' -or $_.Name -like 'docker*' "
+        "} | ForEach-Object { $_.Name + ':' + $_.Status }"
+    )
+    out, _ = ssh_collector._ps(ps_script, step='服务状态')
+    results = []
+    if out:
+        for line in out.strip().split('\n'):
+            if ':' in line:
+                name, raw_status = line.split(':', 1)
+                raw_status = raw_status.strip()
+                if raw_status.lower() == 'running':
+                    status = 'running'
+                elif raw_status.lower() in ('stopped', 'stoppending', 'startpending'):
+                    status = 'stopped'
+                else:
+                    status = 'stopped'
+                results.append({'name': name.strip(), 'status': status})
+    return results
+
+
 # ─── 巡检历史管理 ────────────────────────────────────────────────────
+
+def _extract_os_type(result):
+    """从巡检结果中提取归一化的操作系统类型"""
+    if not result:
+        return ''
+    platform_str = str(result.get('platform', '') or '')
+    if not platform_str:
+        return ''
+    p = platform_str.lower()
+    if 'windows' in p:
+        return 'Windows'
+    if 'darwin' in p or 'macos' in p:
+        return 'macOS'
+    if 'linux' in p:
+        return 'Linux'
+    if 'freebsd' in p:
+        return 'FreeBSD'
+    if 'aix' in p:
+        return 'AIX'
+    if 'solaris' in p or 'sunos' in p:
+        return 'Solaris'
+    # 兜底：取第一个词
+    first = platform_str.split()[0] if platform_str.split() else platform_str
+    return first[:20]
+
 
 def _get_history_db_path():
     """获取历史数据库路径"""
@@ -1473,9 +1884,10 @@ def _get_history_db_path():
 
 
 def _init_history_db():
-    """初始化巡检历史数据库表"""
+    """初始化巡检历史数据库表（含旧库补列与 os_type 回填，幂等）"""
     db_path = _get_history_db_path()
     conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS server_inspection_history (
@@ -1492,15 +1904,38 @@ def _init_history_db():
             issues_json TEXT,
             report_path TEXT,
             result_json TEXT,
+            os_type TEXT,
             inspect_time TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # 迁移：为旧库补充 os_type 列
+    cols = [r['name'] for r in cursor.execute("PRAGMA table_info(server_inspection_history)").fetchall()]
+    if 'os_type' not in cols:
+        cursor.execute("ALTER TABLE server_inspection_history ADD COLUMN os_type TEXT")
+    # 迁移：为旧库补充 ai_report 列（AI 分析报告）
+    cols = [r['name'] for r in cursor.execute("PRAGMA table_info(server_inspection_history)").fetchall()]
+    if 'ai_report' not in cols:
+        cursor.execute("ALTER TABLE server_inspection_history ADD COLUMN ai_report TEXT")
+    # 回填历史数据的 os_type
+    try:
+        cursor.execute("SELECT id, result_json FROM server_inspection_history WHERE os_type IS NULL OR os_type = ''")
+        for row in cursor.fetchall():
+            rid, rj = row['id'], row['result_json']
+            try:
+                result = json.loads(rj) if rj else {}
+            except Exception:
+                result = {}
+            ot = _extract_os_type(result)
+            if ot:
+                cursor.execute("UPDATE server_inspection_history SET os_type = ? WHERE id = ?", (ot, rid))
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
 
-def save_server_inspection(host, port, result, report_path=None):
+def save_server_inspection(host, port, result, report_path=None, ai_report=None):
     """保存巡检历史到 server_history.db"""
     _init_history_db()
     db_path = _get_history_db_path()
@@ -1510,13 +1945,16 @@ def save_server_inspection(host, port, result, report_path=None):
     # 计算最大磁盘使用率
     disks = result.get('disk', [])
     disk_max = max((d.get('usage_percent', 0) for d in disks), default=0)
+    os_type = _extract_os_type(result)
+    if ai_report is None:
+        ai_report = result.get('ai_report', '')
 
     cursor.execute("""
         INSERT INTO server_inspection_history
         (host, port, hostname, health_score, health_status,
          cpu_usage, memory_usage, disk_usage_max, issues_count,
-         issues_json, report_path, result_json, inspect_time)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         issues_json, report_path, result_json, os_type, ai_report, inspect_time)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         host, int(port),
         result.get('hostname', ''),
@@ -1529,6 +1967,8 @@ def save_server_inspection(host, port, result, report_path=None):
         json.dumps(result.get('issues', []), ensure_ascii=False),
         report_path or '',
         json.dumps(result, ensure_ascii=False, default=str),
+        os_type,
+        ai_report or '',
         datetime.now().isoformat(),
     ))
 
@@ -1538,37 +1978,105 @@ def save_server_inspection(host, port, result, report_path=None):
     return record_id
 
 
-def get_server_inspection_history(host=None, limit=50):
-    """获取巡检历史列表"""
+def get_server_inspection_history(host=None, limit=50, keyword=None, os_type=None,
+                                  status=None, has_issues=None, date_from=None, date_to=None,
+                                  offset=0):
+    """获取巡检历史列表，支持多维度筛选
+
+    status: healthy(>=80) / warning(60-79) / critical(<60)
+    has_issues: 仅返回存在问题的记录
+    返回 {'history': [...], 'counts': {total, healthy, warning, critical, has_issues}}
+    """
     _init_history_db()
     db_path = _get_history_db_path()
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
+    # 基础筛选（不含状态/问题维度，用于统计各状态计数）
+    base_where = []
+    base_params = []
     if host:
-        cursor.execute("""
-            SELECT id, host, port, hostname, health_score, health_status,
-                   cpu_usage, memory_usage, disk_usage_max, issues_count,
-                   report_path, inspect_time
-            FROM server_inspection_history
-            WHERE host = ?
-            ORDER BY inspect_time DESC
-            LIMIT ?
-        """, (host, limit))
-    else:
-        cursor.execute("""
-            SELECT id, host, port, hostname, health_score, health_status,
-                   cpu_usage, memory_usage, disk_usage_max, issues_count,
-                   report_path, inspect_time
-            FROM server_inspection_history
-            ORDER BY inspect_time DESC
-            LIMIT ?
-        """, (limit,))
+        base_where.append("host = ?")
+        base_params.append(host)
+    if keyword:
+        kw = f"%{keyword}%"
+        base_where.append("(hostname LIKE ? OR host LIKE ? OR issues_json LIKE ?)")
+        base_params.extend([kw, kw, kw])
+    if os_type:
+        base_where.append("os_type = ?")
+        base_params.append(os_type)
+    if date_from:
+        base_where.append("inspect_time >= ?")
+        base_params.append(date_from)
+    if date_to:
+        base_where.append("inspect_time <= ?")
+        base_params.append(date_to)
+
+    base_sql = (" WHERE " + " AND ".join(base_where)) if base_where else " WHERE 1=1"
+
+    # 统计各状态数量（用于前端筛选卡片）
+    counts = {'total': 0, 'healthy': 0, 'warning': 0, 'critical': 0, 'has_issues': 0}
+    try:
+        cursor.execute(f"SELECT COUNT(*) AS cnt FROM server_inspection_history {base_sql}", base_params)
+        counts['total'] = cursor.fetchone()['cnt']
+        cursor.execute(f"SELECT COUNT(*) AS cnt FROM server_inspection_history {base_sql} AND health_score >= 80", base_params)
+        counts['healthy'] = cursor.fetchone()['cnt']
+        cursor.execute(f"SELECT COUNT(*) AS cnt FROM server_inspection_history {base_sql} AND health_score >= 60 AND health_score < 80", base_params)
+        counts['warning'] = cursor.fetchone()['cnt']
+        cursor.execute(f"SELECT COUNT(*) AS cnt FROM server_inspection_history {base_sql} AND health_score < 60", base_params)
+        counts['critical'] = cursor.fetchone()['cnt']
+        cursor.execute(f"SELECT COUNT(*) AS cnt FROM server_inspection_history {base_sql} AND issues_count > 0", base_params)
+        counts['has_issues'] = cursor.fetchone()['cnt']
+    except Exception:
+        pass
+
+    # 状态/问题维度筛选
+    where = list(base_where)
+    params = list(base_params)
+    if status == 'healthy':
+        where.append("health_score >= 80")
+    elif status == 'warning':
+        where.append("health_score >= 60 AND health_score < 80")
+    elif status == 'critical':
+        where.append("health_score < 60")
+    if has_issues:
+        where.append("issues_count > 0")
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+
+    cursor.execute(f"""
+        SELECT id, host, port, hostname, health_score, health_status,
+               cpu_usage, memory_usage, disk_usage_max, issues_count,
+               report_path, inspect_time, os_type, ai_report
+        FROM server_inspection_history
+        {where_sql}
+        ORDER BY inspect_time DESC
+        LIMIT ? OFFSET ?
+    """, params + [limit, offset])
 
     rows = cursor.fetchall()
     conn.close()
-    return [dict(row) for row in rows]
+    return {
+        'history': [dict(row) for row in rows],
+        'counts': counts,
+    }
+
+
+def get_server_inspection_os_types():
+    """获取历史记录中出现的所有操作系统类型"""
+    _init_history_db()
+    db_path = _get_history_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT DISTINCT os_type FROM server_inspection_history
+        WHERE os_type IS NOT NULL AND os_type != ''
+        ORDER BY os_type
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    return [r['os_type'] for r in rows]
 
 
 def get_server_inspection_detail(record_id):

@@ -109,7 +109,9 @@ def _record_inspection(db_type, db_info, ret, report_path):
             duration=0,
             # 把问题明细一并落库，供「数据库巡检历史 → 问题列表」展示；
             # 未取到问题时传 None，避免误记为“0 个问题”。
-            auto_analyze=issues or None
+            auto_analyze=issues or None,
+            # 来源标记：定时链路在 db_info 里塞 'scheduled'，其余默认人工。
+            trigger_type=db_info.get('trigger_type') or 'manual'
         )
     except Exception as e:
         import logging
@@ -355,6 +357,26 @@ def run_oracle_full(db_info, inspector_name, ssh_info=None):
         args.ssh_pass = ''
         args.ssh_key  = ''
         args.ssh_key_password = ''
+    # Zabbix 系统资源采集目标：巡检漏斗已把当次指定 / 数据源绑定的目标注入
+    # ssh_info 透传袋；报告在 single_inspection 内部渲染，目标必须随 args 带入，
+    # 在 OS 采集步骤完成 Zabbix 覆盖（getData 链路口径一致）。
+    args.zabbix_host = (ssh_info or {}).get('zabbix_host', '') or ''
+    args.zabbix_hostname = (ssh_info or {}).get('zabbix_hostname', '') or ''
+    args.syscollect_mode = (ssh_info or {}).get('syscollect_mode', '') or ''
+    args.zabbix_source = (ssh_info or {}).get('zabbix_source', '') or ''
+    # 直接调用方（API / AI 助手 / CLI）没有经过漏斗注入时，按数据源绑定兜底解析；
+    # 未绑定的数据源直接跳过，不联网探测（与漏斗同一口径）。
+    if not (args.zabbix_host or args.zabbix_hostname) \
+            and args.syscollect_mode not in ('ssh', 'none'):
+        try:
+            from modules.zabbix.binding import resolve_inspection_target
+            _zi, _zsrc = resolve_inspection_target(db_info)
+            if _zi and (_zi.get('host_ip') or _zi.get('hostname')):
+                args.zabbix_host = _zi.get('host_ip') or ''
+                args.zabbix_hostname = _zi.get('hostname') or ''
+                args.zabbix_source = _zsrc
+        except Exception as _zerr:
+            print('[WARN] Zabbix 采集目标解析失败: %s' % _zerr)
     # 输出目录
     args.output     = str(paths.REPORTS_DIR)
     args.zip        = False

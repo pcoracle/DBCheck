@@ -14,6 +14,7 @@ import os
 import re
 import datetime
 from modules.core import paths
+from modules.core.ai_text import normalize_ai_text, parse_md_table, SOFT_BREAK
 from typing import Dict, Any, Optional, List, Tuple
 
 try:
@@ -92,6 +93,58 @@ def _add_text(doc, text, size=None, color=None, bold=False):
         run.font.color.rgb = color
     if bold:
         run.bold = True
+    return p
+
+# AWR 标准章节（用于数据完整性检查）
+_AWR_CHAPTER_KEYS = [
+    'load_profile', 'instance_efficiency', 'time_model', 'fg_wait_events',
+    'bg_wait_events', 'latch_stats', 'file_io', 'tablespace_io',
+    'segment_stats', 'undo_stats', 'redo_stats', 'sga_memory',
+    'memory_stats', 'service_stats', 'ash', 'top_sql',
+    'sql_plan_changes', 'object_stats', 'cache_fusion',
+]
+
+
+def _count_data_sections(awr_data):
+    """统计实际含有数据的 AWR 章节数量, 用于判断数据完整性"""
+    populated = []
+    for k in _AWR_CHAPTER_KEYS:
+        v = awr_data.get(k)
+        if isinstance(v, dict):
+            # 字典内包含（非空）表格数据时视为该章节有数据
+            if v and any(isinstance(x, (dict, list)) and x for x in v.values()):
+                populated.append(k)
+        elif isinstance(v, list):
+            if v:
+                populated.append(k)
+        elif v:
+            populated.append(k)
+    return populated
+
+
+def _render_data_warning(doc, populated):
+    """在封面后渲染黄色数据完整性警告（数据章节数 < 5 时触发）"""
+    shown = ', '.join(populated[:8]) if populated else '无'
+    body = (
+        f'⚠ 数据完整性警告: AWR 源数据不完整，本报告仅包含 {len(populated)} 个标准章节({shown})。'
+        '该报告可能是由“回退视图”方案生成，缺少 实例效率 / Time Model / Top SQL / ASH / Advisory '
+        '等关键章节。建议改用 SYSDBA 连接重新生成 AWR 报告，或上传完整的 AWR HTML 报告以获得全部数据。'
+    )
+    p = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(6)
+    p.paragraph_format.space_after = Pt(6)
+    try:
+        # 底纹挂在段落已有的 pPr 上：另插一个 pPr 会变成两个 pPr（非法结构），
+        # 且命名空间必须声明在 w:shd 自身，否则 lxml 解析失败、黄色底纹静默丢失。
+        ppr = p._p.get_or_add_pPr()
+        ppr.append(parse_xml(
+            f'<w:shd {nsdecls("w")} w:val="clear" w:color="auto" w:fill="FFF3CD"/>'))
+    except Exception:
+        pass
+    run = p.add_run(body)
+    run.font.size = Pt(10.5)
+    run.font.bold = True
+    run.font.color.rgb = RGBColor(133, 100, 4)
     return p
 
 # ── 章节渲染函数 ──────────────────────────────────────────────────────────
@@ -392,12 +445,16 @@ def _preprocess_ai_markdown(text):
     """预处理 AI 生成的 Markdown 文本，返回清理后的标准 Markdown。
 
     处理规则：
+    0. 先过 core.ai_text.normalize_ai_text()：模型常把 Markdown 与 HTML/XML 混着写
+       （<br> / <sql>…</sql> / <table>），不翻译就会把这些标签原样写进正文
     1. 删除整行 **xxx**（无数字编号，如 **Oracle数据库性能优化建议（按优先级排序）**）
     2. **N. xxx** → ## 16.N xxx（二级标题，自动编号）
     3. 其他行内 **xxx** → 去掉 ** 标记
     4. 合并连续空行
     5. 去掉末尾多余空行
     """
+    # 规则0：HTML/XML 标签 → Markdown；软换行（\x0b）还原成硬换行
+    text = normalize_ai_text(text).replace(SOFT_BREAK, '\n')
     lines = text.split('\n')
     result = []
     heading_counter = 0
@@ -522,6 +579,18 @@ def _render_markdown_to_word(doc, md_text):
                 p.runs[0].font.color.rgb = RGBColor(128, 128, 128)
             i += 1
             continue
+
+        # Markdown 表格（表头行 + |---| 分隔行）→ 真正的 Word 表格
+        if stripped.startswith('|'):
+            table = parse_md_table(lines, i)
+            if table:
+                headers, rows, i = table
+                if in_list:
+                    in_list = False
+                    doc.add_paragraph()
+                _docx_table(doc, headers, rows)
+                doc.add_paragraph()
+                continue
 
         # 表格行 | col1 | col2 |
         if stripped.startswith('|') and stripped.endswith('|'):
@@ -770,6 +839,11 @@ def build_awr_word_report(awr_data: Dict[str, Any], output_path: str = None, sou
 
     # ── 封面 ──
     _render_cover(doc, awr_data)
+
+    # ── 数据完整性检查: 章节不足时在封面后打黄色警告 ──
+    _populated = _count_data_sections(awr_data)
+    if len(_populated) < 5:
+        _render_data_warning(doc, _populated)
 
     # ── 章节序号 ──
     _section_num = 0
