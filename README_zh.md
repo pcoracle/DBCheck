@@ -39,6 +39,7 @@
 * **中文：** [README_zh.md](./README_zh.md)
 * **Issues：** https://github.com/fiyo/DBCheck/issues
 * **Discussions：** https://github.com/fiyo/DBCheck/discussions
+* **Wiki：** [变更点与新旧版本功能对比](../../wiki)
 
 ---
 

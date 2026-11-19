@@ -39,6 +39,7 @@ A Star helps more database engineers discover the project and is one of the simp
 * **中文:** [README_zh.md](./README_zh.md)
 * **Issues:** https://github.com/fiyo/DBCheck/issues
 * **Discussions:** https://github.com/fiyo/DBCheck/discussions
+* **Wiki:** [What's new — feature changelog & version diff](../../wiki)
 
 ---
 
